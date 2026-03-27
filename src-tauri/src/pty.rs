@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize, MasterPty, Child};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -24,6 +24,8 @@ struct PtyExitPayload {
 
 struct PtyInstance {
     writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send + Sync>,
     child_pid: Option<u32>,
 }
 
@@ -79,6 +81,7 @@ pub fn create_pty(
 
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+    let master = pair.master;
 
     // Channel + flush 定时器实现 16ms 批量缓冲
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -125,14 +128,23 @@ pub fn create_pty(
                         });
                     }
 
-                    // 清理并发送退出事件
-                    {
+                    // 获取退出码并清理
+                    let exit_code = {
                         let mut instances = instances_clone.lock().unwrap();
-                        instances.remove(&pty_id_for_reader);
-                    }
+                        if let Some(mut inst) = instances.remove(&pty_id_for_reader) {
+                            inst.child.try_wait()
+                                .ok()
+                                .flatten()
+                                .map(|status| status.exit_code() as i32)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        }
+                    };
+
                     let _ = app_flush.emit("pty-exit", PtyExitPayload {
                         pty_id: pty_id_for_reader,
-                        exit_code: 0,
+                        exit_code,
                     });
                     return;
                 }
@@ -154,6 +166,8 @@ pub fn create_pty(
         let mut instances = state.instances.lock().unwrap();
         instances.insert(pty_id, PtyInstance {
             writer,
+            master,
+            child,
             child_pid,
         });
     }
@@ -170,10 +184,12 @@ pub fn write_pty(state: tauri::State<'_, PtyManager>, pty_id: u32, data: String)
 }
 
 #[tauri::command]
-pub fn resize_pty(_pty_id: u32, _cols: u16, _rows: u16) -> Result<(), String> {
-    // resize 需要 MasterPty 引用，当前简化实现先跳过
-    // 实际可通过存储 master Arc 或使用 ConPTY API 实现
-    Ok(())
+pub fn resize_pty(state: tauri::State<'_, PtyManager>, pty_id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    let instances = state.instances.lock().unwrap();
+    let instance = instances.get(&pty_id).ok_or("PTY not found")?;
+    instance.master
+        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
