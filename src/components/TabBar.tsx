@@ -11,12 +11,12 @@ function getTabTitle(tab: TerminalTab): string {
 interface Props {
   projectId: string;
   onNewTab: () => void;
+  onCloseTab: (tabId: string) => void;
 }
 
-export function TabBar({ projectId, onNewTab }: Props) {
+export function TabBar({ projectId, onNewTab, onCloseTab }: Props) {
   const projectStates = useAppStore((s) => s.projectStates);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const removeTab = useAppStore((s) => s.removeTab);
   const ps = projectStates.get(projectId);
   if (!ps) return null;
 
@@ -38,7 +38,7 @@ export function TabBar({ projectId, onNewTab }: Props) {
               className="ml-1 text-gray-600 hover:text-white"
               onClick={(e) => {
                 e.stopPropagation();
-                removeTab(projectId, tab.id);
+                onCloseTab(tab.id);
               }}
             >
               ✕

@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppStore, genId } from '../store';
+import { useAppStore, genId, collectPtyIds } from '../store';
 import { TabBar } from './TabBar';
 import { SplitLayout } from './SplitLayout';
 import type { TerminalTab, PaneState, SplitNode } from '../types';
@@ -38,8 +38,20 @@ export function TerminalArea({ projectId, projectPath }: Props) {
   const projectStates = useAppStore((s) => s.projectStates);
   const addTab = useAppStore((s) => s.addTab);
   const updateTabLayout = useAppStore((s) => s.updateTabLayout);
+  const removeTab = useAppStore((s) => s.removeTab);
   const ps = projectStates.get(projectId);
   const activeTab = ps?.tabs.find((t) => t.id === ps.activeTabId);
+
+  const handleCloseTab = useCallback(async (tabId: string) => {
+    const tab = ps?.tabs.find(t => t.id === tabId);
+    if (tab) {
+      const ptyIds = collectPtyIds(tab.splitLayout);
+      for (const id of ptyIds) {
+        await invoke('kill_pty', { ptyId: id });
+      }
+    }
+    removeTab(projectId, tabId);
+  }, [ps, projectId, removeTab]);
 
   const handleNewTab = useCallback(async () => {
     const shell = config.availableShells.find((s) => s.name === config.defaultShell)
@@ -100,7 +112,7 @@ export function TerminalArea({ projectId, projectPath }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-[#0d0d1a]">
-      <TabBar projectId={projectId} onNewTab={handleNewTab} />
+      <TabBar projectId={projectId} onNewTab={handleNewTab} onCloseTab={handleCloseTab} />
 
       <div className="flex-1 overflow-hidden relative">
         {ps?.tabs.map((tab) => (
