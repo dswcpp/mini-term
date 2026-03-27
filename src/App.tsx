@@ -20,7 +20,6 @@ export function App() {
   useEffect(() => {
     invoke<AppConfig>('load_config').then((cfg) => {
       setConfig(cfg);
-      // 仅初始化 projectState（不调用 addProject 避免重复）
       const { projectStates } = useAppStore.getState();
       const newStates = new Map(projectStates);
       for (const p of cfg.projects) {
@@ -45,9 +44,10 @@ export function App() {
     }
   }, [updatePaneStatusByPty]));
 
+  const activeProject = config.projects.find((p) => p.id === activeProjectId);
+
   return (
     <div className="flex flex-col h-full">
-      {/* 顶部工具栏 */}
       <div className="flex items-center gap-4 px-4 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <span className="font-semibold tracking-wide text-[var(--accent)] text-sm" style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}>
@@ -72,33 +72,26 @@ export function App() {
         </div>
       </div>
 
-      {/* 主体三栏 */}
       <div className="flex-1 overflow-hidden">
         <Allotment>
-          {/* 左栏：项目列表 */}
           <Allotment.Pane preferredSize={200} minSize={140} maxSize={350}>
             <ProjectList />
           </Allotment.Pane>
 
-          {/* 中栏：文件树 */}
           <Allotment.Pane preferredSize={280} minSize={180}>
             <FileTree />
           </Allotment.Pane>
 
-          {/* 右栏：终端 + AI 历史 */}
           <Allotment.Pane>
             <Allotment>
               <Allotment.Pane>
-                {(() => {
-                  const activeProject = config.projects.find((p) => p.id === activeProjectId);
-                  return activeProject ? (
-                    <TerminalArea projectId={activeProject.id} projectPath={activeProject.path} />
-                  ) : (
-                    <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
-                      请先在左栏添加项目
-                    </div>
-                  );
-                })()}
+                {activeProject ? (
+                  <TerminalArea projectId={activeProject.id} projectPath={activeProject.path} />
+                ) : (
+                  <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
+                    请先在左栏添加项目
+                  </div>
+                )}
               </Allotment.Pane>
 
               {aiPanelVisible && (

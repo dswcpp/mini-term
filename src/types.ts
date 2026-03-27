@@ -21,7 +21,6 @@ export interface ShellConfig {
 // === 运行时状态 ===
 
 export type PaneStatus = 'idle' | 'running' | 'ai-working' | 'error';
-export type TabStatus = PaneStatus;
 
 export interface ProjectState {
   id: string;
@@ -33,7 +32,7 @@ export interface TerminalTab {
   id: string;
   customTitle?: string;
   splitLayout: SplitNode;
-  status: TabStatus;
+  status: PaneStatus;
 }
 
 export type SplitNode =

@@ -71,7 +71,6 @@ pub fn create_pty(
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let child_pid = child.process_id();
 
-    // 分配 ID
     let pty_id = {
         let mut next = state.next_id.lock().unwrap();
         let id = *next;
@@ -88,7 +87,6 @@ pub fn create_pty(
     let instances_clone = state.instances.clone();
     let pty_id_for_reader = pty_id;
 
-    // 读线程：从 PTY 阻塞读取，发到 channel
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -104,7 +102,6 @@ pub fn create_pty(
         }
     });
 
-    // Flush 线程：每 16ms 批量发送
     let app_flush = app.clone();
     thread::spawn(move || {
         let mut pending = Vec::new();
@@ -113,14 +110,12 @@ pub fn create_pty(
             match rx.recv_timeout(Duration::from_millis(16)) {
                 Ok(data) => {
                     pending.extend(data);
-                    // 继续收集当前可用的数据
                     while let Ok(more) = rx.try_recv() {
                         pending.extend(more);
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // 刷新剩余数据
                     if !pending.is_empty() {
                         let data = String::from_utf8_lossy(&pending).into_owned();
                         let _ = app_flush.emit("pty-output", PtyOutputPayload {
@@ -128,7 +123,6 @@ pub fn create_pty(
                         });
                     }
 
-                    // 获取退出码并清理
                     let exit_code = {
                         let mut instances = instances_clone.lock().unwrap();
                         if let Some(mut inst) = instances.remove(&pty_id_for_reader) {
@@ -150,7 +144,6 @@ pub fn create_pty(
                 }
             }
 
-            // 发送已缓冲数据
             if !pending.is_empty() {
                 let data = String::from_utf8_lossy(&pending).into_owned();
                 let _ = app_flush.emit("pty-output", PtyOutputPayload {
@@ -161,7 +154,6 @@ pub fn create_pty(
         }
     });
 
-    // 存储实例
     {
         let mut instances = state.instances.lock().unwrap();
         instances.insert(pty_id, PtyInstance {

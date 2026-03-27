@@ -74,8 +74,8 @@ impl AISessionReader for ClaudeSessionReader {
                 let path = entry.path();
                 if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
                     let id = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                    let message_count = fs::read_to_string(&path)
-                        .map(|c| c.lines().count())
+                    let message_count = fs::File::open(&path)
+                        .map(|f| std::io::BufRead::lines(std::io::BufReader::new(f)).count())
                         .unwrap_or(0);
                     let start_time = entry.metadata().ok()
                         .and_then(|m| m.modified().ok())

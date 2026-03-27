@@ -174,6 +174,16 @@ export const useAppStore = create<AppStore>((set) => ({
 
   updatePaneStatusByPty: (ptyId, status) =>
     set((state) => {
+      // 快速检查：是否有任何 pane 包含此 ptyId
+      let found = false;
+      for (const ps of state.projectStates.values()) {
+        if (found) break;
+        for (const tab of ps.tabs) {
+          if (collectPtyIds(tab.splitLayout).includes(ptyId)) { found = true; break; }
+        }
+      }
+      if (!found) return state;
+
       const newStates = new Map(state.projectStates);
       let changed = false;
       for (const [pid, ps] of newStates) {

@@ -73,8 +73,6 @@ pub fn start_monitor(app: AppHandle, pty_manager: crate::pty::PtyManager) {
         let mut prev_statuses: HashMap<u32, String> = HashMap::new();
 
         loop {
-            thread::sleep(Duration::from_millis(500));
-
             let pids = pty_manager.get_pids();
 
             for (pty_id, child_pid) in &pids {
@@ -96,6 +94,9 @@ pub fn start_monitor(app: AppHandle, pty_manager: crate::pty::PtyManager) {
             }
 
             prev_statuses.retain(|id, _| pids.contains_key(id));
+
+            let sleep_ms = if pids.is_empty() { 2000 } else { 500 };
+            thread::sleep(Duration::from_millis(sleep_ms));
         }
     });
 }

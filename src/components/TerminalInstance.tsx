@@ -5,6 +5,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { PtyOutputPayload } from '../types';
+import { showContextMenu } from '../utils/contextMenu';
 import '@xterm/xterm/css/xterm.css';
 
 interface Props {
@@ -16,7 +17,6 @@ interface Props {
 
 export function TerminalInstance({ ptyId, paneId, onSplit, onClose }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -65,7 +65,6 @@ export function TerminalInstance({ ptyId, paneId, onSplit, onClose }: Props) {
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
 
-    // WebGL 渲染加速
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => webgl.dispose());
@@ -78,47 +77,47 @@ export function TerminalInstance({ ptyId, paneId, onSplit, onClose }: Props) {
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // 通知 Rust 终端尺寸
     invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
 
-    // 用户输入 -> Rust PTY
     const onDataDisposable = term.onData((data) => {
       invoke('write_pty', { ptyId, data });
     });
 
-    // Rust PTY 输出 -> xterm
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     listen<PtyOutputPayload>('pty-output', (event) => {
       if (event.payload.ptyId === ptyId) {
         term.write(event.payload.data);
       }
     }).then((fn) => {
-      unlisten = fn;
+      if (cancelled) fn();
+      else unlisten = fn;
     });
 
-    // 终端尺寸变化
     const onResizeDisposable = term.onResize(({ cols, rows }) => {
       invoke('resize_pty', { ptyId, cols, rows });
     });
 
-    // 容器尺寸变化时 fit
+    let rafId: number;
     const observer = new ResizeObserver(() => {
-      fitAddon.fit();
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => fitAddon.fit());
     });
     observer.observe(containerRef.current);
 
     return () => {
+      cancelled = true;
+      unlisten?.();
+      cancelAnimationFrame(rafId);
       observer.disconnect();
       onDataDisposable.dispose();
       onResizeDisposable.dispose();
-      unlisten?.();
       term.dispose();
     };
   }, [ptyId]);
 
   return (
     <div
-      ref={wrapperRef}
       className="w-full h-full relative"
       onDragEnter={(e) => {
         e.preventDefault();
@@ -129,7 +128,7 @@ export function TerminalInstance({ ptyId, paneId, onSplit, onClose }: Props) {
         e.dataTransfer.dropEffect = 'copy';
       }}
       onDragLeave={(e) => {
-        if (wrapperRef.current && !wrapperRef.current.contains(e.relatedTarget as Node)) {
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
           setDragOver(false);
         }
       }}
@@ -145,43 +144,12 @@ export function TerminalInstance({ ptyId, paneId, onSplit, onClose }: Props) {
         e.preventDefault();
         if (!paneId || !onSplit) return;
 
-        const menu = document.createElement('div');
-        menu.className = 'fixed ctx-menu text-xs';
-        menu.style.left = `${e.clientX}px`;
-        menu.style.top = `${e.clientY}px`;
-
-        const items = [
-          { label: '向右分屏', dir: 'horizontal' as const },
-          { label: '向下分屏', dir: 'vertical' as const },
-        ];
-
-        items.forEach(({ label, dir }) => {
-          const item = document.createElement('div');
-          item.className = 'ctx-menu-item';
-          item.textContent = label;
-          item.onclick = () => {
-            onSplit(paneId, dir);
-            menu.remove();
-          };
-          menu.appendChild(item);
-        });
-
-        const sep = document.createElement('div');
-        sep.className = 'ctx-menu-sep';
-        menu.appendChild(sep);
-
-        const closeItem = document.createElement('div');
-        closeItem.className = 'ctx-menu-item danger';
-        closeItem.textContent = '关闭面板';
-        closeItem.onclick = () => {
-          if (onClose) onClose(paneId);
-          menu.remove();
-        };
-        menu.appendChild(closeItem);
-
-        document.body.appendChild(menu);
-        const dismiss = () => { menu.remove(); document.removeEventListener('click', dismiss); };
-        setTimeout(() => document.addEventListener('click', dismiss), 0);
+        showContextMenu(e.clientX, e.clientY, [
+          { label: '向右分屏', onClick: () => onSplit(paneId, 'horizontal') },
+          { label: '向下分屏', onClick: () => onSplit(paneId, 'vertical') },
+          { separator: true },
+          { label: '关闭面板', danger: true, onClick: () => onClose?.(paneId) },
+        ]);
       }}
     >
       {/* xterm.js 渲染容器 */}

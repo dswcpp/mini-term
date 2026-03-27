@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, genId, collectPtyIds } from '../store';
 import { TabBar } from './TabBar';
 import { SplitLayout } from './SplitLayout';
+import { showContextMenu } from '../utils/contextMenu';
 import type { TerminalTab, PaneState, SplitNode, ShellConfig } from '../types';
 
 interface Props {
@@ -98,25 +99,14 @@ export function TerminalArea({ projectId, projectPath }: Props) {
   }, [projectId, projectPath, config, addTab]);
 
   const handleNewTabClick = useCallback((e: React.MouseEvent) => {
-    const menu = document.createElement('div');
-    menu.className = 'fixed ctx-menu text-xs';
-    menu.style.left = `${e.clientX}px`;
-    menu.style.top = `${e.clientY}px`;
-
-    config.availableShells.forEach((shell) => {
-      const item = document.createElement('div');
-      item.className = 'ctx-menu-item';
-      item.textContent = shell.name;
-      item.onclick = () => {
-        handleNewTab(shell);
-        menu.remove();
-      };
-      menu.appendChild(item);
-    });
-
-    document.body.appendChild(menu);
-    const dismiss = () => { menu.remove(); document.removeEventListener('click', dismiss); };
-    setTimeout(() => document.addEventListener('click', dismiss), 0);
+    showContextMenu(
+      e.clientX,
+      e.clientY,
+      config.availableShells.map((shell) => ({
+        label: shell.name,
+        onClick: () => handleNewTab(shell),
+      })),
+    );
   }, [config.availableShells, handleNewTab]);
 
   const handleSplitPane = useCallback(
