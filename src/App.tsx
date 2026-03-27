@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from './store';
 import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
+import { FileTree } from './components/FileTree';
 import { useTauriEvent } from './hooks/useTauriEvent';
 import type { AppConfig, PtyStatusChangePayload, PtyExitPayload, PaneStatus } from './types';
 
@@ -62,9 +63,7 @@ export function App() {
 
           {/* 中栏：文件树 */}
           <Allotment.Pane preferredSize={280} minSize={180}>
-            <div className="h-full bg-[#16162a] p-2 text-xs text-gray-400">
-              文件树占位
-            </div>
+            <FileTree />
           </Allotment.Pane>
 
           {/* 右栏：终端 + AI 历史 */}
