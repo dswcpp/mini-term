@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Allotment } from 'allotment';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from './store';
@@ -6,12 +6,14 @@ import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
 import { FileTree } from './components/FileTree';
 import { AIHistoryPanel } from './components/AIHistoryPanel';
+import { TerminalConfigModal } from './components/TerminalConfigModal';
 import { useTauriEvent } from './hooks/useTauriEvent';
 import type { AppConfig, PtyStatusChangePayload, PtyExitPayload, PaneStatus } from './types';
 
 export function App() {
   const aiPanelVisible = useAppStore((s) => s.aiPanelVisible);
   const toggleAiPanel = useAppStore((s) => s.toggleAiPanel);
+  const [configOpen, setConfigOpen] = useState(false);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
@@ -56,7 +58,7 @@ export function App() {
         <div className="w-px h-3.5 bg-[var(--border-default)]" />
         <div className="flex items-center gap-3 text-[var(--text-muted)]" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150">终端</span>
-          <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150">设置</span>
+          <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150" onClick={() => setConfigOpen(true)}>设置</span>
           <span
             className={`cursor-pointer transition-colors duration-150 ${aiPanelVisible ? 'text-[var(--accent)]' : 'hover:text-[var(--text-primary)]'}`}
             onClick={toggleAiPanel}
@@ -103,6 +105,7 @@ export function App() {
           </Allotment.Pane>
         </Allotment>
       </div>
+      <TerminalConfigModal open={configOpen} onClose={() => setConfigOpen(false)} />
     </div>
   );
 }

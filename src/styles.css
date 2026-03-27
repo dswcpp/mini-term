@@ -120,6 +120,10 @@ html, body, #root {
   animation: subtleGlow 2s ease-in-out infinite;
 }
 
+.animate-slide-in {
+  animation: slideIn 0.12s ease-out;
+}
+
 /* ===== Context menu ===== */
 .ctx-menu {
   background: var(--bg-overlay);

@@ -31,19 +31,54 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             projects: vec![],
-            default_shell: "pwsh".to_string(),
-            available_shells: vec![
-                ShellConfig { name: "pwsh".into(), command: "pwsh".into(), args: None },
-                ShellConfig { name: "cmd".into(), command: "cmd".into(), args: None },
-                ShellConfig { name: "powershell".into(), command: "powershell".into(), args: None },
-                ShellConfig {
-                    name: "git bash".into(),
-                    command: "C:\\Program Files\\Git\\bin\\bash.exe".into(),
-                    args: Some(vec!["--login".into(), "-i".into()]),
-                },
-            ],
+            default_shell: default_shell_name(),
+            available_shells: default_shells(),
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn default_shell_name() -> String { "cmd".into() }
+
+#[cfg(target_os = "macos")]
+fn default_shell_name() -> String { "zsh".into() }
+
+#[cfg(target_os = "linux")]
+fn default_shell_name() -> String { "bash".into() }
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn default_shell_name() -> String { "sh".into() }
+
+#[cfg(target_os = "windows")]
+fn default_shells() -> Vec<ShellConfig> {
+    vec![
+        ShellConfig { name: "cmd".into(), command: "cmd".into(), args: None },
+        ShellConfig { name: "powershell".into(), command: "powershell".into(), args: None },
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn default_shells() -> Vec<ShellConfig> {
+    vec![
+        ShellConfig { name: "zsh".into(), command: "/bin/zsh".into(), args: Some(vec!["--login".into()]) },
+        ShellConfig { name: "bash".into(), command: "/bin/bash".into(), args: Some(vec!["--login".into()]) },
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn default_shells() -> Vec<ShellConfig> {
+    vec![
+        ShellConfig { name: "bash".into(), command: "/bin/bash".into(), args: None },
+        ShellConfig { name: "zsh".into(), command: "/usr/bin/zsh".into(), args: None },
+        ShellConfig { name: "sh".into(), command: "/bin/sh".into(), args: None },
+    ]
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn default_shells() -> Vec<ShellConfig> {
+    vec![
+        ShellConfig { name: "sh".into(), command: "/bin/sh".into(), args: None },
+    ]
 }
 
 fn config_path(app: &AppHandle) -> PathBuf {
@@ -76,7 +111,7 @@ mod tests {
     fn default_config_has_shells() {
         let config = AppConfig::default();
         assert!(!config.available_shells.is_empty());
-        assert_eq!(config.default_shell, "pwsh");
+        assert!(!config.default_shell.is_empty());
     }
 
     #[test]

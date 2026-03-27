@@ -82,13 +82,8 @@ interface AppStore {
 export const useAppStore = create<AppStore>((set) => ({
   config: {
     projects: [],
-    defaultShell: 'pwsh',
-    availableShells: [
-      { name: 'pwsh', command: 'pwsh' },
-      { name: 'cmd', command: 'cmd' },
-      { name: 'powershell', command: 'powershell' },
-      { name: 'git bash', command: 'C:\\Program Files\\Git\\bin\\bash.exe', args: ['--login', '-i'] },
-    ],
+    defaultShell: '',
+    availableShells: [],
   },
   setConfig: (config) => set({ config }),
 
