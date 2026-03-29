@@ -143,6 +143,44 @@ export async function restoreLayout(
   });
 }
 
+// 防抖保存布局到 config
+let saveLayoutTimer: ReturnType<typeof setTimeout> | undefined;
+
+export function saveLayoutToConfig(projectId: string) {
+  clearTimeout(saveLayoutTimer);
+  saveLayoutTimer = setTimeout(() => {
+    const { config, projectStates } = useAppStore.getState();
+    const ps = projectStates.get(projectId);
+    if (!ps) return;
+    const savedLayout = serializeLayout(ps);
+    const newConfig = {
+      ...config,
+      projects: config.projects.map((p) =>
+        p.id === projectId ? { ...p, savedLayout } : p
+      ),
+    };
+    useAppStore.getState().setConfig(newConfig);
+    invoke('save_config', { config: newConfig });
+  }, 500);
+}
+
+// 立即保存（不防抖，用于 beforeunload）
+export function flushLayoutToConfig(projectId: string) {
+  clearTimeout(saveLayoutTimer);
+  const { config, projectStates } = useAppStore.getState();
+  const ps = projectStates.get(projectId);
+  if (!ps) return;
+  const savedLayout = serializeLayout(ps);
+  const newConfig = {
+    ...config,
+    projects: config.projects.map((p) =>
+      p.id === projectId ? { ...p, savedLayout } : p
+    ),
+  };
+  useAppStore.getState().setConfig(newConfig);
+  invoke('save_config', { config: newConfig });
+}
+
 interface AppStore {
   // 配置
   config: AppConfig;
