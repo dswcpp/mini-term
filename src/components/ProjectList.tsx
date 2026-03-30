@@ -1,9 +1,11 @@
 import { useCallback, useState } from 'react';
+import { Allotment } from 'allotment';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { useAppStore, genId } from '../store';
 import { StatusDot } from './StatusDot';
+import { SessionList } from './SessionList';
 import { showContextMenu } from '../utils/contextMenu';
 import type { PaneStatus, SplitNode } from '../types';
 
@@ -68,65 +70,77 @@ export function ProjectList() {
   };
 
   return (
-    <div className="h-full bg-[var(--bg-surface)] flex flex-col overflow-y-auto">
-      <div className="px-3 pt-3 pb-1.5 text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium">
-        Projects
-      </div>
-
-      <div className="flex-1 px-1.5 space-y-0.5">
-        {config.projects.map((project) => {
-          const isActive = project.id === activeProjectId;
-          const projectStatus = getProjectStatus(project.id);
-
-          return (
-            <div
-              key={project.id}
-              className={`flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] cursor-pointer text-base group transition-all duration-150 ${
-                isActive
-                  ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
-              }`}
-              onClick={() => setActiveProject(project.id)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                showContextMenu(e.clientX, e.clientY, [
-                  {
-                    label: '在文件夹中打开',
-                    onClick: () => revealItemInDir(project.path),
-                  },
-                  {
-                    label: '复制绝对路径',
-                    onClick: () => navigator.clipboard.writeText(project.path),
-                  },
-                ]);
-              }}
-              title={project.path}
-            >
-              {isActive && (
-                <span className="w-0.5 h-4 rounded-full bg-[var(--accent)] flex-shrink-0" />
-              )}
-              <span className="truncate flex-1">{project.name}</span>
-              <StatusDot status={projectStatus} />
-              <span
-                className="text-[var(--text-muted)] hover:text-[var(--color-error)] hidden group-hover:inline transition-colors text-sm"
-                onClick={(e) => handleRemoveProject(e, project.id)}
-              >
-                ✕
-              </span>
+    <div className="h-full bg-[var(--bg-surface)] flex flex-col">
+      <Allotment vertical>
+        {/* 上半部分：项目列表 */}
+        <Allotment.Pane minSize={100}>
+          <div className="h-full flex flex-col overflow-hidden">
+            <div className="px-3 pt-3 pb-1.5 text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium">
+              Projects
             </div>
-          );
-        })}
-      </div>
 
-      <div className="p-2">
-        <div
-          className="px-3 py-2 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-center text-sm text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all duration-200"
-          onClick={handleAddProject}
-        >
-          + 添加项目
-        </div>
-      </div>
+            <div className="flex-1 overflow-y-auto px-1.5 space-y-0.5">
+              {config.projects.map((project) => {
+                const isActive = project.id === activeProjectId;
+                const projectStatus = getProjectStatus(project.id);
+
+                return (
+                  <div
+                    key={project.id}
+                    className={`flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] cursor-pointer text-base group transition-all duration-150 ${
+                      isActive
+                        ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
+                    }`}
+                    onClick={() => setActiveProject(project.id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      showContextMenu(e.clientX, e.clientY, [
+                        {
+                          label: '在文件夹中打开',
+                          onClick: () => revealItemInDir(project.path),
+                        },
+                        {
+                          label: '复制绝对路径',
+                          onClick: () => navigator.clipboard.writeText(project.path),
+                        },
+                      ]);
+                    }}
+                    title={project.path}
+                  >
+                    {isActive && (
+                      <span className="w-0.5 h-4 rounded-full bg-[var(--accent)] flex-shrink-0" />
+                    )}
+                    <span className="truncate flex-1">{project.name}</span>
+                    <StatusDot status={projectStatus} />
+                    <span
+                      className="text-[var(--text-muted)] hover:text-[var(--color-error)] hidden group-hover:inline transition-colors text-sm"
+                      onClick={(e) => handleRemoveProject(e, project.id)}
+                    >
+                      ✕
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="p-2">
+              <div
+                className="px-3 py-2 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-center text-sm text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all duration-200"
+                onClick={handleAddProject}
+              >
+                + 添加项目
+              </div>
+            </div>
+          </div>
+        </Allotment.Pane>
+
+        {/* 下半部分：会话列表 */}
+        <Allotment.Pane minSize={80}>
+          <SessionList />
+        </Allotment.Pane>
+      </Allotment>
 
       {/* 删除确认弹窗 */}
       {confirmTarget && (

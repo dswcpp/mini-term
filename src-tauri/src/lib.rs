@@ -1,3 +1,4 @@
+mod ai_sessions;
 mod config;
 mod fs;
 mod process_monitor;
@@ -31,6 +32,7 @@ pub fn run() {
             fs::unwatch_directory,
             fs::create_file,
             fs::create_directory,
+            ai_sessions::get_ai_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

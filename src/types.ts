@@ -70,6 +70,15 @@ export interface PaneState {
   ptyId: number;
 }
 
+// === AI 会话 ===
+
+export interface AiSession {
+  id: string;
+  sessionType: 'claude' | 'codex';
+  title: string;
+  timestamp: string; // ISO 8601
+}
+
 // === 文件树 ===
 
 export interface FileEntry {
