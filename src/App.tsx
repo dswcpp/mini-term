@@ -87,8 +87,6 @@ export function App() {
     }, 500);
   }, [setConfig]);
 
-  const activeProject = config.projects.find((p) => p.id === activeProjectId);
-
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-4 px-4 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
@@ -123,13 +121,22 @@ export function App() {
           </Allotment.Pane>
 
           <Allotment.Pane>
-            {activeProject ? (
-              <TerminalArea projectId={activeProject.id} projectPath={activeProject.path} />
-            ) : (
-              <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
-                请先在左栏添加项目
-              </div>
-            )}
+            <div className="relative h-full">
+              {config.projects.map((project) => (
+                <div
+                  key={project.id}
+                  className="absolute inset-0"
+                  style={{ display: project.id === activeProjectId ? 'block' : 'none' }}
+                >
+                  <TerminalArea projectId={project.id} projectPath={project.path} />
+                </div>
+              ))}
+              {config.projects.length === 0 && (
+                <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
+                  请先在左栏添加项目
+                </div>
+              )}
+            </div>
           </Allotment.Pane>
         </Allotment>
       </div>

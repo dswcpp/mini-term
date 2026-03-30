@@ -133,11 +133,20 @@ export function TerminalInstance({ ptyId, paneId, shellName, status, onSplit, on
     });
     observer.observe(containerRef.current);
 
+    // 检测 display:none→block 可见性变化，触发 fit 重算尺寸
+    const visibilityObserver = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        requestAnimationFrame(() => fitAddon.fit());
+      }
+    });
+    visibilityObserver.observe(containerRef.current);
+
     return () => {
       cancelled = true;
       unlisten?.();
       cancelAnimationFrame(rafId);
       observer.disconnect();
+      visibilityObserver.disconnect();
       onDataDisposable.dispose();
       onResizeDisposable.dispose();
       term.dispose();
