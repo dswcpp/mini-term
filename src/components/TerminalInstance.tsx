@@ -226,7 +226,7 @@ export function TerminalInstance({ ptyId, paneId, shellName, status, onSplit, on
 
       {/* 终端内容区 */}
       <div
-        className="flex-1 relative"
+        className="flex-1 relative bg-[#100f0d]"
         onDragEnter={(e) => {
           e.preventDefault();
           if (isTabDrag(e)) {
@@ -276,7 +276,7 @@ export function TerminalInstance({ ptyId, paneId, shellName, status, onSplit, on
         }}
       >
         {/* xterm.js 渲染容器 */}
-        <div ref={containerRef} className="absolute inset-0" />
+        <div ref={containerRef} className="absolute top-1.5 bottom-0 left-2.5 right-0" />
 
         {/* 文件拖拽视觉提示 */}
         {dragOver && (
