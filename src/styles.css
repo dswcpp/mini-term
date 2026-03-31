@@ -53,6 +53,39 @@ html, body, #root {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.titlebar-control {
+  width: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  transition: background 0.15s ease, color 0.15s ease;
+  cursor: default;
+}
+
+.titlebar-control:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
+.titlebar-control-danger:hover {
+  background: #c42b1c;
+  color: #fff6f4;
+}
+
+.titlebar-icon {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  shape-rendering: geometricPrecision;
+}
+
 /* ===== Subtle noise texture overlay ===== */
 #root::before {
   content: '';

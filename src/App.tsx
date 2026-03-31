@@ -1,16 +1,45 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Allotment } from 'allotment';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useAppStore, restoreLayout, flushLayoutToConfig } from './store';
 import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
 import { FileTree } from './components/FileTree';
 import { SettingsModal } from './components/SettingsModal';
 import { useTauriEvent } from './hooks/useTauriEvent';
-import type { AppConfig, PtyStatusChangePayload, PtyExitPayload, PaneStatus } from './types';
+import type { AppConfig, PaneStatus, PtyExitPayload, PtyStatusChangePayload } from './types';
+
+const appWindow = getCurrentWindow();
+const isWindows = typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
+
+function TitleBarButton({
+  title,
+  danger = false,
+  onClick,
+  children,
+}: {
+  title: string;
+  danger?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      className={`titlebar-control ${danger ? 'titlebar-control-danger' : ''}`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
 
 export function App() {
   const [configOpen, setConfigOpen] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(false);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
@@ -19,54 +48,59 @@ export function App() {
   useEffect(() => {
     invoke<AppConfig>('load_config').then((cfg) => {
       setConfig(cfg);
-      // 应用 UI 字体大小
       if (cfg.uiFontSize) {
         document.documentElement.style.fontSize = `${cfg.uiFontSize}px`;
       }
+
       const { projectStates } = useAppStore.getState();
-      const newStates = new Map(projectStates);
-      for (const p of cfg.projects) {
-        if (!newStates.has(p.id)) {
-          newStates.set(p.id, { id: p.id, tabs: [], activeTabId: '' });
+      const nextStates = new Map(projectStates);
+      for (const project of cfg.projects) {
+        if (!nextStates.has(project.id)) {
+          nextStates.set(project.id, { id: project.id, tabs: [], activeTabId: '' });
         }
       }
+
       useAppStore.setState({
-        projectStates: newStates,
+        projectStates: nextStates,
         activeProjectId: cfg.projects[0]?.id ?? null,
       });
 
-      // 异步恢复各项目的终端布局（不阻塞 UI，恢复完成后 store 自动更新）
       Promise.all(
         cfg.projects
-          .filter((p) => p.savedLayout && p.savedLayout.tabs.length > 0)
-          .map((p) => restoreLayout(p.id, p.savedLayout!, p.path, cfg))
+          .filter((project) => project.savedLayout && project.savedLayout.tabs.length > 0)
+          .map((project) => restoreLayout(project.id, project.savedLayout!, project.path, cfg))
       ).catch(console.error);
     });
-  }, []);
+  }, [setConfig]);
 
-  useTauriEvent<PtyStatusChangePayload>('pty-status-change', useCallback((payload) => {
-    updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus);
-  }, [updatePaneStatusByPty]));
+  useTauriEvent<PtyStatusChangePayload>(
+    'pty-status-change',
+    useCallback((payload) => {
+      updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus);
+    }, [updatePaneStatusByPty])
+  );
 
-  useTauriEvent<PtyExitPayload>('pty-exit', useCallback((payload) => {
-    if (payload.exitCode !== 0) {
-      updatePaneStatusByPty(payload.ptyId, 'error');
-    }
-  }, [updatePaneStatusByPty]));
+  useTauriEvent<PtyExitPayload>(
+    'pty-exit',
+    useCallback((payload) => {
+      if (payload.exitCode !== 0) {
+        updatePaneStatusByPty(payload.ptyId, 'error');
+      }
+    }, [updatePaneStatusByPty])
+  );
 
-  // 关闭窗口时立即保存布局
   useEffect(() => {
     const handleBeforeUnload = () => {
-      const { activeProjectId } = useAppStore.getState();
-      if (activeProjectId) {
-        flushLayoutToConfig(activeProjectId);
+      const { activeProjectId: currentProjectId } = useAppStore.getState();
+      if (currentProjectId) {
+        flushLayoutToConfig(currentProjectId);
       }
     };
+
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
-  // 切换项目时保存前一个项目的布局
   const prevProjectRef = useRef<string | null>(null);
   useEffect(() => {
     if (prevProjectRef.current && prevProjectRef.current !== activeProjectId) {
@@ -75,30 +109,119 @@ export function App() {
     prevProjectRef.current = activeProjectId;
   }, [activeProjectId]);
 
-  // 防抖保存布局尺寸
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const saveLayoutSizes = useCallback((sizes: number[]) => {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      const cfg = useAppStore.getState().config;
-      const newConfig = { ...cfg, layoutSizes: sizes };
-      setConfig(newConfig);
-      invoke('save_config', { config: newConfig });
+      const currentConfig = useAppStore.getState().config;
+      const nextConfig = { ...currentConfig, layoutSizes: sizes };
+      setConfig(nextConfig);
+      void invoke('save_config', { config: nextConfig });
     }, 500);
   }, [setConfig]);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const syncMaximizedState = async () => {
+      const maximized = await appWindow.isMaximized();
+      if (!disposed) {
+        setIsMaximized(maximized);
+      }
+    };
+
+    void syncMaximizedState();
+    appWindow.onResized(() => {
+      void syncMaximizedState();
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    }).catch(console.error);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleWindowMinimize = useCallback(() => {
+    void appWindow.minimize();
+  }, []);
+
+  const handleWindowToggleMaximize = useCallback(() => {
+    void appWindow.toggleMaximize()
+      .then(async () => {
+        setIsMaximized(await appWindow.isMaximized());
+      })
+      .catch(console.error);
+  }, []);
+
+  const handleWindowClose = useCallback(() => {
+    void appWindow.close();
+  }, []);
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-4 px-4 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
-        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
-        <span className="font-semibold tracking-wide text-[var(--accent)] text-sm" style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}>
-          MINI-TERM
-        </span>
-        <div className="w-px h-3.5 bg-[var(--border-default)]" />
-        <div className="flex items-center gap-3 text-[var(--text-muted)]" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150" onClick={() => setConfigOpen(true)}>设置</span>
+      <div className="flex items-center gap-4 px-4 py-1.5 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none">
+        <div className="flex items-center gap-4 min-w-0" data-tauri-drag-region>
+          <span
+            className="font-semibold tracking-wide text-[var(--accent)] text-sm"
+            data-tauri-drag-region
+            style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}
+          >
+            MINI-TERM
+          </span>
+          <div className="w-px h-3.5 bg-[var(--border-default)]" data-tauri-drag-region />
         </div>
-        <div className="flex-1" />
+
+        <div className="no-drag-region flex items-center gap-3 text-[var(--text-muted)]">
+          <button
+            type="button"
+            className="cursor-pointer bg-transparent border-0 p-0 text-inherit hover:text-[var(--text-primary)] transition-colors duration-150"
+            onClick={() => setConfigOpen(true)}
+          >
+            Settings
+          </button>
+        </div>
+
+        <div className="flex-1 self-stretch" data-tauri-drag-region />
+
+        {isWindows && (
+          <div className="no-drag-region flex items-stretch self-stretch -mr-4">
+            <TitleBarButton title="Minimize" onClick={handleWindowMinimize}>
+              <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
+                <path d="M1 5h8" />
+              </svg>
+            </TitleBarButton>
+
+            <TitleBarButton
+              title={isMaximized ? 'Restore' : 'Maximize'}
+              onClick={handleWindowToggleMaximize}
+            >
+              {isMaximized ? (
+                <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
+                  <path d="M2 3h5v5H2z" />
+                  <path d="M3 1h5v5" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
+                  <path d="M2 2h6v6H2z" />
+                </svg>
+              )}
+            </TitleBarButton>
+
+            <TitleBarButton title="Close" danger onClick={handleWindowClose}>
+              <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
+                <path d="M2 2l6 6" />
+                <path d="M8 2L2 8" />
+              </svg>
+            </TitleBarButton>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-hidden">
@@ -125,15 +248,17 @@ export function App() {
                   <TerminalArea projectId={project.id} projectPath={project.path} />
                 </div>
               ))}
+
               {config.projects.length === 0 && (
                 <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
-                  请先在左栏添加项目
+                  Add a project from the left panel first.
                 </div>
               )}
             </div>
           </Allotment.Pane>
         </Allotment>
       </div>
+
       <SettingsModal open={configOpen} onClose={() => setConfigOpen(false)} />
     </div>
   );
