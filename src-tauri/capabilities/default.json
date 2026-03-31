@@ -5,6 +5,12 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-request-user-attention",
+    "core:window:allow-set-effects",
+    "core:window:allow-set-shadow",
     "opener:default",
     {
       "identifier": "opener:allow-open-path",

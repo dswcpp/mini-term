@@ -1,17 +1,28 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react';
 import { Allotment } from 'allotment';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { Effect, getCurrentWindow } from '@tauri-apps/api/window';
 import { useAppStore, restoreLayout, flushLayoutToConfig } from './store';
 import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
 import { FileTree } from './components/FileTree';
 import { SettingsModal } from './components/SettingsModal';
 import { useTauriEvent } from './hooks/useTauriEvent';
+import { applyDocumentTheme, resolveTheme } from './theme';
 import type { AppConfig, PaneStatus, PtyExitPayload, PtyStatusChangePayload } from './types';
 
 const appWindow = getCurrentWindow();
 const isWindows = typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
+const dragRegionStyle = { WebkitAppRegion: 'drag' } as CSSProperties;
+const noDragRegionStyle = { WebkitAppRegion: 'no-drag' } as CSSProperties;
 
 function TitleBarButton({
   title,
@@ -31,6 +42,7 @@ function TitleBarButton({
       aria-label={title}
       className={`titlebar-control ${danger ? 'titlebar-control-danger' : ''}`}
       onClick={onClick}
+      style={noDragRegionStyle}
     >
       {children}
     </button>
@@ -40,10 +52,13 @@ function TitleBarButton({
 export function App() {
   const [configOpen, setConfigOpen] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
+  const [isFocused, setIsFocused] = useState(true);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
   const updatePaneStatusByPty = useAppStore((s) => s.updatePaneStatusByPty);
+  const activeProjectName = config.projects.find((project) => project.id === activeProjectId)?.name ?? 'Workspace';
+  const resolvedTheme = resolveTheme(config.theme);
 
   useEffect(() => {
     invoke<AppConfig>('load_config').then((cfg) => {
@@ -122,7 +137,8 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | undefined;
+    let unlistenResize: (() => void) | undefined;
+    let unlistenFocus: (() => void) | undefined;
 
     const syncMaximizedState = async () => {
       const maximized = await appWindow.isMaximized();
@@ -131,22 +147,93 @@ export function App() {
       }
     };
 
+    const syncFocusedState = async () => {
+      const focused = await appWindow.isFocused();
+      if (!disposed) {
+        setIsFocused(focused);
+      }
+    };
+
     void syncMaximizedState();
+    void syncFocusedState();
+
     appWindow.onResized(() => {
       void syncMaximizedState();
     }).then((fn) => {
       if (disposed) {
         fn();
       } else {
-        unlisten = fn;
+        unlistenResize = fn;
+      }
+    }).catch(console.error);
+
+    appWindow.onFocusChanged(({ payload }) => {
+      if (!disposed) {
+        setIsFocused(payload);
+      }
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlistenFocus = fn;
       }
     }).catch(console.error);
 
     return () => {
       disposed = true;
-      unlisten?.();
+      unlistenResize?.();
+      unlistenFocus?.();
     };
   }, []);
+
+  useEffect(() => {
+    applyDocumentTheme(resolvedTheme);
+  }, [config.theme.preset, config.theme.windowEffect]);
+
+  useEffect(() => {
+    if (!isWindows) {
+      return;
+    }
+
+    const applyWindowMaterial = async () => {
+      const effectMap = {
+        mica: Effect.Mica,
+        acrylic: Effect.Acrylic,
+        blur: Effect.Blur,
+      } as const;
+
+      if (resolvedTheme.windowEffect === 'none') {
+        await appWindow.clearEffects();
+        await appWindow.setShadow(true);
+        return;
+      }
+
+      const effectCandidates: Effect[][] =
+        resolvedTheme.windowEffect === 'auto'
+          ? [
+              [effectMap[resolvedTheme.preset.windowEffect]],
+              [Effect.Mica],
+              [Effect.Acrylic],
+              [Effect.Blur],
+            ]
+          : [[effectMap[resolvedTheme.windowEffect]]];
+
+      for (const effects of effectCandidates) {
+        try {
+          await appWindow.setEffects({
+            effects,
+            color: effects[0] === Effect.Acrylic ? [24, 22, 20, 180] : undefined,
+          });
+          await appWindow.setShadow(true);
+          return;
+        } catch {
+          // Try the next effect supported by the current Windows build.
+        }
+      }
+    };
+
+    void applyWindowMaterial();
+  }, [config.theme.preset, config.theme.windowEffect]);
 
   const handleWindowMinimize = useCallback(() => {
     void appWindow.minimize();
@@ -164,34 +251,85 @@ export function App() {
     void appWindow.close();
   }, []);
 
+  const handleTitleBarDoubleClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('.no-drag-region')) {
+      return;
+    }
+
+    void appWindow.toggleMaximize()
+      .then(async () => {
+        setIsMaximized(await appWindow.isMaximized());
+      })
+      .catch(console.error);
+  }, []);
+
+  const handleTitleBarMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!isWindows || event.button !== 0) {
+      return;
+    }
+
+    const target = event.target as HTMLElement;
+    if (target.closest('.no-drag-region')) {
+      return;
+    }
+
+    void appWindow.startDragging().catch(() => {
+      // Keep the declarative drag region as the primary path.
+    });
+  }, []);
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-4 px-4 py-1.5 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none">
-        <div className="flex items-center gap-4 min-w-0" data-tauri-drag-region>
+    <div
+      className={[
+        'app-shell flex flex-col h-full',
+        isMaximized ? 'app-shell-maximized' : '',
+        isFocused ? 'app-shell-focused' : 'app-shell-unfocused',
+      ].filter(Boolean).join(' ')}
+    >
+      <div
+        className="app-titlebar flex items-center gap-4 px-4 py-1.5 border-b border-[var(--border-subtle)] text-xs select-none"
+        onDoubleClick={handleTitleBarDoubleClick}
+        onMouseDown={handleTitleBarMouseDown}
+        style={dragRegionStyle}
+      >
+        <div className="flex items-center gap-4 min-w-0" data-tauri-drag-region style={dragRegionStyle}>
           <span
             className="font-semibold tracking-wide text-[var(--accent)] text-sm"
             data-tauri-drag-region
-            style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}
+            style={{ ...dragRegionStyle, fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}
           >
             MINI-TERM
           </span>
-          <div className="w-px h-3.5 bg-[var(--border-default)]" data-tauri-drag-region />
+          <div
+            className="titlebar-divider w-px h-3.5 bg-[var(--border-default)]"
+            data-tauri-drag-region
+            style={dragRegionStyle}
+          />
+          <span
+            className="app-titlemeta truncate text-[10px] uppercase tracking-[0.18em]"
+            data-tauri-drag-region
+            style={dragRegionStyle}
+          >
+            {activeProjectName}
+          </span>
         </div>
 
-        <div className="no-drag-region flex items-center gap-3 text-[var(--text-muted)]">
+        <div className="no-drag-region flex items-center gap-3 text-[var(--text-muted)]" style={noDragRegionStyle}>
           <button
             type="button"
             className="cursor-pointer bg-transparent border-0 p-0 text-inherit hover:text-[var(--text-primary)] transition-colors duration-150"
             onClick={() => setConfigOpen(true)}
+            style={noDragRegionStyle}
           >
             Settings
           </button>
         </div>
 
-        <div className="flex-1 self-stretch" data-tauri-drag-region />
+        <div className="flex-1 self-stretch" data-tauri-drag-region style={dragRegionStyle} />
 
         {isWindows && (
-          <div className="no-drag-region flex items-stretch self-stretch -mr-4">
+          <div className="no-drag-region flex items-stretch self-stretch -mr-4" style={noDragRegionStyle}>
             <TitleBarButton title="Minimize" onClick={handleWindowMinimize}>
               <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
                 <path d="M1 5h8" />
@@ -245,7 +383,11 @@ export function App() {
                   className="absolute inset-0"
                   style={{ display: project.id === activeProjectId ? 'block' : 'none' }}
                 >
-                  <TerminalArea projectId={project.id} projectPath={project.path} />
+                  <TerminalArea
+                    projectId={project.id}
+                    projectPath={project.path}
+                    onOpenSettings={() => setConfigOpen(true)}
+                  />
                 </div>
               ))}
 

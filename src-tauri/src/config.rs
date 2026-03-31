@@ -15,6 +15,17 @@ pub struct AppConfig {
     pub terminal_font_size: f64,
     #[serde(default)]
     pub layout_sizes: Option<Vec<f64>>,
+    #[serde(default)]
+    pub theme: ThemeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeConfig {
+    #[serde(default = "default_theme_preset")]
+    pub preset: String,
+    #[serde(default = "default_theme_window_effect")]
+    pub window_effect: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +80,17 @@ pub struct ShellConfig {
 
 fn default_ui_font_size() -> f64 { 13.0 }
 fn default_terminal_font_size() -> f64 { 14.0 }
+fn default_theme_preset() -> String { "warm-carbon".into() }
+fn default_theme_window_effect() -> String { "auto".into() }
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            preset: default_theme_preset(),
+            window_effect: default_theme_window_effect(),
+        }
+    }
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -79,6 +101,7 @@ impl Default for AppConfig {
             ui_font_size: default_ui_font_size(),
             terminal_font_size: default_terminal_font_size(),
             layout_sizes: None,
+            theme: ThemeConfig::default(),
         }
     }
 }

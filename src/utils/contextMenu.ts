@@ -1,51 +1,196 @@
-interface MenuItem {
+export interface ContextMenuItem {
   label: string;
+  onClick?: () => void;
   danger?: boolean;
-  onClick: () => void;
+  disabled?: boolean;
+  checked?: boolean;
+  shortcut?: string;
+  children?: ContextMenuEntry[];
 }
 
-interface MenuSeparator {
+export interface ContextMenuSeparator {
   separator: true;
 }
 
-type MenuEntry = MenuItem | MenuSeparator;
+export type ContextMenuEntry = ContextMenuItem | ContextMenuSeparator;
+let activeCleanup: (() => void) | null = null;
 
-export function showContextMenu(x: number, y: number, items: MenuEntry[]) {
-  // 关闭已有的右键菜单
-  document.querySelectorAll('.ctx-menu').forEach((el) => el.remove());
+function isSeparator(entry: ContextMenuEntry): entry is ContextMenuSeparator {
+  return 'separator' in entry;
+}
 
-  const menu = document.createElement('div');
-  menu.className = 'fixed ctx-menu text-xs';
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
 
-  items.forEach((entry) => {
-    if ('separator' in entry) {
-      const sep = document.createElement('div');
-      sep.className = 'ctx-menu-sep';
-      menu.appendChild(sep);
-      return;
-    }
-    const item = document.createElement('div');
-    item.className = entry.danger ? 'ctx-menu-item danger' : 'ctx-menu-item';
-    item.textContent = entry.label;
-    item.onclick = () => {
-      entry.onClick();
-      cleanup();
-    };
-    menu.appendChild(item);
-  });
+export function showContextMenu(x: number, y: number, items: ContextMenuEntry[]) {
+  closeContextMenus();
 
-  document.body.appendChild(menu);
+  const openedMenus: HTMLDivElement[] = [];
+  const menuStack = new Map<number, HTMLDivElement>();
+  const menuLayer = document.createElement('div');
+  menuLayer.className = 'ctx-menu-layer';
 
   const cleanup = () => {
-    menu.remove();
-    document.removeEventListener('click', cleanup);
-    document.removeEventListener('keydown', onKey);
+    menuLayer.remove();
+    document.removeEventListener('mousedown', handlePointerDown, true);
+    document.removeEventListener('keydown', handleKeyDown, true);
+    window.removeEventListener('blur', cleanup);
+    window.removeEventListener('resize', cleanup);
+    document.removeEventListener('scroll', cleanup, true);
+    if (activeCleanup === cleanup) {
+      activeCleanup = null;
+    }
   };
-  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') cleanup(); };
+
+  const closeMenusFromLevel = (level: number) => {
+    for (const [currentLevel, menu] of [...menuStack.entries()]) {
+      if (currentLevel >= level) {
+        menu.remove();
+        menuStack.delete(currentLevel);
+        const index = openedMenus.indexOf(menu);
+        if (index >= 0) openedMenus.splice(index, 1);
+      }
+    }
+  };
+
+  const placeMenu = (menu: HTMLDivElement, preferredLeft: number, preferredTop: number) => {
+    const margin = 8;
+    const rect = menu.getBoundingClientRect();
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+
+    menu.style.left = `${clamp(preferredLeft, margin, maxLeft)}px`;
+    menu.style.top = `${clamp(preferredTop, margin, maxTop)}px`;
+  };
+
+  const openMenu = (
+    level: number,
+    entries: ContextMenuEntry[],
+    anchor: { left: number; top: number },
+    parentItem?: HTMLDivElement,
+  ) => {
+    closeMenusFromLevel(level);
+
+    const menu = document.createElement('div');
+    menu.className = 'ctx-menu ctx-menu-panel text-xs';
+
+    entries.forEach((entry) => {
+      if (isSeparator(entry)) {
+        const separator = document.createElement('div');
+        separator.className = 'ctx-menu-sep';
+        menu.appendChild(separator);
+        return;
+      }
+
+      const item = document.createElement('div');
+      item.className = 'ctx-menu-item';
+      if (entry.danger) item.classList.add('danger');
+      if (entry.disabled) item.classList.add('disabled');
+      if (entry.children?.length) item.classList.add('has-children');
+
+      const indicator = document.createElement('span');
+      indicator.className = 'ctx-menu-indicator';
+      indicator.textContent = entry.checked ? '✓' : '';
+      item.appendChild(indicator);
+
+      const label = document.createElement('span');
+      label.className = 'ctx-menu-label';
+      label.textContent = entry.label;
+      item.appendChild(label);
+
+      if (entry.shortcut) {
+        const shortcut = document.createElement('span');
+        shortcut.className = 'ctx-menu-shortcut';
+        shortcut.textContent = entry.shortcut;
+        item.appendChild(shortcut);
+      }
+
+      const childEntries = entry.children;
+
+      if (childEntries && childEntries.length) {
+        const chevron = document.createElement('span');
+        chevron.className = 'ctx-menu-chevron';
+        chevron.textContent = '›';
+        item.appendChild(chevron);
+
+        item.addEventListener('mouseenter', () => {
+          if (entry.disabled) return;
+
+          const rect = item.getBoundingClientRect();
+          openMenu(
+            level + 1,
+            childEntries,
+            { left: rect.right - 4, top: rect.top - 4 },
+            item,
+          );
+        });
+      } else {
+        item.addEventListener('mouseenter', () => {
+          closeMenusFromLevel(level + 1);
+        });
+      }
+
+      item.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (entry.disabled || (childEntries && childEntries.length)) return;
+        entry.onClick?.();
+        cleanup();
+      });
+
+      menu.appendChild(item);
+    });
+
+    menuLayer.appendChild(menu);
+    menuStack.set(level, menu);
+    openedMenus.push(menu);
+
+    requestAnimationFrame(() => {
+      if (parentItem) {
+        const parentRect = parentItem.getBoundingClientRect();
+        const menuRect = menu.getBoundingClientRect();
+        const prefersLeft = parentRect.right + menuRect.width + 8 > window.innerWidth;
+        placeMenu(
+          menu,
+          prefersLeft ? parentRect.left - menuRect.width + 4 : anchor.left,
+          anchor.top,
+        );
+      } else {
+        placeMenu(menu, anchor.left, anchor.top);
+      }
+    });
+  };
+
+  const handlePointerDown = (event: MouseEvent) => {
+    const target = event.target as Node | null;
+    if (!target || !menuLayer.contains(target)) {
+      cleanup();
+    }
+  };
+
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      cleanup();
+    }
+  };
+
+  document.body.appendChild(menuLayer);
+  activeCleanup = cleanup;
+  openMenu(0, items, { left: x, top: y });
+
   setTimeout(() => {
-    document.addEventListener('click', cleanup);
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', handlePointerDown, true);
+    document.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('blur', cleanup);
+    window.addEventListener('resize', cleanup);
+    document.addEventListener('scroll', cleanup, true);
   }, 0);
+}
+
+export function closeContextMenus() {
+  if (activeCleanup) {
+    activeCleanup();
+    return;
+  }
+  document.querySelectorAll('.ctx-menu-layer').forEach((element) => element.remove());
 }

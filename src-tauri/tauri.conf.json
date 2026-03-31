@@ -4,7 +4,7 @@
   "version": "0.1.4",
   "identifier": "com.tauri-app.tauri-app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node scripts/ensure-vite-dev.mjs",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
@@ -16,6 +16,7 @@
         "width": 800,
         "height": 600,
         "decorations": false,
+        "transparent": true,
         "dragDropEnabled": false
       }
     ],

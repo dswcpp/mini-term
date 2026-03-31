@@ -29,12 +29,14 @@ struct PtyInstance {
 }
 
 const AI_COMMANDS: &[&str] = &["claude", "codex"];
+const STARTUP_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct PtyManager {
     instances: Arc<Mutex<HashMap<u32, PtyInstance>>>,
     next_id: Arc<Mutex<u32>>,
     last_output: Arc<Mutex<HashMap<u32, Instant>>>,
+    startup_output: Arc<Mutex<HashMap<u32, String>>>,
     ai_sessions: Arc<Mutex<HashSet<u32>>>,
     input_buffers: Arc<Mutex<HashMap<u32, String>>>,
 }
@@ -45,6 +47,7 @@ impl PtyManager {
             instances: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
             last_output: Arc::new(Mutex::new(HashMap::new())),
+            startup_output: Arc::new(Mutex::new(HashMap::new())),
             ai_sessions: Arc::new(Mutex::new(HashSet::new())),
             input_buffers: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -167,6 +170,7 @@ pub fn create_pty(
 
     let app_flush = app.clone();
     let last_output = state.last_output.clone();
+    let startup_output = state.startup_output.clone();
     thread::spawn(move || {
         let mut pending = Vec::new();
 
@@ -204,12 +208,22 @@ pub fn create_pty(
                         pty_id: pty_id_for_reader,
                         exit_code,
                     });
+                    startup_output.lock().unwrap().remove(&pty_id_for_reader);
                     return;
                 }
             }
 
             if !pending.is_empty() {
                 let data = String::from_utf8_lossy(&pending).into_owned();
+                if let Ok(mut startup) = startup_output.lock() {
+                    if let Some(buffer) = startup.get_mut(&pty_id_for_reader) {
+                        buffer.push_str(&data);
+                        if buffer.len() > STARTUP_OUTPUT_LIMIT {
+                            let excess = buffer.len() - STARTUP_OUTPUT_LIMIT;
+                            buffer.drain(..excess);
+                        }
+                    }
+                }
                 let _ = app_flush.emit("pty-output", PtyOutputPayload {
                     pty_id: pty_id_for_reader, data,
                 });
@@ -229,6 +243,7 @@ pub fn create_pty(
             child,
         });
     }
+    state.startup_output.lock().unwrap().insert(pty_id, String::new());
 
     Ok(pty_id)
 }
@@ -258,9 +273,16 @@ pub fn resize_pty(state: tauri::State<'_, PtyManager>, pty_id: u32, cols: u16, r
 pub fn kill_pty(state: tauri::State<'_, PtyManager>, pty_id: u32) -> Result<(), String> {
     state.instances.lock().unwrap().remove(&pty_id);
     state.last_output.lock().unwrap().remove(&pty_id);
+    state.startup_output.lock().unwrap().remove(&pty_id);
     state.ai_sessions.lock().unwrap().remove(&pty_id);
     state.input_buffers.lock().unwrap().remove(&pty_id);
     Ok(())
+}
+
+#[tauri::command]
+pub fn take_startup_output(state: tauri::State<'_, PtyManager>, pty_id: u32) -> Result<String, String> {
+    let mut startup_output = state.startup_output.lock().unwrap();
+    Ok(startup_output.remove(&pty_id).unwrap_or_default())
 }
 
 #[cfg(test)]

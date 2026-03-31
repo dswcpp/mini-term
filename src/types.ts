@@ -7,6 +7,15 @@ export interface AppConfig {
   uiFontSize: number;
   terminalFontSize: number;
   layoutSizes?: number[];
+  theme: ThemeConfig;
+}
+
+export type ThemePresetId = 'warm-carbon' | 'ghostty-dark' | 'ghostty-light';
+export type ThemeWindowEffect = 'auto' | 'mica' | 'acrylic' | 'blur' | 'none';
+
+export interface ThemeConfig {
+  preset: ThemePresetId;
+  windowEffect: ThemeWindowEffect;
 }
 
 export interface ProjectConfig {

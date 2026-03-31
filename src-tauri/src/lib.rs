@@ -27,6 +27,7 @@ pub fn run() {
             pty::write_pty,
             pty::resize_pty,
             pty::kill_pty,
+            pty::take_startup_output,
             fs::list_directory,
             fs::watch_directory,
             fs::unwatch_directory,

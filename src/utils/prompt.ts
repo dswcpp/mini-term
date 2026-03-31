@@ -1,31 +1,27 @@
-/**
- * 自定义 prompt 弹窗，替代 window.prompt
- * 返回 Promise<string | null>，取消返回 null
- */
-export function showPrompt(title: string, placeholder?: string): Promise<string | null> {
+export function showPrompt(
+  title: string,
+  placeholder?: string,
+  initialValue = '',
+): Promise<string | null> {
   return new Promise((resolve) => {
-    // 遮罩层
     const overlay = document.createElement('div');
     overlay.className = 'prompt-overlay';
 
-    // 弹窗
     const dialog = document.createElement('div');
     dialog.className = 'prompt-dialog';
 
-    // 标题
     const titleEl = document.createElement('div');
     titleEl.className = 'prompt-title';
     titleEl.textContent = title;
     dialog.appendChild(titleEl);
 
-    // 输入框
     const input = document.createElement('input');
     input.className = 'prompt-input';
     input.placeholder = placeholder ?? '';
+    input.value = initialValue;
     input.spellcheck = false;
     dialog.appendChild(input);
 
-    // 按钮区
     const buttons = document.createElement('div');
     buttons.className = 'prompt-buttons';
 
@@ -44,6 +40,7 @@ export function showPrompt(title: string, placeholder?: string): Promise<string 
     document.body.appendChild(overlay);
 
     input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
 
     const cleanup = (value: string | null) => {
       overlay.remove();
@@ -52,10 +49,12 @@ export function showPrompt(title: string, placeholder?: string): Promise<string 
 
     confirmBtn.onclick = () => cleanup(input.value || null);
     cancelBtn.onclick = () => cleanup(null);
-    overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
-    input.onkeydown = (e) => {
-      if (e.key === 'Enter') cleanup(input.value || null);
-      if (e.key === 'Escape') cleanup(null);
+    overlay.onclick = (event) => {
+      if (event.target === overlay) cleanup(null);
+    };
+    input.onkeydown = (event) => {
+      if (event.key === 'Enter') cleanup(input.value || null);
+      if (event.key === 'Escape') cleanup(null);
     };
   });
 }

@@ -3,144 +3,113 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, genId, collectPtyIds, saveLayoutToConfig } from '../store';
 import { TabBar } from './TabBar';
 import { SplitLayout } from './SplitLayout';
+import {
+  collectPaneIds,
+  findPane,
+  insertSplit,
+  insertSplitNode,
+  removePane,
+  replacePane,
+} from './terminal/splitTree';
 import { showContextMenu } from '../utils/contextMenu';
-import type { TerminalTab, PaneState, SplitNode, ShellConfig } from '../types';
+import { showPrompt } from '../utils/prompt';
+import type { PaneState, ShellConfig, SplitNode, TerminalTab } from '../types';
 
 interface Props {
   projectId: string;
   projectPath: string;
+  onOpenSettings?: () => void;
 }
 
-// 收集 SplitNode 树中所有 pane ID
-function collectPaneIds(node: SplitNode): string[] {
-  if (node.type === 'leaf') return [node.pane.id];
-  return node.children.flatMap(collectPaneIds);
+function getTabTitle(tab: TerminalTab): string {
+  if (tab.customTitle) return tab.customTitle;
+  if (tab.splitLayout.type === 'leaf') return tab.splitLayout.pane.shellName;
+  return '分屏终端';
 }
 
-function removePane(node: SplitNode, targetPaneId: string): SplitNode | null {
-  if (node.type === 'leaf') {
-    return node.pane.id === targetPaneId ? null : node;
-  }
-  const remaining = node.children
-    .map((c) => removePane(c, targetPaneId))
-    .filter((c): c is SplitNode => c !== null);
-  if (remaining.length === 0) return null;
-  if (remaining.length === 1) return remaining[0];
-  return { ...node, children: remaining, sizes: remaining.map(() => 100 / remaining.length) };
-}
-
-function insertSplit(
-  node: SplitNode,
-  targetPaneId: string,
-  direction: 'horizontal' | 'vertical',
-  newPane: PaneState
-): SplitNode {
-  if (node.type === 'leaf') {
-    if (node.pane.id === targetPaneId) {
-      return {
-        type: 'split',
-        direction,
-        children: [node, { type: 'leaf', pane: newPane }],
-        sizes: [50, 50],
-      };
-    }
-    return node;
-  }
-  return {
-    ...node,
-    children: node.children.map((c) => insertSplit(c, targetPaneId, direction, newPane)),
-  };
-}
-
-function insertSplitNode(
-  node: SplitNode,
-  targetPaneId: string,
-  direction: 'horizontal' | 'vertical',
-  newNode: SplitNode,
-  position: 'before' | 'after'
-): SplitNode {
-  if (node.type === 'leaf') {
-    if (node.pane.id === targetPaneId) {
-      const children = position === 'before' ? [newNode, node] : [node, newNode];
-      return { type: 'split', direction, children, sizes: [50, 50] };
-    }
-    return node;
-  }
-  return {
-    ...node,
-    children: node.children.map((c) => insertSplitNode(c, targetPaneId, direction, newNode, position)),
-  };
-}
-
-export function TerminalArea({ projectId, projectPath }: Props) {
+export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) {
   const config = useAppStore((s) => s.config);
   const projectStates = useAppStore((s) => s.projectStates);
   const addTab = useAppStore((s) => s.addTab);
   const updateTabLayout = useAppStore((s) => s.updateTabLayout);
   const removeTab = useAppStore((s) => s.removeTab);
+  const setTabCustomTitle = useAppStore((s) => s.setTabCustomTitle);
   const ps = projectStates.get(projectId);
-  const activeTab = ps?.tabs.find((t) => t.id === ps.activeTabId);
 
-  const handleCloseTab = useCallback(async (tabId: string) => {
-    const tab = ps?.tabs.find(t => t.id === tabId);
-    if (tab) {
-      const ptyIds = collectPtyIds(tab.splitLayout);
-      for (const id of ptyIds) {
-        await invoke('kill_pty', { ptyId: id });
+  const handleCloseTab = useCallback(
+    async (tabId: string) => {
+      const tab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (tab) {
+        const ptyIds = collectPtyIds(tab.splitLayout);
+        for (const id of ptyIds) {
+          await invoke('kill_pty', { ptyId: id });
+        }
       }
-    }
-    removeTab(projectId, tabId);
-    saveLayoutToConfig(projectId);
-  }, [ps, projectId, removeTab]);
 
-  const handleNewTab = useCallback(async (selectedShell?: ShellConfig) => {
-    const shell = selectedShell
-      ?? config.availableShells.find((s) => s.name === config.defaultShell)
-      ?? config.availableShells[0];
-    if (!shell) return;
+      removeTab(projectId, tabId);
+      saveLayoutToConfig(projectId);
+    },
+    [projectId, removeTab],
+  );
 
-    const ptyId = await invoke<number>('create_pty', {
-      shell: shell.command,
-      args: shell.args ?? [],
-      cwd: projectPath,
-    });
+  const handleNewTab = useCallback(
+    async (selectedShell?: ShellConfig) => {
+      const shell =
+        selectedShell
+        ?? config.availableShells.find((item) => item.name === config.defaultShell)
+        ?? config.availableShells[0];
+      if (!shell) return;
 
-    const paneId = genId();
-    const tabId = genId();
+      const ptyId = await invoke<number>('create_pty', {
+        shell: shell.command,
+        args: shell.args ?? [],
+        cwd: projectPath,
+      });
 
-    const tab: TerminalTab = {
-      id: tabId,
-      status: 'idle',
-      splitLayout: {
-        type: 'leaf',
-        pane: {
-          id: paneId,
-          shellName: shell.name,
-          status: 'idle',
-          ptyId,
+      const paneId = genId();
+      const tabId = genId();
+
+      const tab: TerminalTab = {
+        id: tabId,
+        status: 'idle',
+        splitLayout: {
+          type: 'leaf',
+          pane: {
+            id: paneId,
+            shellName: shell.name,
+            status: 'idle',
+            ptyId,
+          },
         },
-      },
-    };
+      };
 
-    addTab(projectId, tab);
-    saveLayoutToConfig(projectId);
-  }, [projectId, projectPath, config, addTab]);
+      addTab(projectId, tab);
+      saveLayoutToConfig(projectId);
+    },
+    [addTab, config.availableShells, config.defaultShell, projectId, projectPath],
+  );
 
-  const handleNewTabClick = useCallback((e: React.MouseEvent) => {
-    showContextMenu(
-      e.clientX,
-      e.clientY,
-      config.availableShells.map((shell) => ({
-        label: shell.name,
-        onClick: () => handleNewTab(shell),
-      })),
-    );
-  }, [config.availableShells, handleNewTab]);
+  const handleNewTabClick = useCallback(
+    (event: React.MouseEvent) => {
+      showContextMenu(
+        event.clientX,
+        event.clientY,
+        config.availableShells.map((shell) => ({
+          label: shell.name,
+          onClick: () => handleNewTab(shell),
+        })),
+      );
+    },
+    [config.availableShells, handleNewTab],
+  );
 
   const handleSplitPane = useCallback(
-    async (paneId: string, direction: 'horizontal' | 'vertical') => {
-      if (!ps || !activeTab) return;
-      const shell = config.availableShells.find((s) => s.name === config.defaultShell)
+    async (tabId: string, paneId: string, direction: 'horizontal' | 'vertical') => {
+      const tab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!tab) return;
+
+      const shell =
+        config.availableShells.find((item) => item.name === config.defaultShell)
         ?? config.availableShells[0];
       if (!shell) return;
 
@@ -157,102 +126,177 @@ export function TerminalArea({ projectId, projectPath }: Props) {
         ptyId,
       };
 
-      const newLayout = insertSplit(activeTab.splitLayout, paneId, direction, newPane);
-      updateTabLayout(projectId, activeTab.id, newLayout);
+      const latestTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!latestTab) return;
+
+      const newLayout = insertSplit(latestTab.splitLayout, paneId, direction, newPane);
+      updateTabLayout(projectId, tabId, newLayout);
       saveLayoutToConfig(projectId);
     },
-    [ps, activeTab, config, projectId, projectPath, updateTabLayout]
+    [config.availableShells, config.defaultShell, projectId, projectPath, updateTabLayout],
   );
 
   const handleTabDrop = useCallback(
-    (sourceTabId: string, targetPaneId: string, direction: 'horizontal' | 'vertical', position: 'before' | 'after') => {
-      if (!ps || !activeTab) return;
-      if (sourceTabId === activeTab.id) return;
-      const sourceTab = ps.tabs.find((t) => t.id === sourceTabId);
+    (
+      targetTabId: string,
+      sourceTabId: string,
+      targetPaneId: string,
+      direction: 'horizontal' | 'vertical',
+      position: 'before' | 'after',
+    ) => {
+      const currentPs = useAppStore.getState().projectStates.get(projectId);
+      const targetTab = currentPs?.tabs.find((item) => item.id === targetTabId);
+      if (!currentPs || !targetTab || sourceTabId === targetTabId) return;
+
+      const sourceTab = currentPs.tabs.find((item) => item.id === sourceTabId);
       if (!sourceTab) return;
 
       const newLayout = insertSplitNode(
-        activeTab.splitLayout,
+        targetTab.splitLayout,
         targetPaneId,
         direction,
         sourceTab.splitLayout,
-        position
+        position,
       );
-      updateTabLayout(projectId, activeTab.id, newLayout);
+      updateTabLayout(projectId, targetTabId, newLayout);
       removeTab(projectId, sourceTabId);
       saveLayoutToConfig(projectId);
     },
-    [ps, activeTab, projectId, updateTabLayout, removeTab]
+    [projectId, removeTab, updateTabLayout],
   );
 
-  const handleClosePane = useCallback(async (paneId: string) => {
-    // 从 store 读取最新状态，避免闭包过期
-    const currentPs = useAppStore.getState().projectStates.get(projectId);
-    const currentTab = currentPs?.tabs.find(t => t.id === currentPs.activeTabId);
-    if (!currentTab) return;
+  const handleClosePane = useCallback(
+    async (tabId: string, paneId: string) => {
+      const currentTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!currentTab) return;
 
-    const findPty = (node: SplitNode): number | null => {
-      if (node.type === 'leaf') return node.pane.id === paneId ? node.pane.ptyId : null;
-      for (const c of node.children) {
-        const found = findPty(c);
-        if (found !== null) return found;
+      const pane = findPane(currentTab.splitLayout, paneId);
+      if (!pane) return;
+
+      await invoke('kill_pty', { ptyId: pane.ptyId });
+
+      const latestTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!latestTab) return;
+
+      const newLayout = removePane(latestTab.splitLayout, paneId);
+      if (newLayout) {
+        updateTabLayout(projectId, tabId, newLayout);
+        saveLayoutToConfig(projectId);
+      } else {
+        await handleCloseTab(tabId);
       }
-      return null;
-    };
+    },
+    [handleCloseTab, projectId, updateTabLayout],
+  );
 
-    const ptyId = findPty(currentTab.splitLayout);
-    if (ptyId !== null) {
-      await invoke('kill_pty', { ptyId });
-    }
+  const handleRestartPane = useCallback(
+    async (tabId: string, paneId: string) => {
+      const currentTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!currentTab) return;
 
-    // await 之后重新读取最新状态，防止并发关闭时布局被覆盖
-    const latestPs = useAppStore.getState().projectStates.get(projectId);
-    const latestTab = latestPs?.tabs.find(t => t.id === latestPs.activeTabId);
-    if (!latestTab) return;
+      const pane = findPane(currentTab.splitLayout, paneId);
+      if (!pane) return;
 
-    const newLayout = removePane(latestTab.splitLayout, paneId);
-    if (newLayout) {
-      updateTabLayout(projectId, latestTab.id, newLayout);
+      const shell =
+        config.availableShells.find((item) => item.name === pane.shellName)
+        ?? config.availableShells.find((item) => item.name === config.defaultShell)
+        ?? config.availableShells[0];
+      if (!shell) return;
+
+      await invoke('kill_pty', { ptyId: pane.ptyId });
+
+      const ptyId = await invoke<number>('create_pty', {
+        shell: shell.command,
+        args: shell.args ?? [],
+        cwd: projectPath,
+      });
+
+      const latestTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!latestTab) return;
+
+      const latestPane = findPane(latestTab.splitLayout, paneId);
+      if (!latestPane) return;
+
+      const nextLayout = replacePane(latestTab.splitLayout, paneId, {
+        ...latestPane,
+        shellName: shell.name,
+        status: 'idle',
+        ptyId,
+      });
+
+      updateTabLayout(projectId, tabId, nextLayout);
       saveLayoutToConfig(projectId);
-    } else {
-      handleCloseTab(latestTab.id);
-    }
-  }, [projectId, updateTabLayout, handleCloseTab]);
+    },
+    [config.availableShells, config.defaultShell, projectId, projectPath, updateTabLayout],
+  );
 
-  const handleLayoutChange = useCallback((updatedNode: SplitNode) => {
-    const currentPs = useAppStore.getState().projectStates.get(projectId);
-    const currentActiveTab = currentPs?.tabs.find((t) => t.id === currentPs.activeTabId);
-    if (!currentActiveTab) return;
+  const handleRenameTab = useCallback(
+    async (tabId: string) => {
+      const tab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!tab) return;
 
-    // 校验布局结构一致：若 pane ID 集合不同，说明是过期的 RAF 回调，丢弃
-    const currentIds = collectPaneIds(currentActiveTab.splitLayout).sort().join(',');
-    const updatedIds = collectPaneIds(updatedNode).sort().join(',');
-    if (currentIds !== updatedIds) return;
+      const nextTitle = await showPrompt(
+        '重命名标签页',
+        `当前：${getTabTitle(tab)}，留空则恢复默认标题`,
+        tab.customTitle ?? '',
+      );
+      if (nextTitle === null) return;
 
-    updateTabLayout(projectId, currentActiveTab.id, updatedNode);
-    saveLayoutToConfig(projectId);
-  }, [projectId, updateTabLayout]);
+      setTabCustomTitle(projectId, tabId, nextTitle);
+      saveLayoutToConfig(projectId);
+    },
+    [projectId, setTabCustomTitle],
+  );
+
+  const handleLayoutChange = useCallback(
+    (tabId: string, updatedNode: SplitNode) => {
+      const currentTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      if (!currentTab) return;
+
+      const currentIds = collectPaneIds(currentTab.splitLayout).sort().join(',');
+      const updatedIds = collectPaneIds(updatedNode).sort().join(',');
+      if (currentIds !== updatedIds) return;
+
+      updateTabLayout(projectId, tabId, updatedNode);
+      saveLayoutToConfig(projectId);
+    },
+    [projectId, updateTabLayout],
+  );
 
   return (
-    <div className="flex flex-col h-full bg-[var(--bg-terminal)]">
+    <div className="flex h-full flex-col bg-[var(--bg-terminal)]">
       <TabBar projectId={projectId} onNewTab={handleNewTabClick} onCloseTab={handleCloseTab} />
 
-      <div className="flex-1 overflow-hidden relative">
+      <div className="relative flex-1 overflow-hidden">
         {ps?.tabs.map((tab) => (
           <div
             key={tab.id}
             className="absolute inset-0"
             style={{ display: tab.id === ps.activeTabId ? 'block' : 'none' }}
           >
-            <SplitLayout node={tab.splitLayout} onSplit={handleSplitPane} onClose={handleClosePane} onTabDrop={handleTabDrop} onLayoutChange={handleLayoutChange} />
+            <SplitLayout
+              node={tab.splitLayout}
+              tabId={tab.id}
+              onSplit={(paneId, direction) => handleSplitPane(tab.id, paneId, direction)}
+              onClose={(paneId) => handleClosePane(tab.id, paneId)}
+              onRestart={(paneId) => handleRestartPane(tab.id, paneId)}
+              onNewTab={() => handleNewTab()}
+              onRenameTab={() => handleRenameTab(tab.id)}
+              onCloseTab={() => handleCloseTab(tab.id)}
+              onOpenSettings={onOpenSettings}
+              onTabDrop={(sourceTabId, targetPaneId, direction, position) =>
+                handleTabDrop(tab.id, sourceTabId, targetPaneId, direction, position)
+              }
+              onLayoutChange={(updated) => handleLayoutChange(tab.id, updated)}
+            />
           </div>
         ))}
 
         {(!ps || ps.tabs.length === 0) && (
-          <div className="flex flex-col items-center justify-center h-full gap-3 text-[var(--text-muted)]">
-            <div className="text-3xl opacity-20">⌘</div>
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--text-muted)]">
+            <div className="text-3xl opacity-20">⌁</div>
             <button
-              className="px-5 py-2.5 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-sm hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all duration-200"
+              className="rounded-[var(--radius-md)] border border-dashed border-[var(--border-default)] px-5 py-2.5 text-sm transition-all duration-200 hover:border-[var(--accent)] hover:text-[var(--accent)]"
               onClick={handleNewTabClick}
             >
               + 新建终端

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { getDefaultThemeConfig } from './theme';
 import type {
   AppConfig,
   ProjectConfig,
@@ -196,6 +197,7 @@ interface AppStore {
   addTab: (projectId: string, tab: TerminalTab) => void;
   removeTab: (projectId: string, tabId: string) => void;
   setActiveTab: (projectId: string, tabId: string) => void;
+  setTabCustomTitle: (projectId: string, tabId: string, customTitle?: string) => void;
   updateTabLayout: (projectId: string, tabId: string, layout: SplitNode) => void;
 
   // Pane 状态
@@ -210,6 +212,7 @@ export const useAppStore = create<AppStore>((set) => ({
     availableShells: [],
     uiFontSize: 13,
     terminalFontSize: 14,
+    theme: getDefaultThemeConfig(),
   },
   setConfig: (config) => set({ config }),
 
@@ -276,6 +279,22 @@ export const useAppStore = create<AppStore>((set) => ({
       const ps = newStates.get(projectId);
       if (!ps) return state;
       newStates.set(projectId, { ...ps, activeTabId: tabId });
+      return { projectStates: newStates };
+    }),
+
+  setTabCustomTitle: (projectId, tabId, customTitle) =>
+    set((state) => {
+      const newStates = new Map(state.projectStates);
+      const ps = newStates.get(projectId);
+      if (!ps) return state;
+      newStates.set(projectId, {
+        ...ps,
+        tabs: ps.tabs.map((tab) =>
+          tab.id === tabId
+            ? { ...tab, customTitle: customTitle?.trim() ? customTitle.trim() : undefined }
+            : tab,
+        ),
+      });
       return { projectStates: newStates };
     }),
 
