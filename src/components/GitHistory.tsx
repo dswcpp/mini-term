@@ -230,19 +230,24 @@ export function GitHistory() {
           return (
             <div key={repo.path}>
               <div
-                className="flex items-center gap-1 py-[5px] px-2 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
-                onClick={() => toggleRepo(repo.path)}
+                className="sticky top-0 bg-[var(--bg-surface)] px-1"
+                style={{ zIndex: 2 }}
               >
-                <span
-                  className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
-                  style={{
-                    transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-                    display: 'inline-block',
-                  }}
+                <div
+                  className="flex items-center gap-1 py-[5px] px-2 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
+                  onClick={() => toggleRepo(repo.path)}
                 >
-                  &#9662;
-                </span>
-                <span className="truncate font-medium">{repo.name}</span>
+                  <span
+                    className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
+                    style={{
+                      transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+                      display: 'inline-block',
+                    }}
+                  >
+                    &#9662;
+                  </span>
+                  <span className="truncate font-medium">{repo.name}</span>
+                </div>
               </div>
 
               {isExpanded && (
