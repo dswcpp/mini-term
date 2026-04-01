@@ -3,12 +3,23 @@ import { Allotment } from 'allotment';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
-import { useAppStore, genId, getOrderedItems } from '../store';
+import { useAppStore, genId } from '../store';
 import { StatusDot } from './StatusDot';
 import { SessionList } from './SessionList';
 import { showContextMenu } from '../utils/contextMenu';
 import { showPrompt } from '../utils/prompt';
 import { setDragPayload, getDragPayload } from '../utils/dragState';
+import {
+  getOrderedTree,
+  collectAllGroups,
+  countProjectsInGroup,
+  canDrop,
+  canDropAt,
+  getDepth,
+  findParentGroupId,
+  findGroupInTree,
+  MAX_DEPTH,
+} from '../utils/projectTree';
 import type { PaneStatus, SplitNode, ProjectConfig, ProjectGroup } from '../types';
 
 // 保存配置的快捷方法
@@ -21,6 +32,7 @@ function saveConfig() {
 interface DropIndicator {
   id: string;
   position: 'before' | 'after' | 'inside';
+  forbidden?: boolean;
 }
 
 export function ProjectList() {
@@ -34,9 +46,7 @@ export function ProjectList() {
   const removeGroup = useAppStore((s) => s.removeGroup);
   const renameGroup = useAppStore((s) => s.renameGroup);
   const toggleGroupCollapse = useAppStore((s) => s.toggleGroupCollapse);
-  const moveProjectToGroup = useAppStore((s) => s.moveProjectToGroup);
-  const moveProjectOutOfGroup = useAppStore((s) => s.moveProjectOutOfGroup);
-  const reorderItems = useAppStore((s) => s.reorderItems);
+  const moveItem = useAppStore((s) => s.moveItem);
 
   const [confirmTarget, setConfirmTarget] = useState<{ id: string; name: string } | null>(null);
   const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null);
@@ -44,8 +54,8 @@ export function ProjectList() {
   const [editingName, setEditingName] = useState('');
   const editInputRef = useRef<HTMLInputElement>(null);
 
-  const orderedItems = getOrderedItems(config);
-  const groups = config.projectGroups ?? [];
+  const orderedItems = getOrderedTree(config);
+  const allGroups = collectAllGroups(config.projectTree ?? []);
 
   const handleAddProject = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -141,29 +151,46 @@ export function ProjectList() {
   const handleDragOver = useCallback((e: React.DragEvent, targetId: string, allowInside: boolean) => {
     const payload = getDragPayload();
     if (!payload || payload.type === 'tab') return;
-    // 不能拖到自己身上
     if (
       (payload.type === 'project' && payload.projectId === targetId) ||
       (payload.type === 'group' && payload.groupId === targetId)
-    ) {
-      return;
-    }
+    ) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
 
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const y = e.clientY - rect.top;
     const ratio = y / rect.height;
 
     let position: DropIndicator['position'];
-    if (allowInside && payload.type === 'project' && ratio > 0.25 && ratio < 0.75) {
+    if (allowInside && ratio > 0.25 && ratio < 0.75) {
       position = 'inside';
     } else if (ratio < 0.5) {
       position = 'before';
     } else {
       position = 'after';
     }
-    setDropIndicator({ id: targetId, position });
+
+    let forbidden = false;
+    const tree = useAppStore.getState().config.projectTree ?? [];
+
+    if (position === 'inside') {
+      if (payload.type === 'project') {
+        forbidden = !canDrop(tree, targetId, payload.projectId);
+      } else {
+        const draggedGroup = findGroupInTree(tree, payload.groupId);
+        if (draggedGroup) {
+          forbidden = !canDrop(tree, targetId, draggedGroup);
+        }
+      }
+    } else if (payload.type === 'group') {
+      const draggedGroup = findGroupInTree(tree, payload.groupId);
+      if (draggedGroup) {
+        forbidden = !canDropAt(tree, targetId, draggedGroup);
+      }
+    }
+
+    e.dataTransfer.dropEffect = forbidden ? 'none' : 'move';
+    setDropIndicator({ id: targetId, position, forbidden });
   }, []);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
@@ -173,7 +200,7 @@ export function ProjectList() {
     }
   }, []);
 
-  const handleDrop = useCallback((e: React.DragEvent, targetId: string, targetContext?: { groupId?: string }) => {
+  const handleDrop = useCallback((e: React.DragEvent, targetId: string) => {
     e.preventDefault();
     const payload = getDragPayload();
     if (!payload || payload.type === 'tab') return;
@@ -182,90 +209,63 @@ export function ProjectList() {
     setDragPayload(null);
     (e.target as HTMLElement).style.opacity = '';
 
-    if (!indicator) return;
+    if (!indicator || indicator.forbidden) return;
 
-    const ordering = useAppStore.getState().config.projectOrdering ?? [];
+    const itemId = payload.type === 'project' ? payload.projectId : payload.groupId;
 
-    if (payload.type === 'project') {
-      const projectId = payload.projectId;
-
-      if (indicator.position === 'inside') {
-        // 拖到分组上 → 移入分组
-        moveProjectToGroup(projectId, targetId);
-      } else if (targetContext?.groupId) {
-        // 拖到分组内的项目上 → 移入同分组并排序
-        const group = (useAppStore.getState().config.projectGroups ?? []).find((g) => g.id === targetContext.groupId);
-        if (group) {
-          const targetIdx = group.projectIds.indexOf(targetId);
-          const insertIdx = indicator.position === 'after' ? targetIdx + 1 : targetIdx;
-          moveProjectToGroup(projectId, targetContext.groupId, insertIdx);
-        }
-      } else {
-        // 拖到顶层项目/分组旁 → 重排序
-        // 先从分组中移出
-        const groups = useAppStore.getState().config.projectGroups ?? [];
-        const inGroup = groups.some((g) => g.projectIds.includes(projectId));
-        if (inGroup) {
-          moveProjectOutOfGroup(projectId, indicator.position === 'after' ? targetId : undefined);
-          // 需要再调整位置
-          const newOrdering = [...(useAppStore.getState().config.projectOrdering ?? [])];
-          const fromIdx = newOrdering.indexOf(projectId);
-          const toIdx = newOrdering.indexOf(targetId);
-          if (fromIdx >= 0 && toIdx >= 0) {
-            newOrdering.splice(fromIdx, 1);
-            const insertIdx = indicator.position === 'after' ? newOrdering.indexOf(targetId) + 1 : newOrdering.indexOf(targetId);
-            newOrdering.splice(insertIdx, 0, projectId);
-            reorderItems(newOrdering);
-          }
-        } else {
-          // 已在顶层，直接重排序
-          const newOrdering = ordering.filter((id) => id !== projectId);
-          const toIdx = newOrdering.indexOf(targetId);
-          const insertIdx = indicator.position === 'after' ? toIdx + 1 : toIdx;
-          newOrdering.splice(insertIdx, 0, projectId);
-          reorderItems(newOrdering);
-        }
+    if (indicator.position === 'inside') {
+      moveItem(itemId, targetId);
+    } else {
+      const tree = useAppStore.getState().config.projectTree ?? [];
+      const parentGroupId = findParentGroupId(tree, targetId);
+      const parent = parentGroupId
+        ? findGroupInTree(tree, parentGroupId)?.children ?? []
+        : tree;
+      const targetIdx = parent.findIndex((item) =>
+        (typeof item === 'string' ? item : item.id) === targetId
+      );
+      let insertIdx = indicator.position === 'after' ? targetIdx + 1 : targetIdx;
+      const draggedIdx = parent.findIndex((item) =>
+        (typeof item === 'string' ? item : item.id) === itemId
+      );
+      if (draggedIdx >= 0 && draggedIdx < insertIdx) {
+        insertIdx--;
       }
-    } else if (payload.type === 'group') {
-      // 分组重排序
-      const groupId = payload.groupId;
-      const newOrdering = ordering.filter((id) => id !== groupId);
-      const toIdx = newOrdering.indexOf(targetId);
-      const insertIdx = indicator.position === 'after' ? toIdx + 1 : Math.max(toIdx, 0);
-      newOrdering.splice(insertIdx, 0, groupId);
-      reorderItems(newOrdering);
+      moveItem(itemId, parentGroupId ?? null, insertIdx);
     }
     saveConfig();
-  }, [dropIndicator, moveProjectToGroup, moveProjectOutOfGroup, reorderItems]);
+  }, [dropIndicator, moveItem]);
 
   // === 渲染子组件 ===
 
   const renderDropLine = (id: string, position: 'before' | 'after') => {
     if (dropIndicator?.id !== id || dropIndicator.position !== position) return null;
+    if (dropIndicator.forbidden) return null;
     return (
       <div className="absolute left-1 right-1 h-0.5 bg-[var(--accent)] rounded-full z-10"
         style={position === 'before' ? { top: -1 } : { bottom: -1 }} />
     );
   };
 
-  const renderProjectItem = (project: ProjectConfig, groupId?: string) => {
+  const renderProjectItem = (project: ProjectConfig, depth: number, parentGroupId?: string) => {
     const isActive = project.id === activeProjectId;
     const projectStatus = getProjectStatus(project.id);
 
     return (
       <div
         key={project.id}
-        className={`relative flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] cursor-pointer text-base group transition-all duration-150 ${
+        className={`relative flex items-center gap-2 py-1.5 rounded-[var(--radius-sm)] cursor-pointer text-base group transition-all duration-150 ${
           isActive
             ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
             : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
-        } ${groupId ? 'pl-5' : ''}`}
+        }`}
+        style={{ paddingLeft: `${depth * 16 + 10}px`, paddingRight: '10px' }}
         draggable
         onDragStart={(e) => handleProjectDragStart(e, project.id)}
         onDragEnd={handleDragEnd}
         onDragOver={(e) => handleDragOver(e, project.id, false)}
         onDragLeave={handleDragLeave}
-        onDrop={(e) => handleDrop(e, project.id, { groupId })}
+        onDrop={(e) => handleDrop(e, project.id)}
         onClick={() => setActiveProject(project.id)}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -275,19 +275,20 @@ export function ProjectList() {
             { label: '复制绝对路径', onClick: () => navigator.clipboard.writeText(project.path) },
           ];
           // 添加分组相关菜单
-          if (groups.length > 0) {
+          if (allGroups.length > 0) {
             menuItems.push({ separator: true });
-            if (groupId) {
+            if (parentGroupId) {
               menuItems.push({
                 label: '移出分组',
-                onClick: () => { moveProjectOutOfGroup(project.id); saveConfig(); },
+                onClick: () => { moveItem(project.id, null); saveConfig(); },
               });
             }
-            for (const g of groups) {
-              if (g.id === groupId) continue;
+            for (const [g, gDepth] of allGroups) {
+              if (g.id === parentGroupId) continue;
+              if (gDepth + 1 > MAX_DEPTH) continue;
               menuItems.push({
                 label: `移动到「${g.name}」`,
-                onClick: () => { moveProjectToGroup(project.id, g.id); saveConfig(); },
+                onClick: () => { moveItem(project.id, g.id); saveConfig(); },
               });
             }
           }
@@ -312,19 +313,24 @@ export function ProjectList() {
     );
   };
 
-  const renderGroup = (group: ProjectGroup, projects: ProjectConfig[]) => {
+  const renderGroup = (group: ProjectGroup, depth: number) => {
     const isEditing = editingGroupId === group.id;
     const isInsideTarget = dropIndicator?.id === group.id && dropIndicator.position === 'inside';
+    const isForbidden = isInsideTarget && dropIndicator?.forbidden;
+    const groupDepth = getDepth(config.projectTree ?? [], group.id);
 
     return (
       <div key={group.id} className="relative">
         {renderDropLine(group.id, 'before')}
         <div
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius-sm)] cursor-pointer text-sm transition-all duration-150 select-none ${
-            isInsideTarget
-              ? 'bg-[var(--accent-subtle)] border border-dashed border-[var(--accent)]'
-              : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
+          className={`flex items-center gap-1.5 py-1.5 rounded-[var(--radius-sm)] cursor-pointer text-sm transition-all duration-150 select-none ${
+            isForbidden
+              ? 'border border-dashed border-[var(--color-error)] cursor-not-allowed'
+              : isInsideTarget
+                ? 'bg-[var(--accent-subtle)] border border-dashed border-[var(--accent)]'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
           }`}
+          style={{ paddingLeft: `${depth * 16}px`, paddingRight: '10px' }}
           draggable={!isEditing}
           onDragStart={(e) => handleGroupDragStart(e, group.id)}
           onDragEnd={handleDragEnd}
@@ -335,10 +341,24 @@ export function ProjectList() {
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            showContextMenu(e.clientX, e.clientY, [
+            const menuItems: Parameters<typeof showContextMenu>[2] = [
               { label: '重命名分组', onClick: () => startRenameGroup(group.id, group.name) },
+            ];
+            if (groupDepth < MAX_DEPTH - 1) {
+              menuItems.push({
+                label: '新建子组',
+                onClick: async () => {
+                  const name = await showPrompt('新建子组', '请输入子组名称');
+                  if (!name?.trim()) return;
+                  createGroup(name.trim(), group.id);
+                  saveConfig();
+                },
+              });
+            }
+            menuItems.push(
               { label: '删除分组（保留项目）', danger: true, onClick: () => { removeGroup(group.id); saveConfig(); } },
-            ]);
+            );
+            showContextMenu(e.clientX, e.clientY, menuItems);
           }}
         >
           <span className="text-xs flex-shrink-0 w-3 text-center transition-transform duration-150"
@@ -362,13 +382,8 @@ export function ProjectList() {
           ) : (
             <span className="truncate flex-1 font-medium">{group.name}</span>
           )}
-          <span className="text-xs text-[var(--text-muted)]">({projects.length})</span>
+          <span className="text-xs text-[var(--text-muted)]">({countProjectsInGroup(group)})</span>
         </div>
-        {!group.collapsed && (
-          <div className="space-y-0.5 mt-0.5">
-            {projects.map((p) => renderProjectItem(p, group.id))}
-          </div>
-        )}
         {renderDropLine(group.id, 'after')}
       </div>
     );
@@ -395,8 +410,8 @@ export function ProjectList() {
             <div className="flex-1 overflow-y-auto px-1.5 space-y-0.5">
               {orderedItems.map((item) =>
                 item.type === 'project'
-                  ? renderProjectItem(item.project)
-                  : renderGroup(item.group, item.projects)
+                  ? renderProjectItem(item.project, item.depth, item.parentGroupId ?? undefined)
+                  : renderGroup(item.group, item.depth)
               )}
             </div>
 
