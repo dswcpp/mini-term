@@ -41,6 +41,7 @@ interface AppConfig {
 - `projects` 数组保持扁平，作为所有项目的注册表，存储 path、savedLayout 等详情
 - `projectTree` 只管组织结构和排序，通过项目 ID 引用 `projects` 中的条目
 - 旧配置无 `projectTree` 时，自动从 `projectGroups` + `projectOrdering` 迁移
+- 若 `projectTree` 和旧字段同时存在（如迁移中途崩溃），`projectTree` 优先，旧字段忽略
 
 ## Store 逻辑
 
@@ -49,30 +50,48 @@ interface AppConfig {
 纯函数，不依赖 store：
 
 ```typescript
-// 计算某个节点在树中的深度（0 = 顶层）
+// 计算某个节点在树中的深度（0 = 顶层），未找到返回 -1
 function getDepth(tree: ProjectTreeItem[], targetId: string): number
 
 // 从树中移除一个节点（项目ID或组ID），返回被移除的节点
 function removeFromTree(tree: ProjectTreeItem[], id: string): ProjectTreeItem | null
 
-// 将节点插入到树中指定位置
+// 将节点插入到指定组内（targetGroupId 为 null 表示根级别）
+// index 为插入位置索引，省略则追加到末尾
 function insertIntoTree(
   tree: ProjectTreeItem[],
-  targetParent: ProjectTreeItem[] | string,
+  targetGroupId: string | null,
   item: ProjectTreeItem,
   index?: number
 ): void
 
-// 计算一个组（包含嵌套子组）被放入某深度后，最深会到几层
+// 计算子树占用的额外深度层数（不含自身所在层）
+// 项目ID → 0，空组 → 0，含直接项目的组 → 1，含子组的组 → 2
 function getSubtreeMaxDepth(item: ProjectTreeItem): number
 
-// 判断拖拽是否合法：目标深度 + 被拖拽子树深度 <= 3
+// 检查 ancestorId 是否是 targetId 的祖先（循环检测）
+function isDescendant(tree: ProjectTreeItem[], ancestorId: string, targetId: string): boolean
+
+// 判断拖拽是否合法：无循环 且 目标深度 + 1 + 子树深度 <= 3
 function canDrop(
   tree: ProjectTreeItem[],
   targetGroupId: string,
   draggedItem: ProjectTreeItem
 ): boolean
 ```
+
+**`getSubtreeMaxDepth` 返回值示例：**
+
+| 节点 | 返回值 |
+|---|---|
+| 项目 ID（字符串） | 0 |
+| 空组 / 只含项目的组 | 1 |
+| 含一层子组的组 | 2 |
+
+**深度校验公式：** `targetDepth + 1 + getSubtreeMaxDepth(draggedItem) <= MAX_DEPTH(3)`
+
+- 拖项目到 depth=2 的组内：2 + 1 + 0 = 3 <= 3，允许
+- 拖含子组的组到 depth=1：1 + 1 + 2 = 4 > 3，禁止
 
 ### Store Actions 变化
 
@@ -81,7 +100,7 @@ function canDrop(
 | `createGroup(name)` | 新增参数 `parentGroupId?`，支持在子组内创建 |
 | `removeGroup(groupId)` | 逻辑不变：子项释放到父级，替换原组位置 |
 | `renameGroup` / `toggleGroupCollapse` | 不变，在树中递归查找并修改 |
-| `moveProjectToGroup` + `moveProjectOutOfGroup` + `reorderItems` | 合并为 `moveItem(itemId, targetGroupId?, index?)`，统一处理所有移动操作 |
+| `moveProjectToGroup` + `moveProjectOutOfGroup` + `reorderItems` | 合并为 `moveItem(itemId, targetGroupId: string \| null, index?: number)`。`targetGroupId` 为 null 表示根级别，`index` 为目标 children 数组中的插入位置，省略则追加到末尾 |
 
 ### 渲染列表生成
 
@@ -96,6 +115,8 @@ function getOrderedTree(config: AppConfig): OrderedItem[]
 ```
 
 递归展平树为带 `depth` 的有序列表，折叠的组不展开 children。
+
+**注意：** `OrderedItem` 的 `group` 变体不再携带 `projects` 数组（旧版有 `projects: ProjectConfig[]`），因为嵌套组的子项通过树结构自身表达。`ProjectList.tsx` 中所有访问 `item.projects` 的代码需要更新。
 
 ## 组件与交互
 
@@ -126,6 +147,8 @@ function getOrderedTree(config: AppConfig): OrderedItem[]
 ### config.rs 变化
 
 ```rust
+// 注意：variant 顺序不可调换！untagged 按声明顺序尝试匹配，
+// ProjectId(String) 必须在 Group 之前，否则 JSON 字符串会匹配失败
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProjectTreeItem {
@@ -141,9 +164,19 @@ pub struct ProjectGroup {
     pub collapsed: bool,
     pub children: Vec<ProjectTreeItem>,
 }
-```
 
-AppConfig 新增 `project_tree`，旧字段标记 `skip_serializing_if = "Option::is_none"`。
+// AppConfig 完整变化
+pub struct AppConfig {
+    pub projects: Vec<ProjectConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_tree: Option<Vec<ProjectTreeItem>>,       // 新字段
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_groups: Option<Vec<ProjectGroup>>,         // 旧字段，仅迁移用
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ordering: Option<Vec<String>>,             // 旧字段，仅迁移用
+    // ... 其余字段不变
+}
+```
 
 ### 配置迁移
 
@@ -161,9 +194,11 @@ AppConfig 新增 `project_tree`，旧字段标记 `skip_serializing_if = "Option
 **删除组：**
 - 子项（项目和子组）释放到父级，保持原有顺序
 - 释放位置替换被删除组在父级中的位置
+- 删除操作不会导致深度违规：子项提升一层，深度只减不增，无需校验
 
-**拖拽深度校验示例：**
-- 拖一个包含 1 层子组的组到 depth=2 → 2+1+1=4 > 3，禁止
+**拖拽时的深度与循环校验：**
+- 拖拽开始时预计算 `getSubtreeMaxDepth` 并缓存到组件 ref 中，避免 dragOver 频繁重算
+- `canDrop` 同时检查深度限制和循环引用（`isDescendant`）
 
 ## 改动范围
 
@@ -173,3 +208,4 @@ AppConfig 新增 `project_tree`，旧字段标记 `skip_serializing_if = "Option
 | 逻辑 | `store.ts` | 树操作工具函数，重写分组相关 actions，新 `getOrderedTree()` |
 | UI | `ProjectList.tsx` | 缩进渲染、拖拽深度校验、禁止样式、右键菜单增强 |
 | 后端 | `config.rs` | `ProjectTreeItem` enum、迁移逻辑、旧字段跳过序列化 |
+| 拖拽 | `utils/dragState.ts` | 拖拽状态需配合缓存子树深度 |
