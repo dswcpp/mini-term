@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, genId, collectPtyIds, saveLayoutToConfig } from '../store';
 import { TabBar } from './TabBar';
@@ -13,6 +13,7 @@ import {
 } from './terminal/splitTree';
 import { showContextMenu } from '../utils/contextMenu';
 import { showPrompt } from '../utils/prompt';
+import { disposeTerminal } from '../utils/terminalCache';
 import type { PaneState, ShellConfig, SplitNode, TerminalTab } from '../types';
 
 interface Props {
@@ -28,21 +29,26 @@ function getTabTitle(tab: TerminalTab): string {
 }
 
 export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) {
-  const config = useAppStore((s) => s.config);
-  const projectStates = useAppStore((s) => s.projectStates);
-  const addTab = useAppStore((s) => s.addTab);
-  const updateTabLayout = useAppStore((s) => s.updateTabLayout);
-  const removeTab = useAppStore((s) => s.removeTab);
-  const setTabCustomTitle = useAppStore((s) => s.setTabCustomTitle);
+  const config = useAppStore((state) => state.config);
+  const projectStates = useAppStore((state) => state.projectStates);
+  const addTab = useAppStore((state) => state.addTab);
+  const updateTabLayout = useAppStore((state) => state.updateTabLayout);
+  const removeTab = useAppStore((state) => state.removeTab);
+  const setTabCustomTitle = useAppStore((state) => state.setTabCustomTitle);
   const ps = projectStates.get(projectId);
 
   const handleCloseTab = useCallback(
     async (tabId: string) => {
-      const tab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const tab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
+
       if (tab) {
         const ptyIds = collectPtyIds(tab.splitLayout);
         for (const id of ptyIds) {
           await invoke('kill_pty', { ptyId: id });
+          disposeTerminal(id);
         }
       }
 
@@ -55,9 +61,9 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
   const handleNewTab = useCallback(
     async (selectedShell?: ShellConfig) => {
       const shell =
-        selectedShell
-        ?? config.availableShells.find((item) => item.name === config.defaultShell)
-        ?? config.availableShells[0];
+        selectedShell ??
+        config.availableShells.find((item) => item.name === config.defaultShell) ??
+        config.availableShells[0];
       if (!shell) return;
 
       const ptyId = await invoke<number>('create_pty', {
@@ -66,16 +72,13 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         cwd: projectPath,
       });
 
-      const paneId = genId();
-      const tabId = genId();
-
       const tab: TerminalTab = {
-        id: tabId,
+        id: genId(),
         status: 'idle',
         splitLayout: {
           type: 'leaf',
           pane: {
-            id: paneId,
+            id: genId(),
             shellName: shell.name,
             status: 'idle',
             ptyId,
@@ -90,7 +93,7 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
   );
 
   const handleNewTabClick = useCallback(
-    (event: React.MouseEvent) => {
+    (event: ReactMouseEvent) => {
       showContextMenu(
         event.clientX,
         event.clientY,
@@ -105,12 +108,15 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
   const handleSplitPane = useCallback(
     async (tabId: string, paneId: string, direction: 'horizontal' | 'vertical') => {
-      const tab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const tab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!tab) return;
 
       const shell =
-        config.availableShells.find((item) => item.name === config.defaultShell)
-        ?? config.availableShells[0];
+        config.availableShells.find((item) => item.name === config.defaultShell) ??
+        config.availableShells[0];
       if (!shell) return;
 
       const ptyId = await invoke<number>('create_pty', {
@@ -126,11 +132,14 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         ptyId,
       };
 
-      const latestTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const latestTab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!latestTab) return;
 
-      const newLayout = insertSplit(latestTab.splitLayout, paneId, direction, newPane);
-      updateTabLayout(projectId, tabId, newLayout);
+      const nextLayout = insertSplit(latestTab.splitLayout, paneId, direction, newPane);
+      updateTabLayout(projectId, tabId, nextLayout);
       saveLayoutToConfig(projectId);
     },
     [config.availableShells, config.defaultShell, projectId, projectPath, updateTabLayout],
@@ -144,21 +153,22 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       direction: 'horizontal' | 'vertical',
       position: 'before' | 'after',
     ) => {
-      const currentPs = useAppStore.getState().projectStates.get(projectId);
-      const targetTab = currentPs?.tabs.find((item) => item.id === targetTabId);
-      if (!currentPs || !targetTab || sourceTabId === targetTabId) return;
+      const currentProjectState = useAppStore.getState().projectStates.get(projectId);
+      const targetTab = currentProjectState?.tabs.find((item) => item.id === targetTabId);
+      if (!currentProjectState || !targetTab || sourceTabId === targetTabId) return;
 
-      const sourceTab = currentPs.tabs.find((item) => item.id === sourceTabId);
+      const sourceTab = currentProjectState.tabs.find((item) => item.id === sourceTabId);
       if (!sourceTab) return;
 
-      const newLayout = insertSplitNode(
+      const nextLayout = insertSplitNode(
         targetTab.splitLayout,
         targetPaneId,
         direction,
         sourceTab.splitLayout,
         position,
       );
-      updateTabLayout(projectId, targetTabId, newLayout);
+
+      updateTabLayout(projectId, targetTabId, nextLayout);
       removeTab(projectId, sourceTabId);
       saveLayoutToConfig(projectId);
     },
@@ -167,20 +177,27 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
   const handleClosePane = useCallback(
     async (tabId: string, paneId: string) => {
-      const currentTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const currentTab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!currentTab) return;
 
       const pane = findPane(currentTab.splitLayout, paneId);
       if (!pane) return;
 
       await invoke('kill_pty', { ptyId: pane.ptyId });
+      disposeTerminal(pane.ptyId);
 
-      const latestTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const latestTab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!latestTab) return;
 
-      const newLayout = removePane(latestTab.splitLayout, paneId);
-      if (newLayout) {
-        updateTabLayout(projectId, tabId, newLayout);
+      const nextLayout = removePane(latestTab.splitLayout, paneId);
+      if (nextLayout) {
+        updateTabLayout(projectId, tabId, nextLayout);
         saveLayoutToConfig(projectId);
       } else {
         await handleCloseTab(tabId);
@@ -191,19 +208,23 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
   const handleRestartPane = useCallback(
     async (tabId: string, paneId: string) => {
-      const currentTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const currentTab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!currentTab) return;
 
       const pane = findPane(currentTab.splitLayout, paneId);
       if (!pane) return;
 
       const shell =
-        config.availableShells.find((item) => item.name === pane.shellName)
-        ?? config.availableShells.find((item) => item.name === config.defaultShell)
-        ?? config.availableShells[0];
+        config.availableShells.find((item) => item.name === pane.shellName) ??
+        config.availableShells.find((item) => item.name === config.defaultShell) ??
+        config.availableShells[0];
       if (!shell) return;
 
       await invoke('kill_pty', { ptyId: pane.ptyId });
+      disposeTerminal(pane.ptyId);
 
       const ptyId = await invoke<number>('create_pty', {
         shell: shell.command,
@@ -211,7 +232,10 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         cwd: projectPath,
       });
 
-      const latestTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const latestTab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!latestTab) return;
 
       const latestPane = findPane(latestTab.splitLayout, paneId);
@@ -232,7 +256,10 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
   const handleRenameTab = useCallback(
     async (tabId: string) => {
-      const tab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const tab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!tab) return;
 
       const nextTitle = await showPrompt(
@@ -250,12 +277,17 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
   const handleLayoutChange = useCallback(
     (tabId: string, updatedNode: SplitNode) => {
-      const currentTab = useAppStore.getState().projectStates.get(projectId)?.tabs.find((item) => item.id === tabId);
+      const currentTab = useAppStore
+        .getState()
+        .projectStates.get(projectId)
+        ?.tabs.find((item) => item.id === tabId);
       if (!currentTab) return;
 
       const currentIds = collectPaneIds(currentTab.splitLayout).sort().join(',');
       const updatedIds = collectPaneIds(updatedNode).sort().join(',');
-      if (currentIds !== updatedIds) return;
+      if (currentIds !== updatedIds) {
+        return;
+      }
 
       updateTabLayout(projectId, tabId, updatedNode);
       saveLayoutToConfig(projectId);
@@ -287,7 +319,7 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
               onTabDrop={(sourceTabId, targetPaneId, direction, position) =>
                 handleTabDrop(tab.id, sourceTabId, targetPaneId, direction, position)
               }
-              onLayoutChange={(updated) => handleLayoutChange(tab.id, updated)}
+              onLayoutChange={(updatedNode) => handleLayoutChange(tab.id, updatedNode)}
             />
           </div>
         ))}
@@ -296,6 +328,7 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
           <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--text-muted)]">
             <div className="text-3xl opacity-20">⌁</div>
             <button
+              type="button"
               className="rounded-[var(--radius-md)] border border-dashed border-[var(--border-default)] px-5 py-2.5 text-sm transition-all duration-200 hover:border-[var(--accent)] hover:text-[var(--accent)]"
               onClick={handleNewTabClick}
             >

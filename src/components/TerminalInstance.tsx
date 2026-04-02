@@ -10,16 +10,15 @@ import {
 } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore } from '../store';
 import { resolveTheme } from '../theme';
-import type { PaneStatus, PtyOutputPayload } from '../types';
+import type { PaneStatus } from '../types';
 import { getDraggingTabId } from '../utils/dragState';
 import { showContextMenu } from '../utils/contextMenu';
+import { getOrCreateTerminal } from '../utils/terminalCache';
 import { buildTerminalContextMenu } from './terminal/terminalContextMenu';
 import { StatusDot } from './StatusDot';
 import '@xterm/xterm/css/xterm.css';
@@ -110,7 +109,6 @@ export function TerminalInstance({
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const previousStatusRef = useRef<PaneStatus | undefined>(status);
-  const startupOutputReceivedRef = useRef(false);
   const [dragKind, setDragKind] = useState<DragKind | null>(null);
   const [tabDropZone, setTabDropZone] = useState<DropZone | null>(null);
   const [notifyOnCompletion, setNotifyOnCompletion] = useState(false);
@@ -119,126 +117,33 @@ export function TerminalInstance({
   const resolvedTheme = resolveTheme(themeConfig);
 
   useEffect(() => {
-    if (!containerRef.current) return;
-    startupOutputReceivedRef.current = false;
+    const container = containerRef.current;
+    if (!container) return;
 
-    const term = new Terminal({
-      fontSize: useAppStore.getState().config.terminalFontSize ?? 14,
-      fontFamily: "'JetBrains Mono', 'Cascadia Code', Consolas, monospace",
-      fontWeight: '400',
-      fontWeightBold: '600',
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      cursorWidth: 2,
-      scrollback: 5000,
-      letterSpacing: 0,
-      lineHeight: 1.35,
-      theme: resolvedTheme.preset.terminal,
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
-    term.reset();
-
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-        term.refresh(0, term.rows - 1);
-      });
-      term.loadAddon(webgl);
-    } catch {
-      // Fall back to Canvas when WebGL is unavailable.
-    }
-
-    fitAddon.fit();
-    term.refresh(0, term.rows - 1);
+    const { term, fitAddon, wrapper } = getOrCreateTerminal(ptyId);
     termRef.current = term;
     fitAddonRef.current = fitAddon;
+    container.appendChild(wrapper);
 
-    term.attachCustomKeyEventHandler((event) => {
-      if (event.type !== 'keydown') return true;
-
-      if (event.ctrlKey && event.shiftKey && event.code === 'KeyC') {
-        event.preventDefault();
-        const selection = term.getSelection();
-        if (selection) void writeText(selection);
-        return false;
-      }
-
-      if (event.ctrlKey && event.shiftKey && event.code === 'KeyV') {
-        event.preventDefault();
-        void readText().then((text) => {
-          if (text) {
-            void invoke('write_pty', { ptyId, data: text });
-          }
-        });
-        return false;
-      }
-
-      return true;
-    });
-
-    void invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
-
-    const onDataDisposable = term.onData((data) => {
-      term.scrollToBottom();
-      void invoke('write_pty', { ptyId, data });
-    });
-
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    const bootstrapTimers = [
-      window.setTimeout(() => {
+    requestAnimationFrame(() => {
+      if (container.clientWidth > 0 && container.clientHeight > 0) {
         fitAddon.fit();
+        void invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
         term.refresh(0, term.rows - 1);
-      }, 60),
-      window.setTimeout(() => {
-        fitAddon.fit();
-        term.refresh(0, term.rows - 1);
-      }, 180),
-    ];
-    void listen<PtyOutputPayload>('pty-output', (event) => {
-      if (event.payload.ptyId === ptyId) {
-        if (event.payload.data) {
-          startupOutputReceivedRef.current = true;
-        }
-        term.write(event.payload.data);
       }
-    })
-      .then((fn) => {
-        if (cancelled) {
-          fn();
-          return undefined;
-        }
-
-        unlisten = fn;
-        return invoke<string>('take_startup_output', { ptyId });
-      })
-      .then((initialOutput) => {
-        if (cancelled || !initialOutput || startupOutputReceivedRef.current) return;
-
-        startupOutputReceivedRef.current = true;
-        term.write(initialOutput);
-        term.scrollToBottom();
-        term.refresh(0, term.rows - 1);
-      })
-      .catch(console.error);
-
-    const onResizeDisposable = term.onResize(({ cols, rows }) => {
-      void invoke('resize_pty', { ptyId, cols, rows });
     });
 
     let rafId = 0;
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
-        fitAddon.fit();
-        term.refresh(0, term.rows - 1);
+        if (container.clientWidth > 0 && container.clientHeight > 0) {
+          fitAddon.fit();
+          term.refresh(0, term.rows - 1);
+        }
       });
     });
-    observer.observe(containerRef.current);
+    observer.observe(container);
 
     const visibilityObserver = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
@@ -248,31 +153,31 @@ export function TerminalInstance({
         });
       }
     });
-    visibilityObserver.observe(containerRef.current);
+    visibilityObserver.observe(container);
 
     return () => {
-      cancelled = true;
-      bootstrapTimers.forEach((timer) => window.clearTimeout(timer));
-      unlisten?.();
       cancelAnimationFrame(rafId);
       observer.disconnect();
       visibilityObserver.disconnect();
-      onDataDisposable.dispose();
-      onResizeDisposable.dispose();
-      term.dispose();
-      termRef.current = null;
-      fitAddonRef.current = null;
+      wrapper.remove();
+      if (termRef.current === term) {
+        termRef.current = null;
+      }
+      if (fitAddonRef.current === fitAddon) {
+        fitAddonRef.current = null;
+      }
     };
   }, [ptyId]);
 
   useEffect(() => {
     const term = termRef.current;
     const fitAddon = fitAddonRef.current;
-    if (term && terminalFontSize) {
-      term.options.fontSize = terminalFontSize;
-      fitAddon?.fit();
-    }
-  }, [terminalFontSize]);
+    if (!term || !fitAddon || !terminalFontSize) return;
+
+    term.options.fontSize = terminalFontSize;
+    fitAddon.fit();
+    term.refresh(0, term.rows - 1);
+  }, [terminalFontSize, ptyId]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -280,14 +185,14 @@ export function TerminalInstance({
 
     term.options.theme = resolvedTheme.preset.terminal;
     term.refresh(0, term.rows - 1);
-  }, [resolvedTheme.preset.terminal]);
+  }, [themeConfig.preset, themeConfig.windowEffect, ptyId]);
 
   useEffect(() => {
     if (
-      notifyOnCompletion
-      && previousStatusRef.current === 'ai-working'
-      && status
-      && status !== 'ai-working'
+      notifyOnCompletion &&
+      previousStatusRef.current === 'ai-working' &&
+      status &&
+      status !== 'ai-working'
     ) {
       void appWindow.requestUserAttention(UserAttentionType.Informational).catch(() => {});
       setNotifyOnCompletion(false);
@@ -300,7 +205,8 @@ export function TerminalInstance({
     setNotifyOnCompletion(false);
   }, [ptyId]);
 
-  const isTabDrag = (event: DragEvent<HTMLDivElement>) => event.dataTransfer.types.includes('application/tab-id');
+  const isTabDrag = (event: DragEvent<HTMLDivElement>) =>
+    event.dataTransfer.types.includes('application/tab-id');
 
   const clearDragState = () => {
     setDragKind(null);
@@ -432,7 +338,6 @@ export function TerminalInstance({
       onRenameTab,
       onRestart,
       onSplit,
-      onTabDrop,
       paneId,
       status,
     ],

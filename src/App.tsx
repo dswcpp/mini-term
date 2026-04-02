@@ -9,14 +9,25 @@ import {
 } from 'react';
 import { Allotment } from 'allotment';
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { Effect, getCurrentWindow } from '@tauri-apps/api/window';
-import { useAppStore, restoreLayout, flushLayoutToConfig } from './store';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { ask } from '@tauri-apps/plugin-dialog';
+import {
+  useAppStore,
+  restoreLayout,
+  flushLayoutToConfig,
+  initExpandedDirs,
+  flushExpandedDirsToConfig,
+} from './store';
 import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
 import { FileTree } from './components/FileTree';
+import { GitHistory } from './components/GitHistory';
 import { SettingsModal } from './components/SettingsModal';
 import { useTauriEvent } from './hooks/useTauriEvent';
 import { applyDocumentTheme, resolveTheme } from './theme';
+import { checkForUpdate, type ReleaseInfo } from './utils/updateChecker';
 import type { AppConfig, PaneStatus, PtyExitPayload, PtyStatusChangePayload } from './types';
 
 const appWindow = getCurrentWindow();
@@ -50,90 +61,164 @@ function TitleBarButton({
 }
 
 export function App() {
+  const [configLoaded, setConfigLoaded] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [isFocused, setIsFocused] = useState(true);
-  const activeProjectId = useAppStore((s) => s.activeProjectId);
-  const config = useAppStore((s) => s.config);
-  const setConfig = useAppStore((s) => s.setConfig);
-  const updatePaneStatusByPty = useAppStore((s) => s.updatePaneStatusByPty);
-  const activeProjectName = config.projects.find((project) => project.id === activeProjectId)?.name ?? 'Workspace';
+  const [currentVersion, setCurrentVersion] = useState('');
+  const [updateInfo, setUpdateInfo] = useState<ReleaseInfo | null>(null);
+
+  const activeProjectId = useAppStore((state) => state.activeProjectId);
+  const config = useAppStore((state) => state.config);
+  const setConfig = useAppStore((state) => state.setConfig);
+  const updatePaneStatusByPty = useAppStore((state) => state.updatePaneStatusByPty);
+
+  const activeProjectName =
+    config.projects.find((project) => project.id === activeProjectId)?.name ?? 'Workspace';
   const resolvedTheme = resolveTheme(config.theme);
 
   useEffect(() => {
-    invoke<AppConfig>('load_config').then((cfg) => {
-      setConfig(cfg);
-      if (cfg.uiFontSize) {
-        document.documentElement.style.fontSize = `${cfg.uiFontSize}px`;
+    void invoke<AppConfig>('load_config').then((loadedConfig) => {
+      setConfig(loadedConfig);
+
+      if (loadedConfig.uiFontSize) {
+        document.documentElement.style.fontSize = `${loadedConfig.uiFontSize}px`;
       }
 
       const { projectStates } = useAppStore.getState();
       const nextStates = new Map(projectStates);
-      for (const project of cfg.projects) {
+      for (const project of loadedConfig.projects) {
         if (!nextStates.has(project.id)) {
           nextStates.set(project.id, { id: project.id, tabs: [], activeTabId: '' });
         }
+        initExpandedDirs(project.id, project.expandedDirs ?? []);
       }
 
       useAppStore.setState({
         projectStates: nextStates,
-        activeProjectId: cfg.projects[0]?.id ?? null,
+        activeProjectId: loadedConfig.projects[0]?.id ?? null,
       });
 
-      Promise.all(
-        cfg.projects
+      void Promise.all(
+        loadedConfig.projects
           .filter((project) => project.savedLayout && project.savedLayout.tabs.length > 0)
-          .map((project) => restoreLayout(project.id, project.savedLayout!, project.path, cfg))
+          .map((project) => restoreLayout(project.id, project.savedLayout!, project.path, loadedConfig)),
       ).catch(console.error);
+
+      setConfigLoaded(true);
     });
   }, [setConfig]);
 
+  useEffect(() => {
+    void getVersion()
+      .then((version) => {
+        setCurrentVersion(version);
+        return checkForUpdate(version);
+      })
+      .then((release) => {
+        if (release) {
+          setUpdateInfo(release);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   useTauriEvent<PtyStatusChangePayload>(
     'pty-status-change',
-    useCallback((payload) => {
-      updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus);
-    }, [updatePaneStatusByPty])
+    useCallback(
+      (payload) => {
+        updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus);
+      },
+      [updatePaneStatusByPty],
+    ),
   );
 
   useTauriEvent<PtyExitPayload>(
     'pty-exit',
-    useCallback((payload) => {
-      if (payload.exitCode !== 0) {
-        updatePaneStatusByPty(payload.ptyId, 'error');
-      }
-    }, [updatePaneStatusByPty])
+    useCallback(
+      (payload) => {
+        if (payload.exitCode !== 0) {
+          updatePaneStatusByPty(payload.ptyId, 'error');
+        }
+      },
+      [updatePaneStatusByPty],
+    ),
   );
 
   useEffect(() => {
     const handleBeforeUnload = () => {
       const { activeProjectId: currentProjectId } = useAppStore.getState();
-      if (currentProjectId) {
-        flushLayoutToConfig(currentProjectId);
-      }
+      if (!currentProjectId) return;
+      flushLayoutToConfig(currentProjectId);
+      flushExpandedDirsToConfig(currentProjectId);
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
+  useEffect(() => {
+    const unlistenPromise = appWindow.onCloseRequested(async (event) => {
+      event.preventDefault();
+
+      const confirmed = await ask('确定要关闭 Mini-Term 吗？', {
+        title: '关闭确认',
+        kind: 'warning',
+      });
+      if (!confirmed) {
+        return;
+      }
+
+      const { activeProjectId: currentProjectId } = useAppStore.getState();
+      if (currentProjectId) {
+        flushLayoutToConfig(currentProjectId);
+        flushExpandedDirsToConfig(currentProjectId);
+      }
+
+      void appWindow.destroy();
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
   const prevProjectRef = useRef<string | null>(null);
   useEffect(() => {
     if (prevProjectRef.current && prevProjectRef.current !== activeProjectId) {
       flushLayoutToConfig(prevProjectRef.current);
+      flushExpandedDirsToConfig(prevProjectRef.current);
     }
     prevProjectRef.current = activeProjectId;
   }, [activeProjectId]);
 
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const saveLayoutSizes = useCallback((sizes: number[]) => {
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      const currentConfig = useAppStore.getState().config;
-      const nextConfig = { ...currentConfig, layoutSizes: sizes };
-      setConfig(nextConfig);
-      void invoke('save_config', { config: nextConfig });
-    }, 500);
-  }, [setConfig]);
+  const saveLayoutTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const saveLayoutSizes = useCallback(
+    (sizes: number[]) => {
+      clearTimeout(saveLayoutTimerRef.current);
+      saveLayoutTimerRef.current = setTimeout(() => {
+        const currentConfig = useAppStore.getState().config;
+        const nextConfig = { ...currentConfig, layoutSizes: sizes };
+        setConfig(nextConfig);
+        void invoke('save_config', { config: nextConfig });
+      }, 500);
+    },
+    [setConfig],
+  );
+
+  const saveMiddleTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const saveMiddleColumnSizes = useCallback(
+    (sizes: number[]) => {
+      clearTimeout(saveMiddleTimerRef.current);
+      saveMiddleTimerRef.current = setTimeout(() => {
+        const currentConfig = useAppStore.getState().config;
+        const nextConfig = { ...currentConfig, middleColumnSizes: sizes };
+        setConfig(nextConfig);
+        void invoke('save_config', { config: nextConfig });
+      }, 500);
+    },
+    [setConfig],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -157,27 +242,33 @@ export function App() {
     void syncMaximizedState();
     void syncFocusedState();
 
-    appWindow.onResized(() => {
-      void syncMaximizedState();
-    }).then((fn) => {
-      if (disposed) {
-        fn();
-      } else {
-        unlistenResize = fn;
-      }
-    }).catch(console.error);
+    void appWindow
+      .onResized(() => {
+        void syncMaximizedState();
+      })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenResize = unlisten;
+        }
+      })
+      .catch(console.error);
 
-    appWindow.onFocusChanged(({ payload }) => {
-      if (!disposed) {
-        setIsFocused(payload);
-      }
-    }).then((fn) => {
-      if (disposed) {
-        fn();
-      } else {
-        unlistenFocus = fn;
-      }
-    }).catch(console.error);
+    void appWindow
+      .onFocusChanged(({ payload }) => {
+        if (!disposed) {
+          setIsFocused(payload);
+        }
+      })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenFocus = unlisten;
+        }
+      })
+      .catch(console.error);
 
     return () => {
       disposed = true;
@@ -195,13 +286,13 @@ export function App() {
       return;
     }
 
-    const applyWindowMaterial = async () => {
-      const effectMap = {
-        mica: Effect.Mica,
-        acrylic: Effect.Acrylic,
-        blur: Effect.Blur,
-      } as const;
+    const effectMap = {
+      mica: Effect.Mica,
+      acrylic: Effect.Acrylic,
+      blur: Effect.Blur,
+    } as const;
 
+    const applyWindowMaterial = async () => {
       if (resolvedTheme.windowEffect === 'none') {
         await appWindow.clearEffects();
         await appWindow.setShadow(true);
@@ -240,7 +331,8 @@ export function App() {
   }, []);
 
   const handleWindowToggleMaximize = useCallback(() => {
-    void appWindow.toggleMaximize()
+    void appWindow
+      .toggleMaximize()
       .then(async () => {
         setIsMaximized(await appWindow.isMaximized());
       })
@@ -257,7 +349,8 @@ export function App() {
       return;
     }
 
-    void appWindow.toggleMaximize()
+    void appWindow
+      .toggleMaximize()
       .then(async () => {
         setIsMaximized(await appWindow.isMaximized());
       })
@@ -274,38 +367,62 @@ export function App() {
       return;
     }
 
-    void appWindow.startDragging().catch(() => {
-      // Keep the declarative drag region as the primary path.
-    });
+    void appWindow.startDragging().catch(() => {});
   }, []);
 
   return (
     <div
       className={[
-        'app-shell flex flex-col h-full',
+        'app-shell flex h-full flex-col',
         isMaximized ? 'app-shell-maximized' : '',
         isFocused ? 'app-shell-focused' : 'app-shell-unfocused',
-      ].filter(Boolean).join(' ')}
+      ]
+        .filter(Boolean)
+        .join(' ')}
     >
       <div
-        className="app-titlebar flex items-center gap-4 px-4 py-1.5 border-b border-[var(--border-subtle)] text-xs select-none"
+        className="app-titlebar flex items-center gap-4 border-b border-[var(--border-subtle)] px-4 py-1.5 text-xs select-none"
         onDoubleClick={handleTitleBarDoubleClick}
         onMouseDown={handleTitleBarMouseDown}
         style={dragRegionStyle}
       >
-        <div className="flex items-center gap-4 min-w-0" data-tauri-drag-region style={dragRegionStyle}>
+        <div className="flex min-w-0 items-center gap-4" data-tauri-drag-region style={dragRegionStyle}>
           <span
-            className="font-semibold tracking-wide text-[var(--accent)] text-sm"
+            className="text-sm font-semibold tracking-wide text-[var(--accent)]"
             data-tauri-drag-region
             style={{ ...dragRegionStyle, fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}
           >
             MINI-TERM
           </span>
+
+          {currentVersion && (
+            <span
+              className="text-[10px] font-mono text-[var(--text-muted)]"
+              data-tauri-drag-region
+              style={dragRegionStyle}
+            >
+              v{currentVersion}
+            </span>
+          )}
+
+          {updateInfo && (
+            <button
+              type="button"
+              className="no-drag-region rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/25"
+              style={noDragRegionStyle}
+              onClick={() => openUrl(updateInfo.url)}
+              title={`发现新版本 ${updateInfo.version}，点击前往下载`}
+            >
+              新版本 {updateInfo.version}
+            </button>
+          )}
+
           <div
-            className="titlebar-divider w-px h-3.5 bg-[var(--border-default)]"
+            className="titlebar-divider h-3.5 w-px bg-[var(--border-default)]"
             data-tauri-drag-region
             style={dragRegionStyle}
           />
+
           <span
             className="app-titlemeta truncate text-[10px] uppercase tracking-[0.18em]"
             data-tauri-drag-region
@@ -318,28 +435,25 @@ export function App() {
         <div className="no-drag-region flex items-center gap-3 text-[var(--text-muted)]" style={noDragRegionStyle}>
           <button
             type="button"
-            className="cursor-pointer bg-transparent border-0 p-0 text-inherit hover:text-[var(--text-primary)] transition-colors duration-150"
+            className="cursor-pointer bg-transparent p-0 text-inherit transition-colors duration-150 hover:text-[var(--text-primary)]"
             onClick={() => setConfigOpen(true)}
             style={noDragRegionStyle}
           >
-            Settings
+            设置
           </button>
         </div>
 
         <div className="flex-1 self-stretch" data-tauri-drag-region style={dragRegionStyle} />
 
         {isWindows && (
-          <div className="no-drag-region flex items-stretch self-stretch -mr-4" style={noDragRegionStyle}>
-            <TitleBarButton title="Minimize" onClick={handleWindowMinimize}>
+          <div className="no-drag-region -mr-4 flex self-stretch items-stretch" style={noDragRegionStyle}>
+            <TitleBarButton title="最小化" onClick={handleWindowMinimize}>
               <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
                 <path d="M1 5h8" />
               </svg>
             </TitleBarButton>
 
-            <TitleBarButton
-              title={isMaximized ? 'Restore' : 'Maximize'}
-              onClick={handleWindowToggleMaximize}
-            >
+            <TitleBarButton title={isMaximized ? '还原' : '最大化'} onClick={handleWindowToggleMaximize}>
               {isMaximized ? (
                 <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
                   <path d="M2 3h5v5H2z" />
@@ -352,7 +466,7 @@ export function App() {
               )}
             </TitleBarButton>
 
-            <TitleBarButton title="Close" danger onClick={handleWindowClose}>
+            <TitleBarButton title="关闭" danger onClick={handleWindowClose}>
               <svg viewBox="0 0 10 10" className="titlebar-icon" aria-hidden="true">
                 <path d="M2 2l6 6" />
                 <path d="M8 2L2 8" />
@@ -363,42 +477,52 @@ export function App() {
       </div>
 
       <div className="flex-1 overflow-hidden">
-        <Allotment
-          defaultSizes={config.layoutSizes ?? [200, 280, 1000]}
-          onChange={saveLayoutSizes}
-        >
-          <Allotment.Pane minSize={140} maxSize={350}>
-            <ProjectList />
-          </Allotment.Pane>
+        {configLoaded ? (
+          <Allotment defaultSizes={config.layoutSizes ?? [200, 280, 1000]} onChange={saveLayoutSizes}>
+            <Allotment.Pane minSize={140} maxSize={350}>
+              <ProjectList />
+            </Allotment.Pane>
 
-          <Allotment.Pane minSize={180}>
-            <FileTree />
-          </Allotment.Pane>
+            <Allotment.Pane minSize={180}>
+              <Allotment
+                vertical
+                defaultSizes={config.middleColumnSizes ?? [300, 200]}
+                onChange={saveMiddleColumnSizes}
+              >
+                <Allotment.Pane minSize={150}>
+                  <FileTree key={activeProjectId} />
+                </Allotment.Pane>
+                <Allotment.Pane minSize={36}>
+                  <GitHistory key={activeProjectId} />
+                </Allotment.Pane>
+              </Allotment>
+            </Allotment.Pane>
 
-          <Allotment.Pane>
-            <div className="relative h-full">
-              {config.projects.map((project) => (
-                <div
-                  key={project.id}
-                  className="absolute inset-0"
-                  style={{ display: project.id === activeProjectId ? 'block' : 'none' }}
-                >
-                  <TerminalArea
-                    projectId={project.id}
-                    projectPath={project.path}
-                    onOpenSettings={() => setConfigOpen(true)}
-                  />
-                </div>
-              ))}
+            <Allotment.Pane>
+              <div className="relative h-full">
+                {config.projects.map((project) => (
+                  <div
+                    key={project.id}
+                    className="absolute inset-0"
+                    style={{ display: project.id === activeProjectId ? 'block' : 'none' }}
+                  >
+                    <TerminalArea
+                      projectId={project.id}
+                      projectPath={project.path}
+                      onOpenSettings={() => setConfigOpen(true)}
+                    />
+                  </div>
+                ))}
 
-              {config.projects.length === 0 && (
-                <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
-                  Add a project from the left panel first.
-                </div>
-              )}
-            </div>
-          </Allotment.Pane>
-        </Allotment>
+                {config.projects.length === 0 && (
+                  <div className="flex h-full items-center justify-center bg-[var(--bg-terminal)] text-sm text-[var(--text-muted)]">
+                    请先在左侧添加一个项目。
+                  </div>
+                )}
+              </div>
+            </Allotment.Pane>
+          </Allotment>
+        ) : null}
       </div>
 
       <SettingsModal open={configOpen} onClose={() => setConfigOpen(false)} />

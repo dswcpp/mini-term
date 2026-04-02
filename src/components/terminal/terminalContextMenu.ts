@@ -25,7 +25,9 @@ export interface TerminalContextMenuOptions {
   onOpenSettings: () => void;
 }
 
-export function buildTerminalContextMenu(options: TerminalContextMenuOptions): ContextMenuEntry[] {
+export function buildTerminalContextMenu(
+  options: TerminalContextMenuOptions,
+): ContextMenuEntry[] {
   return [
     {
       label: '复制',
@@ -39,14 +41,14 @@ export function buildTerminalContextMenu(options: TerminalContextMenuOptions): C
       onClick: options.onPaste,
     },
     {
-      label: '下条命令完成时发出提醒',
+      label: '当前任务完成后提醒我',
       checked: options.notifyOnCompletion,
       disabled: !options.canNotifyOnCompletion && !options.notifyOnCompletion,
       onClick: options.onToggleNotifyOnCompletion,
     },
     { separator: true },
     {
-      label: '清除屏幕',
+      label: '清空屏幕',
       onClick: options.onClearScreen,
     },
     {
@@ -114,7 +116,7 @@ export function buildTerminalContextMenu(options: TerminalContextMenuOptions): C
     },
     { separator: true },
     {
-      label: '配置',
+      label: '设置',
       children: [
         {
           label: '打开设置',

@@ -1,0 +1,717 @@
+use git2::{Repository, Status, StatusOptions};
+use pathdiff::diff_paths;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// Data structures
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum GitStatus {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub status: GitStatus,
+    pub status_label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffHunk {
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+    pub lines: Vec<DiffLine>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLine {
+    pub kind: String,
+    pub content: String,
+    pub old_lineno: Option<u32>,
+    pub new_lineno: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffResult {
+    pub old_content: String,
+    pub new_content: String,
+    pub hunks: Vec<DiffHunk>,
+    pub is_binary: bool,
+    pub too_large: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: get_git_status implementation
+// ---------------------------------------------------------------------------
+
+fn map_status(status: Status, is_empty_repo: bool) -> Option<GitStatus> {
+    if status.contains(Status::CONFLICTED) {
+        return Some(GitStatus::Conflicted);
+    }
+    if status.contains(Status::INDEX_RENAMED) || status.contains(Status::WT_RENAMED) {
+        return Some(GitStatus::Renamed);
+    }
+    if status.contains(Status::INDEX_NEW) {
+        return Some(GitStatus::Added);
+    }
+    if status.contains(Status::INDEX_MODIFIED) || status.contains(Status::WT_MODIFIED) {
+        return Some(GitStatus::Modified);
+    }
+    if status.contains(Status::INDEX_DELETED) || status.contains(Status::WT_DELETED) {
+        return Some(GitStatus::Deleted);
+    }
+    if status.contains(Status::WT_NEW) {
+        if is_empty_repo {
+            return Some(GitStatus::Added);
+        } else {
+            return Some(GitStatus::Untracked);
+        }
+    }
+    None
+}
+
+fn status_label(status: &GitStatus) -> &'static str {
+    match status {
+        GitStatus::Modified => "M",
+        GitStatus::Added => "A",
+        GitStatus::Deleted => "D",
+        GitStatus::Renamed => "R",
+        GitStatus::Untracked => "?",
+        GitStatus::Conflicted => "C",
+    }
+}
+
+fn collect_repo_status(
+    repo: &Repository,
+    path_prefix: Option<&Path>,
+) -> Result<Vec<GitFileStatus>, String> {
+    let is_empty_repo = repo.head().is_err();
+
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+
+    let mut result = Vec::new();
+    for entry in statuses.iter() {
+        let raw_path = entry.path().unwrap_or("").to_string();
+        let s = entry.status();
+
+        let git_status = match map_status(s, is_empty_repo) {
+            Some(gs) => gs,
+            None => continue,
+        };
+
+        let label = status_label(&git_status).to_string();
+
+        // Compute path relative to path_prefix (if given), else use raw_path
+        let display_path = if let Some(prefix) = path_prefix {
+            let repo_workdir = repo.workdir().unwrap_or_else(|| repo.path());
+            let abs = repo_workdir.join(&raw_path);
+            diff_paths(&abs, prefix)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|| raw_path.clone())
+        } else {
+            raw_path.clone()
+        };
+
+        // old_path for renames
+        let old_path = if matches!(git_status, GitStatus::Renamed) {
+            entry.head_to_index().and_then(|d| {
+                d.old_file()
+                    .path()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+        } else {
+            None
+        };
+
+        result.push(GitFileStatus {
+            path: display_path,
+            old_path,
+            status: git_status,
+            status_label: label,
+        });
+    }
+
+    Ok(result)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepoInfo {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitInfo {
+    pub hash: String,
+    pub short_hash: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitFileInfo {
+    pub path: String,
+    pub status: String,
+    pub old_path: Option<String>,
+}
+
+/// Scan project_path for git repositories.
+fn find_repos(project_path: &Path) -> Vec<(String, PathBuf, Repository)> {
+    let mut repos = Vec::new();
+
+    // 1) 项目路径自身是否为仓库（使用 discover 保持向上搜索能力）
+    if let Ok(repo) = Repository::discover(project_path) {
+        if let Some(workdir) = repo.workdir() {
+            let repo_root = workdir.to_path_buf();
+            let name = repo_root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "root".to_string());
+            repos.push((name, repo_root, repo));
+            return repos;
+        }
+    }
+
+    // 2) 扫描一级子目录（使用 open 避免向上搜索）
+    if let Ok(entries) = std::fs::read_dir(project_path) {
+        for entry in entries.flatten() {
+            let sub = entry.path();
+            if sub.is_dir() {
+                if let Ok(repo) = Repository::open(&sub) {
+                    if let Some(workdir) = repo.workdir() {
+                        if workdir.canonicalize().ok() == sub.canonicalize().ok() {
+                            let name = sub
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            repos.push((name, sub, repo));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    repos
+}
+
+#[tauri::command]
+pub fn get_git_status(project_path: String) -> Result<Vec<GitFileStatus>, String> {
+    let path = Path::new(&project_path);
+    let repos = find_repos(path);
+
+    if repos.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut all = Vec::new();
+    for (_, _, repo) in &repos {
+        if let Ok(mut files) = collect_repo_status(repo, Some(path)) {
+            all.append(&mut files);
+        }
+    }
+    Ok(all)
+}
+
+#[tauri::command]
+pub fn discover_git_repos(project_path: String) -> Result<Vec<GitRepoInfo>, String> {
+    let path = Path::new(&project_path);
+    let repos = find_repos(path);
+    Ok(repos
+        .into_iter()
+        .map(|(name, abs_path, _)| GitRepoInfo {
+            name,
+            path: abs_path.to_string_lossy().to_string(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn get_git_log(
+    repo_path: String,
+    before_commit: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<GitCommitInfo>, String> {
+    let path = Path::new(&repo_path);
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(30);
+
+    let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
+    revwalk.set_sorting(git2::Sort::TIME).map_err(|e| e.to_string())?;
+
+    if let Some(ref hash) = before_commit {
+        let oid = git2::Oid::from_str(hash).map_err(|e| e.to_string())?;
+        let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
+        for parent_id in commit.parent_ids() {
+            revwalk.push(parent_id).map_err(|e| e.to_string())?;
+        }
+    } else {
+        revwalk.push_head().map_err(|e| e.to_string())?;
+    }
+
+    let mut result = Vec::with_capacity(limit);
+    for oid_result in revwalk {
+        if result.len() >= limit {
+            break;
+        }
+        let oid = oid_result.map_err(|e| e.to_string())?;
+        let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
+        let hash = oid.to_string();
+        let short_hash = hash[..7.min(hash.len())].to_string();
+        let message = commit.summary().unwrap_or("").to_string();
+        let author = commit.author().name().unwrap_or("unknown").to_string();
+        let timestamp = commit.time().seconds();
+        result.push(GitCommitInfo {
+            hash,
+            short_hash,
+            message,
+            author,
+            timestamp,
+        });
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn get_commit_files(
+    repo_path: String,
+    commit_hash: String,
+) -> Result<Vec<CommitFileInfo>, String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let oid = git2::Oid::from_str(&commit_hash).map_err(|e| e.to_string())?;
+    let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
+    let tree = commit.tree().map_err(|e| e.to_string())?;
+
+    let parent_tree = if commit.parent_count() > 0 {
+        Some(commit.parent(0).map_err(|e| e.to_string())?.tree().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+
+    let diff = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
+        .map_err(|e| e.to_string())?;
+
+    let mut files = Vec::new();
+    for delta in diff.deltas() {
+        let status = match delta.status() {
+            git2::Delta::Added => "added",
+            git2::Delta::Deleted => "deleted",
+            git2::Delta::Modified => "modified",
+            git2::Delta::Renamed => "renamed",
+            _ => "modified",
+        };
+        let path = delta
+            .new_file()
+            .path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let old_path = if delta.status() == git2::Delta::Renamed {
+            delta.old_file().path().map(|p| p.to_string_lossy().to_string())
+        } else {
+            None
+        };
+        files.push(CommitFileInfo {
+            path,
+            status: status.to_string(),
+            old_path,
+        });
+    }
+    Ok(files)
+}
+
+#[tauri::command]
+pub fn get_commit_file_diff(
+    repo_path: String,
+    commit_hash: String,
+    file_path: String,
+    old_file_path: Option<String>,
+) -> Result<GitDiffResult, String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let oid = git2::Oid::from_str(&commit_hash).map_err(|e| e.to_string())?;
+    let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
+    let tree = commit.tree().map_err(|e| e.to_string())?;
+
+    let parent_tree = if commit.parent_count() > 0 {
+        Some(commit.parent(0).map_err(|e| e.to_string())?.tree().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+
+    let new_content = match tree.get_path(Path::new(&file_path)) {
+        Ok(entry) => {
+            let obj = entry.to_object(&repo).map_err(|e| e.to_string())?;
+            let blob = obj.as_blob().ok_or("not a blob")?;
+            if blob.is_binary() {
+                return Ok(GitDiffResult {
+                    old_content: String::new(),
+                    new_content: String::new(),
+                    hunks: Vec::new(),
+                    is_binary: true,
+                    too_large: false,
+                });
+            }
+            if blob.content().len() > 1_048_576 {
+                return Ok(GitDiffResult {
+                    old_content: String::new(),
+                    new_content: String::new(),
+                    hunks: Vec::new(),
+                    is_binary: false,
+                    too_large: true,
+                });
+            }
+            std::str::from_utf8(blob.content())
+                .map_err(|_| "binary".to_string())?
+                .to_string()
+        }
+        Err(_) => String::new(),
+    };
+
+    let old_lookup_path = old_file_path.as_deref().unwrap_or(&file_path);
+    let old_content = if let Some(ref pt) = parent_tree {
+        match pt.get_path(Path::new(old_lookup_path)) {
+            Ok(entry) => {
+                let obj = entry.to_object(&repo).map_err(|e| e.to_string())?;
+                let blob = obj.as_blob().ok_or("not a blob")?;
+                if blob.is_binary() {
+                    return Ok(GitDiffResult {
+                        old_content: String::new(),
+                        new_content: String::new(),
+                        hunks: Vec::new(),
+                        is_binary: true,
+                        too_large: false,
+                    });
+                }
+                std::str::from_utf8(blob.content())
+                    .map_err(|_| "binary".to_string())?
+                    .to_string()
+            }
+            Err(_) => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+
+    let ol = old_lines.len() as u64;
+    let nl = new_lines.len() as u64;
+
+    let hunks = if ol * nl > 10_000_000 {
+        full_replace_diff(&old_content, &new_content)
+    } else {
+        build_hunks(&old_lines, &new_lines)
+    };
+
+    Ok(GitDiffResult {
+        old_content,
+        new_content,
+        hunks,
+        is_binary: false,
+        too_large: false,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// get_git_diff implementation
+// ---------------------------------------------------------------------------
+
+fn get_head_content(repo: &Repository, rel_path: &str) -> Result<Option<String>, String> {
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => return Ok(None), // empty repo
+    };
+    let tree = head
+        .peel_to_tree()
+        .map_err(|e| e.to_string())?;
+    let entry = match tree.get_path(Path::new(rel_path)) {
+        Ok(e) => e,
+        Err(_) => return Ok(Some(String::new())), // file not yet in HEAD
+    };
+    let obj = entry.to_object(repo).map_err(|e| e.to_string())?;
+    let blob = obj.as_blob().ok_or("not a blob")?;
+
+    if blob.is_binary() {
+        return Err("binary".to_string());
+    }
+    let content = std::str::from_utf8(blob.content())
+        .map_err(|_| "binary".to_string())?
+        .to_string();
+    Ok(Some(content))
+}
+
+// LCS-based diff producing DiffHunks (context = 3 lines)
+fn build_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk> {
+    let m = old_lines.len();
+    let n = new_lines.len();
+
+    // LCS DP table
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in (0..m).rev() {
+        for j in (0..n).rev() {
+            if old_lines[i] == new_lines[j] {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+            } else {
+                dp[i][j] = dp[i + 1][j].max(dp[i][j + 1]);
+            }
+        }
+    }
+
+    // Produce flat edit list: ('=', old_i, new_j) | ('-', old_i, _) | ('+', _, new_j)
+    let mut flat: Vec<(char, usize, usize)> = Vec::new();
+    let mut i = 0;
+    let mut j = 0;
+    while i < m || j < n {
+        if i < m && j < n && old_lines[i] == new_lines[j] {
+            flat.push(('=', i, j));
+            i += 1;
+            j += 1;
+        } else if j < n && (i >= m || dp[i][j + 1] >= dp[i + 1][j]) {
+            flat.push(('+', i, j));
+            j += 1;
+        } else {
+            flat.push(('-', i, j));
+            i += 1;
+        }
+    }
+
+    // Group into hunks (context = 3 lines)
+    const CONTEXT: usize = 3;
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+
+    // Find ranges of non-equal edits, expand with context
+    let changed_indices: Vec<usize> = flat
+        .iter()
+        .enumerate()
+        .filter(|(_, (k, _, _))| *k != '=')
+        .map(|(idx, _)| idx)
+        .collect();
+
+    if changed_indices.is_empty() {
+        return hunks;
+    }
+
+    // Group changed indices into contiguous ranges (with context)
+    let mut groups: Vec<(usize, usize)> = Vec::new(); // (start, end) in flat[]
+    let start = changed_indices[0].saturating_sub(CONTEXT);
+    let end = (changed_indices[0] + CONTEXT + 1).min(flat.len());
+    groups.push((start, end));
+
+    for &idx in &changed_indices[1..] {
+        let last = groups.last_mut().unwrap();
+        let expanded_start = idx.saturating_sub(CONTEXT);
+        let expanded_end = (idx + CONTEXT + 1).min(flat.len());
+        if expanded_start <= last.1 {
+            last.1 = last.1.max(expanded_end);
+        } else {
+            groups.push((expanded_start, expanded_end));
+        }
+    }
+
+    for (grp_start, grp_end) in groups {
+        let slice = &flat[grp_start..grp_end];
+        let mut lines_out: Vec<DiffLine> = Vec::new();
+        let mut old_start = 0u32;
+        let mut new_start = 0u32;
+        let mut old_count = 0u32;
+        let mut new_count = 0u32;
+        let mut first = true;
+
+        for (k, oi, ni) in slice {
+            let old_lineno = (*oi as u32) + 1;
+            let new_lineno = (*ni as u32) + 1;
+            match k {
+                '=' => {
+                    if first {
+                        old_start = old_lineno;
+                        new_start = new_lineno;
+                        first = false;
+                    }
+                    lines_out.push(DiffLine {
+                        kind: "context".to_string(),
+                        content: old_lines[*oi].to_string(),
+                        old_lineno: Some(old_lineno),
+                        new_lineno: Some(new_lineno),
+                    });
+                    old_count += 1;
+                    new_count += 1;
+                }
+                '-' => {
+                    if first {
+                        old_start = old_lineno;
+                        // new_start might be the next insert; approximate
+                        new_start = (*ni as u32) + 1;
+                        first = false;
+                    }
+                    lines_out.push(DiffLine {
+                        kind: "delete".to_string(),
+                        content: old_lines[*oi].to_string(),
+                        old_lineno: Some(old_lineno),
+                        new_lineno: None,
+                    });
+                    old_count += 1;
+                }
+                '+' => {
+                    if first {
+                        old_start = (*oi as u32) + 1;
+                        new_start = new_lineno;
+                        first = false;
+                    }
+                    lines_out.push(DiffLine {
+                        kind: "add".to_string(),
+                        content: new_lines[*ni].to_string(),
+                        old_lineno: None,
+                        new_lineno: Some(new_lineno),
+                    });
+                    new_count += 1;
+                }
+                _ => {}
+            }
+        }
+
+        hunks.push(DiffHunk {
+            old_start,
+            old_lines: old_count,
+            new_start,
+            new_lines: new_count,
+            lines: lines_out,
+        });
+    }
+
+    hunks
+}
+
+fn full_replace_diff(old_content: &str, new_content: &str) -> Vec<DiffHunk> {
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+    let mut lines_out: Vec<DiffLine> = Vec::new();
+
+    for (i, l) in old_lines.iter().enumerate() {
+        lines_out.push(DiffLine {
+            kind: "delete".to_string(),
+            content: l.to_string(),
+            old_lineno: Some((i as u32) + 1),
+            new_lineno: None,
+        });
+    }
+    for (i, l) in new_lines.iter().enumerate() {
+        lines_out.push(DiffLine {
+            kind: "add".to_string(),
+            content: l.to_string(),
+            old_lineno: None,
+            new_lineno: Some((i as u32) + 1),
+        });
+    }
+
+    if lines_out.is_empty() {
+        return Vec::new();
+    }
+
+    vec![DiffHunk {
+        old_start: 1,
+        old_lines: old_lines.len() as u32,
+        new_start: 1,
+        new_lines: new_lines.len() as u32,
+        lines: lines_out,
+    }]
+}
+
+#[tauri::command]
+pub fn get_git_diff(project_path: String, file_path: String) -> Result<GitDiffResult, String> {
+    let project = Path::new(&project_path);
+    let abs_file = project.join(&file_path);
+
+    let repo = Repository::discover(&abs_file).map_err(|e| e.to_string())?;
+    let workdir = repo
+        .workdir()
+        .ok_or("bare repository not supported")?;
+
+    // Relative path inside repo
+    let rel_path = diff_paths(&abs_file, workdir)
+        .ok_or("file is outside repository working directory")?;
+    let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+
+    // Read new (working tree) content
+    let new_bytes = std::fs::read(&abs_file).map_err(|e| e.to_string())?;
+
+    // Large file protection (> 1 MB)
+    if new_bytes.len() > 1_048_576 {
+        return Ok(GitDiffResult {
+            old_content: String::new(),
+            new_content: String::new(),
+            hunks: Vec::new(),
+            is_binary: false,
+            too_large: true,
+        });
+    }
+
+    // Binary detection
+    let new_content = match std::str::from_utf8(&new_bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            return Ok(GitDiffResult {
+                old_content: String::new(),
+                new_content: String::new(),
+                hunks: Vec::new(),
+                is_binary: true,
+                too_large: false,
+            })
+        }
+    };
+
+    // Get HEAD content
+    let old_content = match get_head_content(&repo, &rel_str)? {
+        None => String::new(), // empty repo
+        Some(s) => s,
+    };
+
+    // Check blob binary via git2 as well
+    // (already covered by UTF-8 check above for new content; old content checked in get_head_content)
+
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines_vec: Vec<&str> = new_content.lines().collect();
+
+    let ol = old_lines.len() as u64;
+    let nl = new_lines_vec.len() as u64;
+
+    let hunks = if ol * nl > 10_000_000 {
+        full_replace_diff(&old_content, &new_content)
+    } else {
+        build_hunks(&old_lines, &new_lines_vec)
+    };
+
+    Ok(GitDiffResult {
+        old_content,
+        new_content,
+        hunks,
+        is_binary: false,
+        too_large: false,
+    })
+}

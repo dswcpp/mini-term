@@ -42,8 +42,8 @@ export interface ResolvedTheme {
 
 const warmCarbon: ThemePresetDefinition = {
   id: 'warm-carbon',
-  name: '暖炭',
-  description: '偏暖的炭黑底色，搭配铜色点缀和柔和的终端辉光。',
+  name: 'Warm Carbon',
+  description: 'Warm charcoal surfaces with copper accents and a soft terminal glow.',
   preview: ['#0e0d0b', '#1e1c19', '#c8805a', '#d8d4cc'],
   ui: {
     '--bg-base': 'rgba(14, 13, 11, 0.68)',
@@ -67,12 +67,16 @@ const warmCarbon: ThemePresetDefinition = {
     '--color-error': '#d4605a',
     '--color-ai': '#b08cd4',
     '--color-ai-glow': '#b08cd480',
-    '--app-shell-background': 'radial-gradient(circle at top, rgba(255, 255, 255, 0.06), transparent 40%), linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.08)), rgba(12, 11, 10, 0.44)',
+    '--app-shell-background':
+      'radial-gradient(circle at top, rgba(255, 255, 255, 0.06), transparent 40%), linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.08)), rgba(12, 11, 10, 0.44)',
     '--app-shell-border-focused': 'rgba(255, 255, 255, 0.08)',
     '--app-shell-border-unfocused': 'rgba(255, 255, 255, 0.05)',
-    '--app-shell-shadow-focused': 'inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 18px 50px rgba(0, 0, 0, 0.38)',
-    '--app-shell-shadow-unfocused': 'inset 0 1px 0 rgba(255, 255, 255, 0.02), 0 12px 34px rgba(0, 0, 0, 0.22)',
-    '--app-titlebar-background': 'linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.015) 34%, rgba(0, 0, 0, 0.06)), rgba(24, 22, 19, 0.34)',
+    '--app-shell-shadow-focused':
+      'inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 18px 50px rgba(0, 0, 0, 0.38)',
+    '--app-shell-shadow-unfocused':
+      'inset 0 1px 0 rgba(255, 255, 255, 0.02), 0 12px 34px rgba(0, 0, 0, 0.22)',
+    '--app-titlebar-background':
+      'linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.015) 34%, rgba(0, 0, 0, 0.06)), rgba(24, 22, 19, 0.34)',
     '--app-titlebar-unfocused-opacity': '0.82',
     '--titlebar-divider-opacity': '0.65',
     '--titlebar-control-hover': 'rgba(255, 255, 255, 0.085)',
@@ -112,8 +116,8 @@ const warmCarbon: ThemePresetDefinition = {
 
 const ghosttyDark: ThemePresetDefinition = {
   id: 'ghostty-dark',
-  name: 'Ghostty 暗色',
-  description: '更接近 Ghostty 的石墨深色调，克制、冷静，边框与按钮更紧致。',
+  name: 'Ghostty Dark',
+  description: 'A restrained Ghostty-inspired dark palette with crisp chrome and cooler contrast.',
   preview: ['#111111', '#1a1a1a', '#87b4ff', '#f1f1f1'],
   ui: {
     '--bg-base': 'rgba(10, 10, 11, 0.62)',
@@ -137,12 +141,16 @@ const ghosttyDark: ThemePresetDefinition = {
     '--color-error': '#e06a6a',
     '--color-ai': '#9a8bff',
     '--color-ai-glow': '#9a8bff70',
-    '--app-shell-background': 'radial-gradient(circle at top, rgba(255, 255, 255, 0.04), transparent 38%), linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.10)), rgba(9, 9, 10, 0.34)',
+    '--app-shell-background':
+      'radial-gradient(circle at top, rgba(255, 255, 255, 0.04), transparent 38%), linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.10)), rgba(9, 9, 10, 0.34)',
     '--app-shell-border-focused': 'rgba(255, 255, 255, 0.09)',
     '--app-shell-border-unfocused': 'rgba(255, 255, 255, 0.045)',
-    '--app-shell-shadow-focused': 'inset 0 1px 0 rgba(255, 255, 255, 0.028), 0 18px 60px rgba(0, 0, 0, 0.42)',
-    '--app-shell-shadow-unfocused': 'inset 0 1px 0 rgba(255, 255, 255, 0.018), 0 10px 30px rgba(0, 0, 0, 0.22)',
-    '--app-titlebar-background': 'linear-gradient(180deg, rgba(255, 255, 255, 0.048), rgba(255, 255, 255, 0.012) 36%, rgba(0, 0, 0, 0.055)), rgba(18, 18, 20, 0.28)',
+    '--app-shell-shadow-focused':
+      'inset 0 1px 0 rgba(255, 255, 255, 0.028), 0 18px 60px rgba(0, 0, 0, 0.42)',
+    '--app-shell-shadow-unfocused':
+      'inset 0 1px 0 rgba(255, 255, 255, 0.018), 0 10px 30px rgba(0, 0, 0, 0.22)',
+    '--app-titlebar-background':
+      'linear-gradient(180deg, rgba(255, 255, 255, 0.048), rgba(255, 255, 255, 0.012) 36%, rgba(0, 0, 0, 0.055)), rgba(18, 18, 20, 0.28)',
     '--app-titlebar-unfocused-opacity': '0.78',
     '--titlebar-divider-opacity': '0.52',
     '--titlebar-control-hover': 'rgba(255, 255, 255, 0.075)',
@@ -182,8 +190,8 @@ const ghosttyDark: ThemePresetDefinition = {
 
 const ghosttyLight: ThemePresetDefinition = {
   id: 'ghostty-light',
-  name: 'Ghostty 亮色',
-  description: '柔和的瓷白表面、冷调阴影，以及低对比度的终端质感。',
+  name: 'Ghostty Light',
+  description: 'A soft porcelain light theme with cool shadows and a low-contrast terminal surface.',
   preview: ['#f3f4f6', '#ffffff', '#4a78c2', '#111318'],
   ui: {
     '--bg-base': 'rgba(246, 247, 249, 0.76)',
@@ -207,12 +215,16 @@ const ghosttyLight: ThemePresetDefinition = {
     '--color-error': '#c54d50',
     '--color-ai': '#6b60d8',
     '--color-ai-glow': '#6b60d85a',
-    '--app-shell-background': 'radial-gradient(circle at top, rgba(255, 255, 255, 0.38), transparent 42%), linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(238, 241, 245, 0.55)), rgba(249, 250, 252, 0.60)',
+    '--app-shell-background':
+      'radial-gradient(circle at top, rgba(255, 255, 255, 0.38), transparent 42%), linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(238, 241, 245, 0.55)), rgba(249, 250, 252, 0.60)',
     '--app-shell-border-focused': 'rgba(18, 24, 33, 0.10)',
     '--app-shell-border-unfocused': 'rgba(18, 24, 33, 0.07)',
-    '--app-shell-shadow-focused': 'inset 0 1px 0 rgba(255, 255, 255, 0.42), 0 18px 48px rgba(49, 68, 92, 0.18)',
-    '--app-shell-shadow-unfocused': 'inset 0 1px 0 rgba(255, 255, 255, 0.38), 0 12px 28px rgba(49, 68, 92, 0.12)',
-    '--app-titlebar-background': 'linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.28) 38%, rgba(233, 237, 242, 0.4)), rgba(255, 255, 255, 0.35)',
+    '--app-shell-shadow-focused':
+      'inset 0 1px 0 rgba(255, 255, 255, 0.42), 0 18px 48px rgba(49, 68, 92, 0.18)',
+    '--app-shell-shadow-unfocused':
+      'inset 0 1px 0 rgba(255, 255, 255, 0.38), 0 12px 28px rgba(49, 68, 92, 0.12)',
+    '--app-titlebar-background':
+      'linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.28) 38%, rgba(233, 237, 242, 0.4)), rgba(255, 255, 255, 0.35)',
     '--app-titlebar-unfocused-opacity': '0.88',
     '--titlebar-divider-opacity': '0.38',
     '--titlebar-control-hover': 'rgba(18, 24, 33, 0.07)',
@@ -258,12 +270,36 @@ export const THEME_PRESETS: Record<ThemePresetId, ThemePresetDefinition> = {
 
 export const THEME_PRESET_LIST = Object.values(THEME_PRESETS);
 
-export const WINDOW_EFFECT_OPTIONS: { value: ThemeWindowEffect; label: string; description: string }[] = [
-  { value: 'auto', label: '自动', description: '根据当前主题自动选择最匹配的原生材质效果。' },
-  { value: 'mica', label: '云母', description: '更接近 Windows 11 的云母材质，带有轻微桌面染色。' },
-  { value: 'acrylic', label: '亚克力', description: '更强的半透明扩散与景深感，视觉层次更明显。' },
-  { value: 'blur', label: '模糊', description: '更通用的模糊回退方案，兼容更多 Windows 版本。' },
-  { value: 'none', label: '关闭', description: '禁用原生材质，仅保留 CSS 渲染出来的主题外观。' },
+export const WINDOW_EFFECT_OPTIONS: {
+  value: ThemeWindowEffect;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: 'auto',
+    label: 'Auto',
+    description: 'Pick the best native material for the active theme automatically.',
+  },
+  {
+    value: 'mica',
+    label: 'Mica',
+    description: 'Windows 11 style mica material with subtle desktop tinting.',
+  },
+  {
+    value: 'acrylic',
+    label: 'Acrylic',
+    description: 'Stronger translucency and diffusion, closer to frosted glass.',
+  },
+  {
+    value: 'blur',
+    label: 'Blur',
+    description: 'A more compatible fallback blur for older Windows builds.',
+  },
+  {
+    value: 'none',
+    label: 'None',
+    description: 'Disable native window materials and keep the CSS-rendered theme only.',
+  },
 ];
 
 export function getDefaultThemeConfig(): ThemeConfig {

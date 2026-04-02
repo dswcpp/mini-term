@@ -5,7 +5,7 @@ import type { ThemePresetId, ThemeWindowEffect } from '../../types';
 import { patchAppConfig } from './saveConfig';
 
 export function ThemeSettings() {
-  const themeConfig = useAppStore((s) => s.config.theme);
+  const themeConfig = useAppStore((state) => state.config.theme);
   const resolvedTheme = resolveTheme(themeConfig);
 
   const handlePresetChange = useCallback((preset: ThemePresetId) => {
@@ -28,6 +28,7 @@ export function ThemeSettings() {
         <div className="mb-3 text-base uppercase tracking-[0.1em] text-[var(--text-muted)]">
           主题预设
         </div>
+
         <div className="grid grid-cols-1 gap-3">
           {THEME_PRESET_LIST.map((preset) => {
             const active = preset.id === themeConfig.preset;
@@ -45,13 +46,21 @@ export function ThemeSettings() {
               >
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <div className="text-base font-medium text-[var(--text-primary)]">{preset.name}</div>
-                    <div className="mt-1 text-sm text-[var(--text-secondary)]">{preset.description}</div>
+                    <div className="text-base font-medium text-[var(--text-primary)]">
+                      {preset.name}
+                    </div>
+                    <div className="mt-1 text-sm text-[var(--text-secondary)]">
+                      {preset.description}
+                    </div>
                   </div>
+
                   {active && (
-                    <div className="text-xs uppercase tracking-[0.16em] text-[var(--accent)]">当前使用</div>
+                    <div className="text-xs uppercase tracking-[0.16em] text-[var(--accent)]">
+                      当前使用
+                    </div>
                   )}
                 </div>
+
                 <div className="mt-4 flex gap-2">
                   {preset.preview.map((color) => (
                     <span
@@ -71,6 +80,7 @@ export function ThemeSettings() {
         <div className="mb-3 text-base uppercase tracking-[0.1em] text-[var(--text-muted)]">
           窗口材质
         </div>
+
         <div className="space-y-2">
           {WINDOW_EFFECT_OPTIONS.map((option) => {
             const active = option.value === themeConfig.windowEffect;
@@ -89,12 +99,18 @@ export function ThemeSettings() {
                 <div className="flex items-start gap-3">
                   <span
                     className={`mt-0.5 inline-flex h-3 w-3 rounded-full border-2 ${
-                      active ? 'border-[var(--accent)] bg-[var(--accent)]' : 'border-[var(--border-strong)]'
+                      active
+                        ? 'border-[var(--accent)] bg-[var(--accent)]'
+                        : 'border-[var(--border-strong)]'
                     }`}
                   />
                   <span className="min-w-0">
-                    <span className="block text-base text-[var(--text-primary)]">{option.label}</span>
-                    <span className="mt-1 block text-sm text-[var(--text-secondary)]">{option.description}</span>
+                    <span className="block text-base text-[var(--text-primary)]">
+                      {option.label}
+                    </span>
+                    <span className="mt-1 block text-sm text-[var(--text-secondary)]">
+                      {option.description}
+                    </span>
                   </span>
                 </div>
               </button>
@@ -104,7 +120,9 @@ export function ThemeSettings() {
       </section>
 
       <section className="rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-base)] p-4">
-        <div className="text-sm uppercase tracking-[0.12em] text-[var(--text-muted)]">当前主题配置</div>
+        <div className="text-sm uppercase tracking-[0.12em] text-[var(--text-muted)]">
+          当前主题配置
+        </div>
         <pre className="mt-3 overflow-x-auto whitespace-pre-wrap font-mono text-sm text-[var(--text-secondary)]">
 {JSON.stringify(
   {
@@ -112,7 +130,9 @@ export function ThemeSettings() {
     windowEffect: themeConfig.windowEffect,
     resolvedPreset: resolvedTheme.preset.name,
     resolvedWindowEffect:
-      themeConfig.windowEffect === 'auto' ? resolvedTheme.preset.windowEffect : themeConfig.windowEffect,
+      themeConfig.windowEffect === 'auto'
+        ? resolvedTheme.preset.windowEffect
+        : themeConfig.windowEffect,
   },
   null,
   2,

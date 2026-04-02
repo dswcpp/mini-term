@@ -32,9 +32,10 @@ export function SettingsModal({ open, onClose }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+
       <div
-        className="relative flex max-h-[80vh] w-[720px] flex-col overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl animate-slide-in"
-        onClick={(e) => e.stopPropagation()}
+        className="relative flex max-h-[80vh] w-[760px] flex-col overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl animate-slide-in"
+        onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-5 py-4">
           <h2 className="text-lg font-semibold text-[var(--text-primary)]">设置</h2>
@@ -44,12 +45,12 @@ export function SettingsModal({ open, onClose }: Props) {
             onClick={onClose}
             aria-label="关闭设置"
           >
-            x
+            ×
           </button>
         </div>
 
         <div className="flex flex-1 overflow-hidden">
-          <div className="w-[180px] flex-shrink-0 space-y-0.5 border-r border-[var(--border-subtle)] px-2 py-3">
+          <div className="w-[190px] flex-shrink-0 space-y-0.5 border-r border-[var(--border-subtle)] px-2 py-3">
             {MENU_ITEMS.map((item) => (
               <button
                 key={item.key}

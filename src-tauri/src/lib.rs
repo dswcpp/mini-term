@@ -1,6 +1,7 @@
 mod ai_sessions;
 mod config;
 mod fs;
+mod git;
 mod process_monitor;
 mod pty;
 
@@ -12,6 +13,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(pty::PtyManager::new())
         .manage(fs::FsWatcherManager::new())
         .setup(|app| {
@@ -33,7 +35,14 @@ pub fn run() {
             fs::unwatch_directory,
             fs::create_file,
             fs::create_directory,
+            fs::read_file_content,
             ai_sessions::get_ai_sessions,
+            git::get_git_status,
+            git::get_git_diff,
+            git::discover_git_repos,
+            git::get_git_log,
+            git::get_commit_files,
+            git::get_commit_file_diff,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

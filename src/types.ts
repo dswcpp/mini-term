@@ -1,13 +1,27 @@
 // === 配置持久化 ===
 
+export type ProjectTreeItem = string | ProjectGroup;
+
+export interface ProjectGroup {
+  id: string;
+  name: string;
+  collapsed: boolean;
+  children: ProjectTreeItem[];
+}
+
 export interface AppConfig {
   projects: ProjectConfig[];
+  projectTree?: ProjectTreeItem[];
+  // 旧字段仅用于迁移兼容（Rust 端处理后不再出现）
+  projectGroups?: { id: string; name: string; collapsed: boolean; projectIds: string[] }[];
+  projectOrdering?: string[];
   defaultShell: string;
   availableShells: ShellConfig[];
   uiFontSize: number;
   terminalFontSize: number;
   layoutSizes?: number[];
   theme: ThemeConfig;
+  middleColumnSizes?: number[];
 }
 
 export type ThemePresetId = 'warm-carbon' | 'ghostty-dark' | 'ghostty-light';
@@ -23,6 +37,7 @@ export interface ProjectConfig {
   name: string;
   path: string;
   savedLayout?: SavedProjectLayout;
+  expandedDirs?: string[];
 }
 
 export interface ShellConfig {
@@ -118,4 +133,67 @@ export interface FsChangePayload {
   projectPath: string;
   path: string;
   kind: string;
+}
+
+// === Git 状态 ===
+
+export type GitStatusType = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
+
+export interface GitFileStatus {
+  path: string;
+  oldPath?: string;
+  status: GitStatusType;
+  statusLabel: string; // "M", "A", "D", "R", "?", "C"
+}
+
+export interface DiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: DiffLine[];
+}
+
+export interface DiffLine {
+  kind: 'add' | 'delete' | 'context';
+  content: string;
+  oldLineno?: number;
+  newLineno?: number;
+}
+
+export interface GitDiffResult {
+  oldContent: string;
+  newContent: string;
+  hunks: DiffHunk[];
+  isBinary: boolean;
+  tooLarge: boolean;
+}
+
+// === 文件查看 ===
+
+export interface FileContentResult {
+  content: string;
+  isBinary: boolean;
+  tooLarge: boolean;
+}
+
+// === Git 历史 ===
+
+export interface GitRepoInfo {
+  name: string;
+  path: string;
+}
+
+export interface GitCommitInfo {
+  hash: string;
+  shortHash: string;
+  message: string;
+  author: string;
+  timestamp: number;
+}
+
+export interface CommitFileInfo {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  oldPath?: string;
 }

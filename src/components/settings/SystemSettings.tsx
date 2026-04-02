@@ -21,6 +21,7 @@ function FontSizeSlider({
         <span className="text-base text-[var(--text-primary)]">{label}</span>
         <span className="font-mono text-base text-[var(--accent)]">{value}px</span>
       </div>
+
       <div className="flex items-center gap-3">
         <span className="text-sm text-[var(--text-muted)]">{min}</span>
         <input
@@ -29,7 +30,7 @@ function FontSizeSlider({
           max={max}
           step={1}
           value={value}
-          onChange={(e) => onChange(Number(e.target.value))}
+          onChange={(event) => onChange(Number(event.target.value))}
           className="h-1.5 flex-1 cursor-pointer accent-[var(--accent)]"
         />
         <span className="text-sm text-[var(--text-muted)]">{max}</span>
@@ -39,7 +40,7 @@ function FontSizeSlider({
 }
 
 export function SystemSettings() {
-  const config = useAppStore((s) => s.config);
+  const config = useAppStore((state) => state.config);
 
   const handleUiFontSizeChange = useCallback((uiFontSize: number) => {
     document.documentElement.style.fontSize = `${uiFontSize}px`;
@@ -79,7 +80,7 @@ export function SystemSettings() {
       />
 
       <div className="pt-2 text-sm text-[var(--text-muted)]">
-        界面字体大小会影响侧栏、标签页和设置面板；终端字体大小会影响 PTY 内部的文本显示。
+        界面字体会影响侧栏、标签页和设置面板；终端字体会影响终端内容区的文本显示。
       </div>
     </div>
   );

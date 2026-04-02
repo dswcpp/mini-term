@@ -4,6 +4,7 @@ import { getDefaultThemeConfig } from './theme';
 import type {
   AppConfig,
   ProjectConfig,
+  ProjectGroup,
   ProjectState,
   TerminalTab,
   SplitNode,
@@ -12,6 +13,15 @@ import type {
   SavedTab,
   SavedProjectLayout,
 } from './types';
+import {
+  deepCloneTree,
+  removeFromTree,
+  insertIntoTree,
+  updateGroupInTree,
+  removeGroupAndPromoteChildren,
+  removeProjectFromTree,
+  migrateToTree,
+} from './utils/projectTree';
 
 // 生成唯一 ID
 let idCounter = 0;
@@ -113,7 +123,7 @@ async function restoreSplitNode(
     type: 'split',
     direction: saved.direction,
     children,
-    sizes: children.map(() => 100 / children.length),
+    sizes: children.length === saved.sizes.length ? [...saved.sizes] : children.map(() => 100 / children.length),
   };
 }
 
@@ -142,6 +152,65 @@ export async function restoreLayout(
     newStates.set(projectId, { id: projectId, tabs, activeTabId });
     return { projectStates: newStates };
   });
+}
+
+// 每个项目的展开目录集合（运行时状态）
+const expandedDirsMap = new Map<string, Set<string>>();
+
+export function initExpandedDirs(projectId: string, dirs: string[]) {
+  expandedDirsMap.set(projectId, new Set(dirs));
+}
+
+export function isExpanded(projectId: string, path: string): boolean {
+  return expandedDirsMap.get(projectId)?.has(path) ?? false;
+}
+
+export function toggleExpandedDir(projectId: string, path: string, expanded: boolean) {
+  let set = expandedDirsMap.get(projectId);
+  if (!set) {
+    set = new Set();
+    expandedDirsMap.set(projectId, set);
+  }
+  if (expanded) {
+    set.add(path);
+  } else {
+    set.delete(path);
+  }
+  saveExpandedDirsToConfig(projectId);
+}
+
+// 保存展开目录到配置（防抖）
+const saveExpandedTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function doSaveExpandedDirs(projectId: string) {
+  const { config } = useAppStore.getState();
+  const dirs = Array.from(expandedDirsMap.get(projectId) ?? []);
+  const newConfig = {
+    ...config,
+    projects: config.projects.map((p) =>
+      p.id === projectId ? { ...p, expandedDirs: dirs } : p
+    ),
+  };
+  useAppStore.getState().setConfig(newConfig);
+  invoke('save_config', { config: newConfig });
+}
+
+function saveExpandedDirsToConfig(projectId: string) {
+  const existing = saveExpandedTimers.get(projectId);
+  if (existing) clearTimeout(existing);
+  saveExpandedTimers.set(projectId, setTimeout(() => {
+    saveExpandedTimers.delete(projectId);
+    doSaveExpandedDirs(projectId);
+  }, 500));
+}
+
+export function flushExpandedDirsToConfig(projectId: string) {
+  const existing = saveExpandedTimers.get(projectId);
+  if (existing) {
+    clearTimeout(existing);
+    saveExpandedTimers.delete(projectId);
+  }
+  doSaveExpandedDirs(projectId);
 }
 
 // 每个项目独立的防抖 timer
@@ -181,6 +250,14 @@ export function flushLayoutToConfig(projectId: string) {
   doSaveLayout(projectId);
 }
 
+function ensureTree(config: AppConfig): AppConfig {
+  if (config.projectTree && config.projectTree.length > 0) return config;
+  if (config.projectOrdering || config.projectGroups) {
+    return { ...config, projectTree: migrateToTree(config), projectGroups: undefined, projectOrdering: undefined };
+  }
+  return { ...config, projectTree: config.projects.map((p) => p.id) };
+}
+
 interface AppStore {
   // 配置
   config: AppConfig;
@@ -203,6 +280,12 @@ interface AppStore {
   // Pane 状态
   updatePaneStatusByPty: (ptyId: number, status: PaneStatus) => void;
 
+  // 分组
+  createGroup: (name: string, parentGroupId?: string) => void;
+  removeGroup: (groupId: string) => void;
+  renameGroup: (groupId: string, name: string) => void;
+  toggleGroupCollapse: (groupId: string) => void;
+  moveItem: (itemId: string, targetGroupId: string | null, index?: number) => void;
 }
 
 export const useAppStore = create<AppStore>((set) => ({
@@ -223,7 +306,13 @@ export const useAppStore = create<AppStore>((set) => ({
 
   addProject: (project) =>
     set((state) => {
-      const newConfig = { ...state.config, projects: [...state.config.projects, project] };
+      const config = ensureTree(state.config);
+      const newTree = [...(config.projectTree ?? []), project.id];
+      const newConfig = {
+        ...config,
+        projects: [...config.projects, project],
+        projectTree: newTree,
+      };
       const newStates = new Map(state.projectStates);
       newStates.set(project.id, { id: project.id, tabs: [], activeTabId: '' });
       return {
@@ -235,9 +324,16 @@ export const useAppStore = create<AppStore>((set) => ({
 
   removeProject: (id) =>
     set((state) => {
+      expandedDirsMap.delete(id);
+      const timer = saveExpandedTimers.get(id);
+      if (timer) { clearTimeout(timer); saveExpandedTimers.delete(id); }
+
+      const newTree = deepCloneTree(state.config.projectTree ?? []);
+      removeProjectFromTree(newTree, id);
       const newConfig = {
         ...state.config,
         projects: state.config.projects.filter((p) => p.id !== id),
+        projectTree: newTree,
       };
       const newStates = new Map(state.projectStates);
       newStates.delete(id);
@@ -340,6 +436,46 @@ export const useAppStore = create<AppStore>((set) => ({
         }
       }
       return changed ? { projectStates: newStates } : state;
+    }),
+
+  createGroup: (name, parentGroupId) =>
+    set((state) => {
+      const config = ensureTree(state.config);
+      const group: ProjectGroup = { id: genId(), name, collapsed: false, children: [] };
+      const newTree = deepCloneTree(config.projectTree ?? []);
+      insertIntoTree(newTree, parentGroupId ?? null, group);
+      return { config: { ...config, projectTree: newTree } };
+    }),
+
+  removeGroup: (groupId) =>
+    set((state) => {
+      const newTree = deepCloneTree(state.config.projectTree ?? []);
+      removeGroupAndPromoteChildren(newTree, groupId);
+      return { config: { ...state.config, projectTree: newTree } };
+    }),
+
+  renameGroup: (groupId, name) =>
+    set((state) => {
+      const newTree = deepCloneTree(state.config.projectTree ?? []);
+      updateGroupInTree(newTree, groupId, (g) => ({ ...g, name }));
+      return { config: { ...state.config, projectTree: newTree } };
+    }),
+
+  toggleGroupCollapse: (groupId) =>
+    set((state) => {
+      const newTree = deepCloneTree(state.config.projectTree ?? []);
+      updateGroupInTree(newTree, groupId, (g) => ({ ...g, collapsed: !g.collapsed }));
+      return { config: { ...state.config, projectTree: newTree } };
+    }),
+
+  moveItem: (itemId, targetGroupId, index) =>
+    set((state) => {
+      const config = ensureTree(state.config);
+      const newTree = deepCloneTree(config.projectTree ?? []);
+      const removed = removeFromTree(newTree, itemId);
+      if (!removed) return state;
+      insertIntoTree(newTree, targetGroupId, removed, index);
+      return { config: { ...config, projectTree: newTree } };
     }),
 
 }));

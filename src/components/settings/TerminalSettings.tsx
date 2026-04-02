@@ -44,29 +44,32 @@ function ShellRow({
             className="flex-1 rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 text-base text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
             placeholder="终端名称"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(event) => setName(event.target.value)}
           />
           <input
             className="flex-[2] rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 font-mono text-base text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
             placeholder="命令路径"
             value={command}
-            onChange={(e) => setCommand(e.target.value)}
+            onChange={(event) => setCommand(event.target.value)}
           />
         </div>
+
         <div className="mt-2 flex items-center gap-2">
           <input
             className="flex-1 rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 font-mono text-base text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
             placeholder="可选启动参数"
             value={args}
-            onChange={(e) => setArgs(e.target.value)}
+            onChange={(event) => setArgs(event.target.value)}
           />
           <button
+            type="button"
             className="rounded-[var(--radius-sm)] bg-[var(--accent)] px-3 py-1 text-base text-[var(--bg-base)] transition-opacity hover:opacity-90"
             onClick={handleSave}
           >
             保存
           </button>
           <button
+            type="button"
             className="px-3 py-1 text-base text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
             onClick={() => setEditing(false)}
           >
@@ -86,9 +89,10 @@ function ShellRow({
             ? 'border-[var(--accent)] bg-[var(--accent)]'
             : 'border-[var(--border-strong)] hover:border-[var(--accent)]'
         }`}
-        title="设为默认"
+        title="设为默认终端"
         onClick={onSetDefault}
       />
+
       <div className="min-w-0 flex-1">
         <div className="text-base font-medium text-[var(--text-primary)]">{shell.name}</div>
         <div className="truncate font-mono text-sm text-[var(--text-muted)]">
@@ -96,6 +100,7 @@ function ShellRow({
           {shell.args ? ` ${shell.args.join(' ')}` : ''}
         </div>
       </div>
+
       <div className="hidden items-center gap-1 group-hover:flex">
         <button
           type="button"
@@ -117,7 +122,7 @@ function ShellRow({
 }
 
 export function TerminalSettings() {
-  const config = useAppStore((s) => s.config);
+  const config = useAppStore((state) => state.config);
   const [shells, setShells] = useState<ShellConfig[]>([]);
   const [defaultShell, setDefaultShell] = useState('');
   const [adding, setAdding] = useState(false);
@@ -170,7 +175,9 @@ export function TerminalSettings() {
   };
 
   const handleUpdate = (index: number, shell: ShellConfig) => {
-    const updatedShells = shells.map((currentShell, shellIndex) => (shellIndex === index ? shell : currentShell));
+    const updatedShells = shells.map((currentShell, shellIndex) =>
+      shellIndex === index ? shell : currentShell,
+    );
     const updatedDefault = shells[index].name === defaultShell ? shell.name : defaultShell;
     setShells(updatedShells);
     setDefaultShell(updatedDefault);
@@ -204,33 +211,40 @@ export function TerminalSettings() {
           <div className="flex gap-2">
             <input
               className="flex-1 rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 text-base text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              placeholder="名称（例如：pwsh）"
+              placeholder="名称，例如：pwsh"
               value={newName}
-              onChange={(e) => setNewName(e.target.value)}
+              onChange={(event) => setNewName(event.target.value)}
               autoFocus
             />
             <input
               className="flex-[2] rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 font-mono text-base text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-              placeholder="命令路径（例如：pwsh 或 C:\\Tools\\bash.exe）"
+              placeholder="命令路径，例如：pwsh 或 C:\\Tools\\bash.exe"
               value={newCommand}
-              onChange={(e) => setNewCommand(e.target.value)}
+              onChange={(event) => setNewCommand(event.target.value)}
             />
           </div>
+
           <div className="mt-2 flex items-center gap-2">
             <input
               className="flex-1 rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 font-mono text-base text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
               placeholder="可选启动参数"
               value={newArgs}
-              onChange={(e) => setNewArgs(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+              onChange={(event) => setNewArgs(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  handleAdd();
+                }
+              }}
             />
             <button
+              type="button"
               className="rounded-[var(--radius-sm)] bg-[var(--accent)] px-3 py-1 text-base text-[var(--bg-base)] transition-opacity hover:opacity-90"
               onClick={handleAdd}
             >
               添加
             </button>
             <button
+              type="button"
               className="px-3 py-1 text-base text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
               onClick={() => setAdding(false)}
             >
@@ -249,7 +263,7 @@ export function TerminalSettings() {
       )}
 
       <div className="pt-2 text-sm text-[var(--text-muted)]">
-        点击左侧圆点可设为默认终端。新标签页会优先使用这里的默认项，除非你在创建时主动选择其他终端。
+        点击左侧圆点可设为默认终端。新标签页会优先使用默认终端，除非你在创建时主动选择其它终端。
       </div>
     </div>
   );
