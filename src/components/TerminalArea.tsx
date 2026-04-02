@@ -1,10 +1,8 @@
 import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppStore, genId, collectPtyIds, saveLayoutToConfig } from '../store';
-import { TabBar } from './TabBar';
+import { useAppStore, genId, saveLayoutToConfig } from '../store';
 import { SplitLayout } from './SplitLayout';
 import { showContextMenu } from '../utils/contextMenu';
-import { disposeTerminal } from '../utils/terminalCache';
 import type { TerminalTab, PaneState, SplitNode, ShellConfig } from '../types';
 
 interface Props {
@@ -69,19 +67,6 @@ export function TerminalArea({ projectId, projectPath }: Props) {
   const removeTab = useAppStore((s) => s.removeTab);
   const ps = projectStates.get(projectId);
   const activeTab = ps?.tabs.find((t) => t.id === ps.activeTabId);
-
-  const handleCloseTab = useCallback(async (tabId: string) => {
-    const tab = ps?.tabs.find(t => t.id === tabId);
-    if (tab) {
-      const ptyIds = collectPtyIds(tab.splitLayout);
-      for (const id of ptyIds) {
-        await invoke('kill_pty', { ptyId: id });
-        disposeTerminal(id);
-      }
-    }
-    removeTab(projectId, tabId);
-    saveLayoutToConfig(projectId);
-  }, [ps, projectId, removeTab]);
 
   const handleNewTab = useCallback(async (selectedShell?: ShellConfig) => {
     const shell = selectedShell
@@ -190,13 +175,10 @@ export function TerminalArea({ projectId, projectPath }: Props) {
     const currentTab = currentPs?.tabs.find(t => t.id === currentPs.activeTabId);
     if (!currentTab) return;
 
-    if (currentTab.splitLayout.type === 'leaf') {
-      // Root is a leaf -- close the entire tab (PTYs already killed)
-      removeTab(projectId, currentTab.id);
-      saveLayoutToConfig(projectId);
-    }
-    // For split layouts, SplitLayout.handleChildClose handles the tree update
-    // via onLayoutChange.
+    // PTYs are already killed by PaneGroup before this is called.
+    // Remove the entire layout tab.
+    removeTab(projectId, currentTab.id);
+    saveLayoutToConfig(projectId);
   }, [projectId, removeTab]);
 
   const handleLayoutChange = useCallback((updatedNode: SplitNode) => {
@@ -226,25 +208,6 @@ export function TerminalArea({ projectId, projectPath }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-[var(--bg-terminal)]">
-      {/* Show full TabBar when multiple layout tabs; show minimal "+" when single tab */}
-      {ps && ps.tabs.length > 1 ? (
-        <TabBar
-          projectId={projectId}
-          onNewTab={handleNewTabClick}
-          onCloseTab={handleCloseTab}
-        />
-      ) : ps && ps.tabs.length === 1 ? (
-        <div className="flex bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] select-none shrink-0">
-          <div
-            className="px-2 py-[3px] text-[var(--text-muted)] cursor-pointer hover:text-[var(--accent)] transition-colors text-[12px]"
-            title="新建 layout"
-            onClick={handleNewTabClick}
-          >
-            +
-          </div>
-        </div>
-      ) : null}
-
       <div className="flex-1 overflow-hidden relative">
         {ps?.tabs.map((tab) => (
           <div

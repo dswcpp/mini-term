@@ -13,8 +13,10 @@ interface Props {
   onLayoutChange?: (updatedNode: SplitNode) => void;
 }
 
+// Stable key: use the first pane's ID so adding/removing tabs doesn't
+// cause Allotment to remount and lose split sizes.
 function getNodeKey(node: SplitNode): string {
-  if (node.type === 'leaf') return node.panes.map((p) => p.id).join('+');
+  if (node.type === 'leaf') return node.panes[0]?.id ?? 'empty';
   return node.children.map(getNodeKey).join('-');
 }
 
