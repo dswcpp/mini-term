@@ -4,6 +4,8 @@ import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useAppStore } from '../store';
 import { checkForUpdate, compareVersions, type ReleaseInfo } from '../utils/updateChecker';
+import { applyTheme } from '../utils/themeManager';
+import { updateAllTerminalThemes } from '../utils/terminalCache';
 import type { ShellConfig } from '../types';
 
 interface Props {
@@ -323,8 +325,68 @@ function SystemSettings() {
     invoke('save_config', { config: newConfig });
   }, [setConfig]);
 
+  const handleThemeChange = useCallback((theme: 'auto' | 'light' | 'dark') => {
+    const newConfig = { ...useAppStore.getState().config, theme };
+    setConfig(newConfig);
+    applyTheme(theme);
+    updateAllTerminalThemes(newConfig.terminalFollowTheme ?? true);
+    invoke('save_config', { config: newConfig });
+  }, [setConfig]);
+
+  const handleTerminalFollowThemeChange = useCallback((follow: boolean) => {
+    const newConfig = { ...useAppStore.getState().config, terminalFollowTheme: follow };
+    setConfig(newConfig);
+    updateAllTerminalThemes(follow);
+    invoke('save_config', { config: newConfig });
+  }, [setConfig]);
+
   return (
     <div className="space-y-6">
+      {/* 主题模式 */}
+      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
+        主题
+      </div>
+
+      <div className="flex gap-2 mb-4">
+        {([
+          { value: 'dark' as const, label: '深色' },
+          { value: 'light' as const, label: '浅色' },
+          { value: 'auto' as const, label: '跟随系统' },
+        ]).map((opt) => (
+          <button
+            key={opt.value}
+            className={`flex-1 py-2 rounded-[var(--radius-sm)] text-base transition-all ${
+              config.theme === opt.value
+                ? 'bg-[var(--accent-muted)] text-[var(--accent)] border border-[var(--accent)]'
+                : 'bg-[var(--bg-base)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)]'
+            }`}
+            onClick={() => handleThemeChange(opt.value)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {/* 终端跟随主题 */}
+      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] mb-6">
+        <div>
+          <div className="text-base text-[var(--text-primary)]">终端跟随主题</div>
+          <div className="text-sm text-[var(--text-muted)]">关闭时终端始终使用深色方案</div>
+        </div>
+        <button
+          className={`relative w-9 h-5 rounded-full transition-colors ${
+            config.terminalFollowTheme ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
+          }`}
+          onClick={() => handleTerminalFollowThemeChange(!config.terminalFollowTheme)}
+        >
+          <span
+            className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+              config.terminalFollowTheme ? 'translate-x-4' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+      </div>
+
       <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
         字体大小
       </div>
