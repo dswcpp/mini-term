@@ -172,8 +172,12 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
           const rel = getRelativePath(entry.path, projectRoot).replace(/\\/g, '/');
           const fileStatus = gitStatusMap.get(rel);
           const GIT_COLORS: Record<string, string> = {
-            M: 'text-amber-400', A: 'text-green-400', D: 'text-red-400',
-            R: 'text-blue-400', '?': 'text-green-500', C: 'text-red-500',
+            M: 'text-[var(--color-warning)]',
+            A: 'text-[var(--color-success)]',
+            D: 'text-[var(--color-error)]',
+            R: 'text-[var(--color-info)]',
+            '?': 'text-[var(--color-success)]',
+            C: 'text-[var(--color-error)]',
           };
           if (fileStatus) {
             return (
