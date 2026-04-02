@@ -117,59 +117,6 @@ export function TerminalInstance({
   const resolvedTheme = resolveTheme(themeConfig);
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const { term, fitAddon, wrapper } = getOrCreateTerminal(ptyId);
-    termRef.current = term;
-    fitAddonRef.current = fitAddon;
-    container.appendChild(wrapper);
-
-    requestAnimationFrame(() => {
-      if (container.clientWidth > 0 && container.clientHeight > 0) {
-        fitAddon.fit();
-        void invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
-        term.refresh(0, term.rows - 1);
-      }
-    });
-
-    let rafId = 0;
-    const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          fitAddon.fit();
-          term.refresh(0, term.rows - 1);
-        }
-      });
-    });
-    observer.observe(container);
-
-    const visibilityObserver = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        requestAnimationFrame(() => {
-          fitAddon.fit();
-          term.refresh(0, term.rows - 1);
-        });
-      }
-    });
-    visibilityObserver.observe(container);
-
-    return () => {
-      cancelAnimationFrame(rafId);
-      observer.disconnect();
-      visibilityObserver.disconnect();
-      wrapper.remove();
-      if (termRef.current === term) {
-        termRef.current = null;
-      }
-      if (fitAddonRef.current === fitAddon) {
-        fitAddonRef.current = null;
-      }
-    };
-  }, [ptyId]);
-
-  useEffect(() => {
     const term = termRef.current;
     const fitAddon = fitAddonRef.current;
     if (!term || !fitAddon || !terminalFontSize) return;
@@ -274,18 +221,15 @@ export function TerminalInstance({
     termRef.current?.focus();
   }, []);
 
-  const handleContextMenu = useCallback(
-    async (event: MouseEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-
+  const openTerminalContextMenu = useCallback(
+    async (clientX: number, clientY: number) => {
       const isWindowMaximized = await appWindow.isMaximized().catch(() => false);
       const hasSelection = Boolean(termRef.current?.getSelection());
       const canNotifyOnCompletion = status === 'ai-working';
 
       showContextMenu(
-        event.clientX,
-        event.clientY,
+        clientX,
+        clientY,
         buildTerminalContextMenu({
           hasSelection,
           canSplit: Boolean(paneId && onSplit),
@@ -341,6 +285,80 @@ export function TerminalInstance({
       paneId,
       status,
     ],
+  );
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const { term, fitAddon, wrapper } = getOrCreateTerminal(ptyId);
+    termRef.current = term;
+    fitAddonRef.current = fitAddon;
+    container.appendChild(wrapper);
+
+    requestAnimationFrame(() => {
+      if (container.clientWidth > 0 && container.clientHeight > 0) {
+        fitAddon.fit();
+        void invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
+        term.refresh(0, term.rows - 1);
+      }
+    });
+
+    let rafId = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        if (container.clientWidth > 0 && container.clientHeight > 0) {
+          fitAddon.fit();
+          term.refresh(0, term.rows - 1);
+        }
+      });
+    });
+    observer.observe(container);
+
+    const visibilityObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        requestAnimationFrame(() => {
+          fitAddon.fit();
+          term.refresh(0, term.rows - 1);
+        });
+      }
+    });
+    visibilityObserver.observe(container);
+
+    const handleNativeContextMenu = (event: Event) => {
+      const mouseEvent = event as globalThis.MouseEvent;
+      mouseEvent.preventDefault();
+      mouseEvent.stopPropagation();
+      void openTerminalContextMenu(mouseEvent.clientX, mouseEvent.clientY);
+    };
+
+    container.addEventListener('contextmenu', handleNativeContextMenu, true);
+    wrapper.addEventListener('contextmenu', handleNativeContextMenu, true);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      observer.disconnect();
+      visibilityObserver.disconnect();
+      container.removeEventListener('contextmenu', handleNativeContextMenu, true);
+      wrapper.removeEventListener('contextmenu', handleNativeContextMenu, true);
+      wrapper.remove();
+      if (termRef.current === term) {
+        termRef.current = null;
+      }
+      if (fitAddonRef.current === fitAddon) {
+        fitAddonRef.current = null;
+      }
+    };
+  }, [openTerminalContextMenu, ptyId]);
+
+  const handleContextMenu = useCallback(
+    (event: MouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openTerminalContextMenu(event.clientX, event.clientY);
+    },
+    [openTerminalContextMenu],
   );
 
   return (

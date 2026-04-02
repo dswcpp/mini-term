@@ -94,6 +94,16 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
   const handleNewTabClick = useCallback(
     (event: ReactMouseEvent) => {
+      if (config.availableShells.length === 0) {
+        showContextMenu(event.clientX, event.clientY, [
+          {
+            label: '没有可用终端，打开设置',
+            onClick: () => onOpenSettings?.(),
+          },
+        ]);
+        return;
+      }
+
       showContextMenu(
         event.clientX,
         event.clientY,
@@ -103,7 +113,7 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         })),
       );
     },
-    [config.availableShells, handleNewTab],
+    [config.availableShells, handleNewTab, onOpenSettings],
   );
 
   const handleSplitPane = useCallback(

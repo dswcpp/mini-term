@@ -228,12 +228,33 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
     config
 }
 
+fn normalize_config(mut config: AppConfig) -> AppConfig {
+    if config.available_shells.is_empty() {
+        config.available_shells = default_shells();
+    }
+
+    let default_shell_exists = config
+        .available_shells
+        .iter()
+        .any(|shell| shell.name == config.default_shell);
+
+    if config.default_shell.is_empty() || !default_shell_exists {
+        config.default_shell = config
+            .available_shells
+            .first()
+            .map(|shell| shell.name.clone())
+            .unwrap_or_else(default_shell_name);
+    }
+
+    config
+}
+
 #[tauri::command]
 pub fn load_config(app: AppHandle) -> AppConfig {
     let path = config_path(&app);
     match fs::read_to_string(&path) {
-        Ok(content) => migrate_config(serde_json::from_str(&content).unwrap_or_default()),
-        Err(_) => migrate_config(AppConfig::default()),
+        Ok(content) => normalize_config(migrate_config(serde_json::from_str(&content).unwrap_or_default())),
+        Err(_) => normalize_config(migrate_config(AppConfig::default())),
     }
 }
 
