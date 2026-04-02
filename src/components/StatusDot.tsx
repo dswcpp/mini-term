@@ -1,10 +1,10 @@
 import type { PaneStatus } from '../types';
 
 const STATUS_STYLES: Record<PaneStatus, { bg: string; shadow: string }> = {
-  idle: { bg: '#5c5850', shadow: 'none' },
-  'ai-idle': { bg: '#6bb87a', shadow: 'none' },
-  'ai-working': { bg: '#b08cd4', shadow: '0 0 6px #b08cd480' },
-  error: { bg: '#d4605a', shadow: 'none' },
+  idle: { bg: 'var(--text-muted)', shadow: 'none' },
+  'ai-idle': { bg: 'var(--color-success)', shadow: 'none' },
+  'ai-working': { bg: 'var(--color-ai)', shadow: '0 0 6px var(--color-ai)' },
+  error: { bg: 'var(--color-error)', shadow: 'none' },
 };
 
 const GLOW_STATUSES: PaneStatus[] = ['ai-working'];
