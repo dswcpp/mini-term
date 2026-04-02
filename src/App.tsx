@@ -87,10 +87,10 @@ export function App() {
       event.preventDefault();
       const confirmed = await ask('确定要关闭 Mini-Term 吗？', { title: '关闭确认', kind: 'warning' });
       if (!confirmed) return;
-      const { activeProjectId } = useAppStore.getState();
-      if (activeProjectId) {
-        flushLayoutToConfig(activeProjectId);
-        flushExpandedDirsToConfig(activeProjectId);
+      const { projectStates } = useAppStore.getState();
+      for (const projectId of projectStates.keys()) {
+        flushLayoutToConfig(projectId);
+        flushExpandedDirsToConfig(projectId);
       }
       appWindow.destroy();
     });
