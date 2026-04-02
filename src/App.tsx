@@ -13,6 +13,7 @@ import { GitHistory } from './components/GitHistory';
 import { SettingsModal } from './components/SettingsModal';
 import { useTauriEvent } from './hooks/useTauriEvent';
 import { checkForUpdate, type ReleaseInfo } from './utils/updateChecker';
+import { applyTheme } from './utils/themeManager';
 import type { AppConfig, PtyStatusChangePayload, PtyExitPayload, PaneStatus } from './types';
 
 export function App() {
@@ -56,9 +57,15 @@ export function App() {
           .map((p) => restoreLayout(p.id, p.savedLayout!, p.path, cfg))
       ).catch(console.error);
 
+      applyTheme(cfg.theme ?? 'auto');
       setConfigLoaded(true);
     });
   }, []);
+
+  // 主题变化时应用新主题
+  useEffect(() => {
+    applyTheme(config.theme ?? 'auto');
+  }, [config.theme]);
 
   // 启动时获取版本号并检查更新
   useEffect(() => {
