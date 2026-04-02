@@ -49,6 +49,10 @@ pub struct AppConfig {
     pub layout_sizes: Option<Vec<f64>>,
     #[serde(default)]
     pub middle_column_sizes: Option<Vec<f64>>,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_terminal_follow_theme")]
+    pub terminal_follow_theme: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +109,8 @@ pub struct ShellConfig {
 
 fn default_ui_font_size() -> f64 { 13.0 }
 fn default_terminal_font_size() -> f64 { 14.0 }
+fn default_theme() -> String { "auto".into() }
+fn default_terminal_follow_theme() -> bool { true }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -119,6 +125,8 @@ impl Default for AppConfig {
             terminal_font_size: default_terminal_font_size(),
             layout_sizes: None,
             middle_column_sizes: None,
+            theme: default_theme(),
+            terminal_follow_theme: default_terminal_follow_theme(),
         }
     }
 }
