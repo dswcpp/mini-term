@@ -100,7 +100,8 @@ async function restoreSplitNode(
   config: AppConfig,
 ): Promise<SplitNode | null> {
   if (saved.type === 'leaf') {
-    // Backward compatibility: old format had `pane` (single), new has `panes` (array)
+    // Backward compatibility: old format had `pane` (single), new has `panes` (array).
+    // TODO: remove this compat shim once all users have migrated (added in v0.2.0).
     const savedPanes = saved.panes ?? [((saved as any).pane as SavedPane)].filter(Boolean);
     const panes: PaneState[] = [];
     for (const savedPane of savedPanes) {

@@ -6,8 +6,6 @@ import type { SplitNode } from '../types';
 interface Props {
   node: SplitNode;
   projectPath: string;
-  /** Whether this node lives inside a split (i.e. has siblings). */
-  isSplit?: boolean;
   onSplit?: (paneId: string, direction: 'horizontal' | 'vertical') => void;
   onCloseLeaf?: (node: SplitNode) => void;
   onUpdateNode?: (updated: SplitNode) => void;
@@ -20,7 +18,7 @@ function getNodeKey(node: SplitNode): string {
   return node.children.map(getNodeKey).join('-');
 }
 
-export function SplitLayout({ node, projectPath, isSplit, onSplit, onCloseLeaf, onUpdateNode, onTabDrop, onLayoutChange }: Props) {
+export function SplitLayout({ node, projectPath, onSplit, onCloseLeaf, onUpdateNode, onTabDrop, onLayoutChange }: Props) {
   const rafRef = useRef<number>(0);
   const nodeRef = useRef(node);
   nodeRef.current = node;
@@ -34,7 +32,6 @@ export function SplitLayout({ node, projectPath, isSplit, onSplit, onCloseLeaf, 
         onClosePane={() => onCloseLeaf?.(node)}
         onUpdateNode={(updated) => onUpdateNode?.(updated)}
         onTabDrop={onTabDrop}
-        isSplit={!!isSplit}
       />
     );
   }
@@ -99,7 +96,6 @@ export function SplitLayout({ node, projectPath, isSplit, onSplit, onCloseLeaf, 
           <SplitLayout
             node={child}
             projectPath={projectPath}
-            isSplit={true}
             onSplit={onSplit}
             onCloseLeaf={() => handleChildClose(index)}
             onUpdateNode={(updated) => handleChildUpdate(index, updated)}

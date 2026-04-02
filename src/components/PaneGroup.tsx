@@ -14,7 +14,6 @@ interface Props {
   onClosePane: () => void;
   onUpdateNode: (updated: SplitNode) => void;
   onTabDrop?: (sourceTabId: string, targetPaneId: string, direction: 'horizontal' | 'vertical', position: 'before' | 'after') => void;
-  isSplit: boolean;
 }
 
 export function PaneGroup({ node, projectPath, onSplit, onClosePane, onUpdateNode, onTabDrop }: Props) {

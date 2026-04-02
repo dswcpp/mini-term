@@ -226,15 +226,24 @@ export function TerminalArea({ projectId, projectPath }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-[var(--bg-terminal)]">
-      {/* Hide top-level TabBar when there's only one layout tab —
-           the PaneGroup tab bar handles everything */}
-      {ps && ps.tabs.length > 1 && (
+      {/* Show full TabBar when multiple layout tabs; show minimal "+" when single tab */}
+      {ps && ps.tabs.length > 1 ? (
         <TabBar
           projectId={projectId}
           onNewTab={handleNewTabClick}
           onCloseTab={handleCloseTab}
         />
-      )}
+      ) : ps && ps.tabs.length === 1 ? (
+        <div className="flex bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] select-none shrink-0">
+          <div
+            className="px-2 py-[3px] text-[var(--text-muted)] cursor-pointer hover:text-[var(--accent)] transition-colors text-[12px]"
+            title="新建 layout"
+            onClick={handleNewTabClick}
+          >
+            +
+          </div>
+        </div>
+      ) : null}
 
       <div className="flex-1 overflow-hidden relative">
         {ps?.tabs.map((tab) => (
@@ -262,7 +271,7 @@ export function TerminalArea({ projectId, projectPath }: Props) {
               className="px-5 py-2.5 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-sm hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all duration-200"
               onClick={handleNewTabClick}
             >
-              + New Terminal
+              + 新建终端
             </button>
           </div>
         )}
