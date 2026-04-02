@@ -450,7 +450,7 @@ export function ProjectList() {
         <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => setConfirmTarget(null)}>
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
           <div
-            className="relative w-[320px] bg-[var(--bg-surface)] border border-[var(--border-strong)] rounded-[var(--radius-md)] shadow-2xl p-5 animate-slide-in"
+            className="relative w-[320px] bg-[var(--bg-surface)] border border-[var(--border-strong)] rounded-[var(--radius-md)] shadow-[var(--shadow-overlay)] p-5 animate-slide-in"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="text-sm font-medium text-[var(--text-primary)] mb-2">移除项目</div>
