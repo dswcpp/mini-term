@@ -176,12 +176,14 @@ export interface FileContentResult {
 export interface GitRepoInfo {
   name: string;
   path: string;
+  currentBranch?: string;
 }
 
 export interface GitCommitInfo {
   hash: string;
   shortHash: string;
   message: string;
+  body?: string;
   author: string;
   timestamp: number;
 }

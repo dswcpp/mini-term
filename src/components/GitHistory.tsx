@@ -284,6 +284,11 @@ export function GitHistory() {
                 &#9662;
               </span>
               <span className="truncate font-medium">{node.name}</span>
+              {repo.currentBranch && (
+                <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                  {repo.currentBranch}
+                </span>
+              )}
             </div>
           </div>
 
@@ -298,6 +303,7 @@ export function GitHistory() {
                     key={commit.hash}
                     className="py-1.5 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] transition-colors duration-100"
                     style={{ paddingLeft: `${(depth + 1) * 16 + 8}px`, paddingRight: '8px' }}
+                    title={commit.body ? `${commit.message}\n\n${commit.body}` : commit.message}
                     onContextMenu={(e) => handleCommitContextMenu(e, repo.path, commit)}
                     onDoubleClick={() => handleViewDiff(repo.path, commit)}
                   >

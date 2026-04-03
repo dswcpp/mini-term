@@ -160,6 +160,7 @@ fn collect_repo_status(
 pub struct GitRepoInfo {
     pub name: String,
     pub path: String,
+    pub current_branch: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -168,6 +169,7 @@ pub struct GitCommitInfo {
     pub hash: String,
     pub short_hash: String,
     pub message: String,
+    pub body: Option<String>,
     pub author: String,
     pub timestamp: i64,
 }
@@ -271,9 +273,23 @@ pub fn discover_git_repos(project_path: String) -> Result<Vec<GitRepoInfo>, Stri
     let repos = find_repos(path);
     Ok(repos
         .into_iter()
-        .map(|(name, abs_path, _)| GitRepoInfo {
-            name,
-            path: abs_path.to_string_lossy().to_string(),
+        .map(|(name, abs_path, repo)| {
+            let current_branch = repo.head().ok().and_then(|h| {
+                if h.is_branch() {
+                    h.shorthand().map(|s| s.to_string())
+                } else {
+                    // detached HEAD — show short hash
+                    h.target().map(|oid| {
+                        let s = oid.to_string();
+                        format!("({})", &s[..7.min(s.len())])
+                    })
+                }
+            });
+            GitRepoInfo {
+                name,
+                path: abs_path.to_string_lossy().to_string(),
+                current_branch,
+            }
         })
         .collect())
 }
@@ -311,12 +327,14 @@ pub fn get_git_log(
         let hash = oid.to_string();
         let short_hash = hash[..7.min(hash.len())].to_string();
         let message = commit.summary().unwrap_or("").to_string();
+        let body = commit.body().map(|s| s.to_string());
         let author = commit.author().name().unwrap_or("unknown").to_string();
         let timestamp = commit.time().seconds();
         result.push(GitCommitInfo {
             hash,
             short_hash,
             message,
+            body,
             author,
             timestamp,
         });
