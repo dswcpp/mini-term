@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import process from 'node:process';
 
 const DEV_URL = 'http://localhost:1420';
 const EXPECTED_MARKERS = ['<title>Mini-Term</title>', '/src/main.tsx'];
@@ -40,12 +41,25 @@ if (existingServer.reachable) {
   process.exit(1);
 }
 
-const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const child = spawn(npmCommand, ['run', 'dev'], {
-  stdio: 'inherit',
-  env: process.env,
-  shell: process.platform === 'win32',
-});
+const cwd = process.cwd().startsWith('\\\\?\\')
+  ? process.cwd().slice(4)
+  : process.cwd();
+
+const child = process.platform === 'win32'
+  ? spawn(
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      ['-NoLogo', '-NoProfile', '-Command', 'npm run dev'],
+      {
+        stdio: 'inherit',
+        env: process.env,
+        cwd,
+      },
+    )
+  : spawn('npm', ['run', 'dev'], {
+      stdio: 'inherit',
+      env: process.env,
+      cwd,
+    });
 
 const forwardSignal = (signal) => {
   if (!child.killed) {

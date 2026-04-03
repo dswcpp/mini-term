@@ -1,6 +1,8 @@
 import {
+  memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -18,7 +20,10 @@ import { resolveTheme } from '../theme';
 import type { PaneStatus } from '../types';
 import { getDraggingTabId } from '../utils/dragState';
 import { showContextMenu } from '../utils/contextMenu';
+import { showPrompt } from '../utils/prompt';
 import { getOrCreateTerminal } from '../utils/terminalCache';
+import { SessionCommandTimeline } from './terminal/SessionCommandTimeline';
+import { SessionMetaStrip } from './terminal/SessionMetaStrip';
 import { buildTerminalContextMenu } from './terminal/terminalContextMenu';
 import { StatusDot } from './StatusDot';
 import '@xterm/xterm/css/xterm.css';
@@ -52,7 +57,9 @@ interface Props {
   ptyId: number;
   paneId?: string;
   shellName?: string;
+  runCommand?: string;
   status?: PaneStatus;
+  onActivatePane?: (paneId: string) => void;
   onSplit?: (paneId: string, direction: 'horizontal' | 'vertical') => void;
   onClose?: (paneId: string) => void;
   onRestart?: (paneId: string) => void;
@@ -72,10 +79,12 @@ function PaneActionButton({
   title,
   children,
   onClick,
+  onContextMenu,
 }: {
   title: string;
   children: ReactNode;
   onClick: () => void;
+  onContextMenu?: (event: MouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <button
@@ -84,18 +93,21 @@ function PaneActionButton({
       className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
       style={noDragStyle}
       onClick={onClick}
+      onContextMenu={onContextMenu}
     >
       {children}
     </button>
   );
 }
 
-export function TerminalInstance({
+export const TerminalInstance = memo(function TerminalInstance({
   tabId,
   ptyId,
   paneId,
   shellName,
+  runCommand,
   status,
+  onActivatePane,
   onSplit,
   onClose,
   onRestart,
@@ -112,9 +124,15 @@ export function TerminalInstance({
   const [dragKind, setDragKind] = useState<DragKind | null>(null);
   const [tabDropZone, setTabDropZone] = useState<DropZone | null>(null);
   const [notifyOnCompletion, setNotifyOnCompletion] = useState(false);
+  const setPaneRunCommand = useAppStore((state) => state.setPaneRunCommand);
   const terminalFontSize = useAppStore((state) => state.config.terminalFontSize);
-  const themeConfig = useAppStore((state) => state.config.theme);
-  const resolvedTheme = resolveTheme(themeConfig);
+  const themePreset = useAppStore((state) => state.config.theme.preset);
+  const themeWindowEffect = useAppStore((state) => state.config.theme.windowEffect);
+  const session = useAppStore((state) => state.sessions.get(ptyId));
+  const resolvedTheme = useMemo(
+    () => resolveTheme({ preset: themePreset, windowEffect: themeWindowEffect }),
+    [themePreset, themeWindowEffect],
+  );
 
   useEffect(() => {
     const term = termRef.current;
@@ -132,7 +150,7 @@ export function TerminalInstance({
 
     term.options.theme = resolvedTheme.preset.terminal;
     term.refresh(0, term.rows - 1);
-  }, [themeConfig.preset, themeConfig.windowEffect, ptyId]);
+  }, [resolvedTheme, ptyId]);
 
   useEffect(() => {
     if (
@@ -221,6 +239,48 @@ export function TerminalInstance({
     termRef.current?.focus();
   }, []);
 
+  const handleRunCommand = useCallback(async () => {
+    const currentCommand = runCommand?.trim();
+    if (!currentCommand) {
+      const nextCommand = await showPrompt('设置运行命令', '输入要执行的命令', session?.lastCommand ?? '');
+      const updated = nextCommand?.trim();
+      if (!updated || !paneId) {
+        termRef.current?.focus();
+        return;
+      }
+      setPaneRunCommand(tabId, paneId, updated);
+      const suffix = updated.endsWith('\n') || updated.endsWith('\r') ? '' : '\r';
+      await invoke('write_pty', { ptyId, data: `${updated}${suffix}` });
+      termRef.current?.focus();
+      return;
+    }
+
+    const suffix = currentCommand.endsWith('\n') || currentCommand.endsWith('\r') ? '' : '\r';
+    await invoke('write_pty', { ptyId, data: `${currentCommand}${suffix}` });
+    termRef.current?.focus();
+  }, [paneId, ptyId, runCommand, session?.lastCommand, setPaneRunCommand, tabId]);
+
+  const handleEditRunCommand = useCallback(async () => {
+    if (!paneId) return;
+    const nextCommand = await showPrompt('编辑运行命令', '输入要执行的命令', runCommand ?? '');
+    const updated = nextCommand?.trim();
+    if (!updated) {
+      setPaneRunCommand(tabId, paneId, undefined);
+      return;
+    }
+    setPaneRunCommand(tabId, paneId, updated);
+  }, [paneId, runCommand, setPaneRunCommand, tabId]);
+
+  const handleViewRunCommand = useCallback(async () => {
+    if (!runCommand) return;
+    await showPrompt('查看运行命令', '仅查看，不会自动执行', runCommand);
+  }, [runCommand]);
+
+  const handleDeleteRunCommand = useCallback(() => {
+    if (!paneId) return;
+    setPaneRunCommand(tabId, paneId, undefined);
+  }, [paneId, setPaneRunCommand, tabId]);
+
   const openTerminalContextMenu = useCallback(
     async (clientX: number, clientY: number) => {
       const isWindowMaximized = await appWindow.isMaximized().catch(() => false);
@@ -242,6 +302,9 @@ export function TerminalInstance({
           onPaste: handlePaste,
           onToggleNotifyOnCompletion: () => setNotifyOnCompletion((value) => !value),
           onClearScreen: handleClearScreen,
+          onRunCommand: () => {
+            void handleRunCommand();
+          },
           onRestartTerminal: () => {
             if (paneId && onRestart) onRestart(paneId);
           },
@@ -274,6 +337,7 @@ export function TerminalInstance({
       handleClearScreen,
       handleCopy,
       handlePaste,
+      handleRunCommand,
       notifyOnCompletion,
       onClose,
       onCloseTab,
@@ -287,6 +351,11 @@ export function TerminalInstance({
     ],
   );
 
+  const openTerminalContextMenuRef = useRef(openTerminalContextMenu);
+  useEffect(() => {
+    openTerminalContextMenuRef.current = openTerminalContextMenu;
+  }, [openTerminalContextMenu]);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -298,30 +367,41 @@ export function TerminalInstance({
 
     requestAnimationFrame(() => {
       if (container.clientWidth > 0 && container.clientHeight > 0) {
+        const previousCols = term.cols;
+        const previousRows = term.rows;
         fitAddon.fit();
-        void invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
+        if (term.cols !== previousCols || term.rows !== previousRows) {
+          void invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
+        }
         term.refresh(0, term.rows - 1);
       }
     });
 
     let rafId = 0;
-    const observer = new ResizeObserver(() => {
+    const scheduleFit = (forceRefresh = false) => {
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          fitAddon.fit();
+        if (container.clientWidth <= 0 || container.clientHeight <= 0) return;
+
+        const previousCols = term.cols;
+        const previousRows = term.rows;
+        fitAddon.fit();
+
+        const sizeChanged = term.cols !== previousCols || term.rows !== previousRows;
+        if (sizeChanged || forceRefresh) {
           term.refresh(0, term.rows - 1);
         }
       });
+    };
+
+    const observer = new ResizeObserver(() => {
+      scheduleFit(false);
     });
     observer.observe(container);
 
     const visibilityObserver = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting)) {
-        requestAnimationFrame(() => {
-          fitAddon.fit();
-          term.refresh(0, term.rows - 1);
-        });
+        scheduleFit(true);
       }
     });
     visibilityObserver.observe(container);
@@ -330,7 +410,7 @@ export function TerminalInstance({
       const mouseEvent = event as globalThis.MouseEvent;
       mouseEvent.preventDefault();
       mouseEvent.stopPropagation();
-      void openTerminalContextMenu(mouseEvent.clientX, mouseEvent.clientY);
+      void openTerminalContextMenuRef.current(mouseEvent.clientX, mouseEvent.clientY);
     };
 
     container.addEventListener('contextmenu', handleNativeContextMenu, true);
@@ -350,7 +430,7 @@ export function TerminalInstance({
         fitAddonRef.current = null;
       }
     };
-  }, [openTerminalContextMenu, ptyId]);
+  }, [ptyId]);
 
   const handleContextMenu = useCallback(
     (event: MouseEvent<HTMLDivElement>) => {
@@ -361,16 +441,65 @@ export function TerminalInstance({
     [openTerminalContextMenu],
   );
 
+  const handleActivatePane = useCallback(() => {
+    if (paneId && onActivatePane) {
+      onActivatePane(paneId);
+    }
+  }, [onActivatePane, paneId]);
+
+  const handleRunCommandContextMenu = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showContextMenu(event.clientX, event.clientY, [
+        {
+          label: '编辑',
+          disabled: !paneId,
+          onClick: () => {
+            void handleEditRunCommand();
+          },
+        },
+        {
+          label: '查看',
+          disabled: !runCommand,
+          onClick: () => {
+            void handleViewRunCommand();
+          },
+        },
+        {
+          label: '删除',
+          danger: true,
+          disabled: !runCommand,
+          onClick: () => handleDeleteRunCommand(),
+        },
+      ]);
+    },
+    [handleDeleteRunCommand, handleEditRunCommand, handleViewRunCommand, runCommand],
+  );
+
   return (
-    <div className="flex h-full w-full flex-col" data-tab-id={tabId} onContextMenu={handleContextMenu}>
+    <div
+      className="flex h-full w-full flex-col"
+      data-tab-id={tabId}
+      onContextMenu={handleContextMenu}
+      onMouseDownCapture={handleActivatePane}
+    >
       <div
         className="flex shrink-0 items-center gap-1.5 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-[3px] text-[10px] select-none"
         style={noDragStyle}
       >
         {status && <StatusDot status={status} />}
-        <span className="flex-1 truncate font-medium text-[var(--text-secondary)]">
-          {shellName ?? 'Terminal'}
-        </span>
+        <SessionMetaStrip shellName={shellName} session={session} />
+
+        <PaneActionButton
+          title="运行命令（右键管理）"
+          onClick={() => void handleRunCommand()}
+          onContextMenu={handleRunCommandContextMenu}
+        >
+          <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" aria-hidden="true">
+            <path d="M3 2.5v7l6-3.5-6-3.5Z" fill="currentColor" />
+          </svg>
+        </PaneActionButton>
 
         {paneId && onSplit && (
           <>
@@ -413,6 +542,8 @@ export function TerminalInstance({
           </PaneActionButton>
         )}
       </div>
+
+      <SessionCommandTimeline session={session} />
 
       <div
         className="relative flex-1 bg-[var(--bg-terminal)]"
@@ -458,4 +589,4 @@ export function TerminalInstance({
       </div>
     </div>
   );
-}
+});

@@ -1,12 +1,16 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { getDefaultThemeConfig } from './theme';
+import { createTerminalSessionMeta, getSessionIdForPty } from './utils/session';
 import type {
   AppConfig,
+  CommandBlock,
+  SessionPhase,
   ProjectConfig,
   ProjectGroup,
   ProjectState,
   TerminalTab,
+  TerminalSessionMeta,
   SplitNode,
   PaneStatus,
   SavedSplitNode,
@@ -57,6 +61,34 @@ function updatePaneStatus(node: SplitNode, ptyId: number, status: PaneStatus): S
   };
 }
 
+function updatePaneSessionPhase(node: SplitNode, ptyId: number, phase: SessionPhase): SplitNode {
+  if (node.type === 'leaf') {
+    if (node.pane.ptyId === ptyId) {
+      return { ...node, pane: { ...node.pane, phase } };
+    }
+    return node;
+  }
+
+  return {
+    ...node,
+    children: node.children.map((child) => updatePaneSessionPhase(child, ptyId, phase)),
+  };
+}
+
+function updatePaneRunCommand(node: SplitNode, paneId: string, runCommand?: string): SplitNode {
+  if (node.type === 'leaf') {
+    if (node.pane.id === paneId) {
+      return { ...node, pane: { ...node.pane, runCommand } };
+    }
+    return node;
+  }
+
+  return {
+    ...node,
+    children: node.children.map((child) => updatePaneRunCommand(child, paneId, runCommand)),
+  };
+}
+
 // 收集所有 pane 的 ptyId
 export function collectPtyIds(node: SplitNode): number[] {
   if (node.type === 'leaf') return [node.pane.ptyId];
@@ -66,7 +98,13 @@ export function collectPtyIds(node: SplitNode): number[] {
 // 序列化 SplitNode 树（剥离运行时数据）
 function serializeSplitNode(node: SplitNode): SavedSplitNode {
   if (node.type === 'leaf') {
-    return { type: 'leaf', pane: { shellName: node.pane.shellName } };
+    return {
+      type: 'leaf',
+      pane: {
+        shellName: node.pane.shellName,
+        runCommand: node.pane.runCommand,
+      },
+    };
   }
   return {
     type: 'split',
@@ -103,9 +141,19 @@ async function restoreSplitNode(
         args: shell.args ?? [],
         cwd: projectPath,
       });
+      useAppStore.getState().upsertSession(createTerminalSessionMeta(shell.name, ptyId, projectPath));
       return {
         type: 'leaf',
-        pane: { id: genId(), shellName: shell.name, status: 'idle' as PaneStatus, ptyId },
+        pane: {
+          id: genId(),
+          sessionId: getSessionIdForPty(ptyId),
+          shellName: shell.name,
+          runCommand: saved.pane.runCommand,
+          status: 'idle' as PaneStatus,
+          mode: 'human',
+          phase: 'starting',
+          ptyId,
+        },
       };
     } catch {
       return null;
@@ -262,6 +310,16 @@ interface AppStore {
   // 配置
   config: AppConfig;
   setConfig: (config: AppConfig) => void;
+  sessions: Map<number, TerminalSessionMeta>;
+  activePaneByTab: Map<string, string>;
+  upsertSession: (session: TerminalSessionMeta) => void;
+  updateSessionPhase: (ptyId: number, phase: SessionPhase, patch?: Partial<TerminalSessionMeta>) => void;
+  recordSessionCommand: (ptyId: number, command: string, updatedAt?: number) => void;
+  finishSessionCommand: (ptyId: number, exitCode: number | undefined, phase: SessionPhase, updatedAt?: number) => void;
+  removeSession: (ptyId: number) => void;
+  setPaneRunCommand: (tabId: string, paneId: string, runCommand?: string) => void;
+  setActivePaneForTab: (tabId: string, paneId: string) => void;
+  clearActivePaneForTab: (tabId: string) => void;
 
   // 项目
   activeProjectId: string | null;
@@ -298,6 +356,183 @@ export const useAppStore = create<AppStore>((set) => ({
     theme: getDefaultThemeConfig(),
   },
   setConfig: (config) => set({ config }),
+  sessions: new Map(),
+  activePaneByTab: new Map(),
+  upsertSession: (session) =>
+    set((state) => {
+      const sessions = new Map(state.sessions);
+      const existing = sessions.get(session.ptyId);
+      sessions.set(
+        session.ptyId,
+        existing
+          ? {
+              ...existing,
+              ...session,
+              commands: session.commands.length > 0 ? session.commands : existing.commands,
+            }
+          : session,
+      );
+      return { sessions };
+    }),
+  updateSessionPhase: (ptyId, phase, patch) =>
+    set((state) => {
+      const existing = state.sessions.get(ptyId);
+      if (!existing) return state;
+
+      const now = patch?.updatedAt ?? Date.now();
+      const shouldSettleActiveCommand =
+        existing.activeCommand && existing.activeCommand.status === 'running' && (phase === 'ready' || phase === 'waiting-input');
+      const settledActiveCommand: CommandBlock | undefined = shouldSettleActiveCommand && existing.activeCommand
+        ? {
+            ...existing.activeCommand,
+            finishedAt: now,
+            status: 'completed',
+          }
+        : existing.activeCommand;
+      const commands = shouldSettleActiveCommand
+        ? existing.commands.map((command) =>
+            command.id === existing.activeCommand?.id
+              ? { ...command, finishedAt: now, status: 'completed' as const }
+              : command,
+          )
+        : existing.commands;
+
+      const sessions = new Map(state.sessions);
+      sessions.set(ptyId, {
+        ...existing,
+        ...patch,
+        commands,
+        phase,
+        updatedAt: now,
+        activeCommand: settledActiveCommand,
+      });
+
+      let projectStatesChanged = false;
+      const projectStates = new Map(state.projectStates);
+      for (const [projectId, projectState] of projectStates) {
+        let tabsChanged = false;
+        const tabs = projectState.tabs.map((tab) => {
+          const nextLayout = updatePaneSessionPhase(tab.splitLayout, ptyId, phase);
+          if (nextLayout === tab.splitLayout) return tab;
+          tabsChanged = true;
+          return { ...tab, splitLayout: nextLayout };
+        });
+
+        if (tabsChanged) {
+          projectStates.set(projectId, { ...projectState, tabs });
+          projectStatesChanged = true;
+        }
+      }
+
+      return projectStatesChanged ? { sessions, projectStates } : { sessions };
+    }),
+  recordSessionCommand: (ptyId, command, updatedAt) =>
+    set((state) => {
+      const existing = state.sessions.get(ptyId);
+      if (!existing) return state;
+
+      const now = updatedAt ?? Date.now();
+      const settledCommands = existing.activeCommand && existing.activeCommand.status === 'running'
+        ? existing.commands.map((item) =>
+            item.id === existing.activeCommand?.id
+              ? { ...item, finishedAt: now, status: 'completed' as const }
+              : item,
+          )
+        : existing.commands;
+      const nextCommand: CommandBlock = {
+        id: genId(),
+        command,
+        startedAt: now,
+        status: 'running',
+      };
+      const sessions = new Map(state.sessions);
+      sessions.set(ptyId, {
+        ...existing,
+        commands: [...settledCommands, nextCommand].slice(-12),
+        lastCommand: command,
+        phase: 'running',
+        updatedAt: now,
+        activeCommand: nextCommand,
+      });
+      return { sessions };
+    }),
+  finishSessionCommand: (ptyId, exitCode, phase, updatedAt) =>
+    set((state) => {
+      const existing = state.sessions.get(ptyId);
+      if (!existing) return state;
+
+      const now = updatedAt ?? Date.now();
+      const finishedStatus: CommandBlock['status'] =
+        exitCode == null
+          ? 'interrupted'
+          : exitCode === 0
+            ? 'success'
+            : 'error';
+      const nextActiveCommand: CommandBlock | undefined = existing.activeCommand
+        ? {
+            ...existing.activeCommand,
+            finishedAt: now,
+            exitCode,
+            status: finishedStatus,
+          }
+        : existing.activeCommand;
+      const sessions = new Map(state.sessions);
+      sessions.set(ptyId, {
+        ...existing,
+        commands: existing.activeCommand
+          ? existing.commands.map((command) =>
+              command.id === existing.activeCommand?.id ? (nextActiveCommand as CommandBlock) : command,
+            )
+          : existing.commands,
+        phase,
+        lastExitCode: exitCode,
+        updatedAt: now,
+        activeCommand: nextActiveCommand,
+      });
+      return { sessions };
+    }),
+  removeSession: (ptyId) =>
+    set((state) => {
+      if (!state.sessions.has(ptyId)) return state;
+      const sessions = new Map(state.sessions);
+      sessions.delete(ptyId);
+      return { sessions };
+    }),
+  setPaneRunCommand: (tabId, paneId, runCommand) =>
+    set((state) => {
+      let changed = false;
+      const projectStates = new Map(state.projectStates);
+
+      for (const [projectId, projectState] of projectStates) {
+        const tabIndex = projectState.tabs.findIndex((tab) => tab.id == tabId);
+        if (tabIndex < 0) continue;
+        const tabs = projectState.tabs.map((tab) => {
+          if (tab.id != tabId) return tab;
+          const nextLayout = updatePaneRunCommand(tab.splitLayout, paneId, runCommand);
+          if (nextLayout === tab.splitLayout) return tab;
+          changed = true;
+          return { ...tab, splitLayout: nextLayout };
+        });
+        projectStates.set(projectId, { ...projectState, tabs });
+        break;
+      }
+
+      if (!changed) return state;
+      return { projectStates };
+    }),
+  setActivePaneForTab: (tabId, paneId) =>
+    set((state) => {
+      const activePaneByTab = new Map(state.activePaneByTab);
+      activePaneByTab.set(tabId, paneId);
+      return { activePaneByTab };
+    }),
+  clearActivePaneForTab: (tabId) =>
+    set((state) => {
+      if (!state.activePaneByTab.has(tabId)) return state;
+      const activePaneByTab = new Map(state.activePaneByTab);
+      activePaneByTab.delete(tabId);
+      return { activePaneByTab };
+    }),
 
   activeProjectId: null,
   projectStates: new Map(),
@@ -328,6 +563,11 @@ export const useAppStore = create<AppStore>((set) => ({
       const timer = saveExpandedTimers.get(id);
       if (timer) { clearTimeout(timer); saveExpandedTimers.delete(id); }
 
+      const removedProjectState = state.projectStates.get(id);
+      const removedPtyIds = removedProjectState
+        ? removedProjectState.tabs.flatMap((tab) => collectPtyIds(tab.splitLayout))
+        : [];
+
       const newTree = deepCloneTree(state.config.projectTree ?? []);
       removeProjectFromTree(newTree, id);
       const newConfig = {
@@ -337,11 +577,15 @@ export const useAppStore = create<AppStore>((set) => ({
       };
       const newStates = new Map(state.projectStates);
       newStates.delete(id);
+      const sessions = new Map(state.sessions);
+      removedPtyIds.forEach((ptyId) => sessions.delete(ptyId));
+      const activePaneByTab = new Map(state.activePaneByTab);
+      removedProjectState?.tabs.forEach((tab) => activePaneByTab.delete(tab.id));
       const newActive =
         state.activeProjectId === id
           ? newConfig.projects[0]?.id ?? null
           : state.activeProjectId;
-      return { config: newConfig, projectStates: newStates, activeProjectId: newActive };
+      return { config: newConfig, projectStates: newStates, activeProjectId: newActive, sessions, activePaneByTab };
     }),
 
   addTab: (projectId, tab) =>
@@ -362,11 +606,17 @@ export const useAppStore = create<AppStore>((set) => ({
       const newStates = new Map(state.projectStates);
       const ps = newStates.get(projectId);
       if (!ps) return state;
+      const removedTab = ps.tabs.find((tab) => tab.id === tabId);
+      const removedPtyIds = removedTab ? collectPtyIds(removedTab.splitLayout) : [];
       const newTabs = ps.tabs.filter((t) => t.id !== tabId);
       const newActive =
         ps.activeTabId === tabId ? (newTabs[newTabs.length - 1]?.id ?? '') : ps.activeTabId;
       newStates.set(projectId, { ...ps, tabs: newTabs, activeTabId: newActive });
-      return { projectStates: newStates };
+      const sessions = new Map(state.sessions);
+      removedPtyIds.forEach((ptyId) => sessions.delete(ptyId));
+      const activePaneByTab = new Map(state.activePaneByTab);
+      activePaneByTab.delete(tabId);
+      return { projectStates: newStates, sessions, activePaneByTab };
     }),
 
   setActiveTab: (projectId, tabId) =>

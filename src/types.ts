@@ -50,6 +50,7 @@ export interface ShellConfig {
 
 export interface SavedPane {
   shellName: string;
+  runCommand?: string;
 }
 
 export type SavedSplitNode =
@@ -69,6 +70,34 @@ export interface SavedProjectLayout {
 // === ????? ===
 
 export type PaneStatus = 'idle' | 'ai-idle' | 'ai-working' | 'error';
+export type ShellKind = 'powershell' | 'pwsh' | 'cmd' | 'bash' | 'zsh' | 'unknown';
+export type SessionMode = 'human' | 'agent' | 'task';
+export type SessionPhase = 'starting' | 'ready' | 'running' | 'waiting-input' | 'error' | 'exited';
+
+export interface CommandBlock {
+  id: string;
+  command: string;
+  startedAt: number;
+  finishedAt?: number;
+  exitCode?: number;
+  status: 'running' | 'completed' | 'success' | 'error' | 'interrupted';
+}
+
+export interface TerminalSessionMeta {
+  sessionId: string;
+  ptyId: number;
+  shellKind: ShellKind;
+  mode: SessionMode;
+  phase: SessionPhase;
+  cwd?: string;
+  title?: string;
+  lastCommand?: string;
+  lastExitCode?: number;
+  commands: CommandBlock[];
+  activeCommand?: CommandBlock;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface ProjectState {
   id: string;
@@ -89,8 +118,12 @@ export type SplitNode =
 
 export interface PaneState {
   id: string;
+  sessionId: string;
   shellName: string;
+  runCommand?: string;
   status: PaneStatus;
+  mode: SessionMode;
+  phase: SessionPhase;
   ptyId: number;
 }
 
@@ -128,6 +161,31 @@ export interface PtyExitPayload {
 export interface PtyStatusChangePayload {
   ptyId: number;
   status: PaneStatus;
+}
+
+export interface PtySessionCreatedPayload {
+  sessionId: string;
+  ptyId: number;
+  shell: string;
+  shellKind: ShellKind;
+  cwd: string;
+  mode: SessionMode;
+  phase: SessionPhase;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PtySessionPhasePayload {
+  ptyId: number;
+  phase: SessionPhase;
+  lastExitCode?: number;
+  updatedAt: number;
+}
+
+export interface PtySessionCommandPayload {
+  ptyId: number;
+  command: string;
+  updatedAt: number;
 }
 
 export interface FsChangePayload {

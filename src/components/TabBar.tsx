@@ -16,9 +16,8 @@ interface Props {
 }
 
 export function TabBar({ projectId, onNewTab, onCloseTab }: Props) {
-  const projectStates = useAppStore((s) => s.projectStates);
   const setActiveTab = useAppStore((s) => s.setActiveTab);
-  const ps = projectStates.get(projectId);
+  const ps = useAppStore((s) => s.projectStates.get(projectId));
   if (!ps) return null;
 
   return (

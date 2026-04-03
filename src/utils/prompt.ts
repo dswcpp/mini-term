@@ -1,4 +1,4 @@
-export function showPrompt(
+﻿export function showPrompt(
   title: string,
   placeholder?: string,
   initialValue = '',
@@ -10,17 +10,42 @@ export function showPrompt(
     const dialog = document.createElement('div');
     dialog.className = 'prompt-dialog';
 
+    const header = document.createElement('div');
+    header.className = 'prompt-header';
+
+    const eyebrow = document.createElement('div');
+    eyebrow.className = 'prompt-eyebrow';
+    eyebrow.textContent = 'Quick Input';
+    header.appendChild(eyebrow);
+
     const titleEl = document.createElement('div');
     titleEl.className = 'prompt-title';
     titleEl.textContent = title;
-    dialog.appendChild(titleEl);
+    header.appendChild(titleEl);
+
+    const subtitle = document.createElement('div');
+    subtitle.className = 'prompt-subtitle';
+    subtitle.textContent = 'Enter 确认，Esc 取消';
+    header.appendChild(subtitle);
+
+    dialog.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'prompt-body';
 
     const input = document.createElement('input');
     input.className = 'prompt-input';
     input.placeholder = placeholder ?? '';
     input.value = initialValue;
     input.spellcheck = false;
-    dialog.appendChild(input);
+    body.appendChild(input);
+
+    const hint = document.createElement('div');
+    hint.className = 'prompt-hint';
+    hint.textContent = placeholder ?? '输入内容后按 Enter 提交';
+    body.appendChild(hint);
+
+    dialog.appendChild(body);
 
     const buttons = document.createElement('div');
     buttons.className = 'prompt-buttons';

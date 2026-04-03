@@ -1,8 +1,11 @@
-import { useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+﻿import { useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import { Allotment } from 'allotment';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, genId, collectPtyIds, saveLayoutToConfig } from '../store';
+import { createTerminalPane, createTerminalSessionMeta } from '../utils/session';
 import { TabBar } from './TabBar';
 import { SplitLayout } from './SplitLayout';
+import { SessionInspector } from './terminal/SessionInspector';
 import {
   collectPaneIds,
   findPane,
@@ -28,14 +31,33 @@ function getTabTitle(tab: TerminalTab): string {
   return '分屏终端';
 }
 
+function getFirstPane(node: SplitNode): PaneState {
+  if (node.type === 'leaf') return node.pane;
+  return getFirstPane(node.children[0]);
+}
+
 export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) {
-  const config = useAppStore((state) => state.config);
-  const projectStates = useAppStore((state) => state.projectStates);
+  const availableShells = useAppStore((state) => state.config.availableShells);
+  const defaultShell = useAppStore((state) => state.config.defaultShell);
   const addTab = useAppStore((state) => state.addTab);
   const updateTabLayout = useAppStore((state) => state.updateTabLayout);
   const removeTab = useAppStore((state) => state.removeTab);
+  const removeSession = useAppStore((state) => state.removeSession);
+  const activePaneByTab = useAppStore((state) => state.activePaneByTab);
+  const setActivePaneForTab = useAppStore((state) => state.setActivePaneForTab);
+  const clearActivePaneForTab = useAppStore((state) => state.clearActivePaneForTab);
+  const upsertSession = useAppStore((state) => state.upsertSession);
   const setTabCustomTitle = useAppStore((state) => state.setTabCustomTitle);
-  const ps = projectStates.get(projectId);
+  const sessions = useAppStore((state) => state.sessions);
+  const ps = useAppStore((state) => state.projectStates.get(projectId));
+
+  const getActivePane = useCallback(
+    (tab: TerminalTab) => {
+      const paneId = activePaneByTab.get(tab.id);
+      return (paneId ? findPane(tab.splitLayout, paneId) : null) ?? getFirstPane(tab.splitLayout);
+    },
+    [activePaneByTab],
+  );
 
   const handleCloseTab = useCallback(
     async (tabId: string) => {
@@ -49,21 +71,23 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         for (const id of ptyIds) {
           await invoke('kill_pty', { ptyId: id });
           disposeTerminal(id);
+          removeSession(id);
         }
       }
 
+      clearActivePaneForTab(tabId);
       removeTab(projectId, tabId);
       saveLayoutToConfig(projectId);
     },
-    [projectId, removeTab],
+    [clearActivePaneForTab, projectId, removeSession, removeTab],
   );
 
   const handleNewTab = useCallback(
     async (selectedShell?: ShellConfig) => {
       const shell =
         selectedShell ??
-        config.availableShells.find((item) => item.name === config.defaultShell) ??
-        config.availableShells[0];
+        availableShells.find((item) => item.name === defaultShell) ??
+        availableShells[0];
       if (!shell) return;
 
       const ptyId = await invoke<number>('create_pty', {
@@ -71,30 +95,28 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         args: shell.args ?? [],
         cwd: projectPath,
       });
+      upsertSession(createTerminalSessionMeta(shell.name, ptyId, projectPath));
 
+      const pane = createTerminalPane(shell.name, ptyId, genId());
       const tab: TerminalTab = {
         id: genId(),
         status: 'idle',
         splitLayout: {
           type: 'leaf',
-          pane: {
-            id: genId(),
-            shellName: shell.name,
-            status: 'idle',
-            ptyId,
-          },
+          pane,
         },
       };
 
       addTab(projectId, tab);
+      setActivePaneForTab(tab.id, pane.id);
       saveLayoutToConfig(projectId);
     },
-    [addTab, config.availableShells, config.defaultShell, projectId, projectPath],
+    [addTab, availableShells, defaultShell, projectId, projectPath, setActivePaneForTab, upsertSession],
   );
 
   const handleNewTabClick = useCallback(
     (event: ReactMouseEvent) => {
-      if (config.availableShells.length === 0) {
+      if (availableShells.length === 0) {
         showContextMenu(event.clientX, event.clientY, [
           {
             label: '没有可用终端，打开设置',
@@ -107,13 +129,13 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       showContextMenu(
         event.clientX,
         event.clientY,
-        config.availableShells.map((shell) => ({
+        availableShells.map((shell) => ({
           label: shell.name,
           onClick: () => handleNewTab(shell),
         })),
       );
     },
-    [config.availableShells, handleNewTab, onOpenSettings],
+    [availableShells, handleNewTab, onOpenSettings],
   );
 
   const handleSplitPane = useCallback(
@@ -125,8 +147,8 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       if (!tab) return;
 
       const shell =
-        config.availableShells.find((item) => item.name === config.defaultShell) ??
-        config.availableShells[0];
+        availableShells.find((item) => item.name === defaultShell) ??
+        availableShells[0];
       if (!shell) return;
 
       const ptyId = await invoke<number>('create_pty', {
@@ -134,13 +156,9 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         args: shell.args ?? [],
         cwd: projectPath,
       });
+      upsertSession(createTerminalSessionMeta(shell.name, ptyId, projectPath));
 
-      const newPane: PaneState = {
-        id: genId(),
-        shellName: shell.name,
-        status: 'idle',
-        ptyId,
-      };
+      const newPane: PaneState = createTerminalPane(shell.name, ptyId, genId());
 
       const latestTab = useAppStore
         .getState()
@@ -150,9 +168,10 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
       const nextLayout = insertSplit(latestTab.splitLayout, paneId, direction, newPane);
       updateTabLayout(projectId, tabId, nextLayout);
+      setActivePaneForTab(tabId, newPane.id);
       saveLayoutToConfig(projectId);
     },
-    [config.availableShells, config.defaultShell, projectId, projectPath, updateTabLayout],
+    [availableShells, defaultShell, projectId, projectPath, setActivePaneForTab, updateTabLayout, upsertSession],
   );
 
   const handleTabDrop = useCallback(
@@ -179,10 +198,12 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       );
 
       updateTabLayout(projectId, targetTabId, nextLayout);
+      setActivePaneForTab(targetTabId, getFirstPane(sourceTab.splitLayout).id);
+      clearActivePaneForTab(sourceTabId);
       removeTab(projectId, sourceTabId);
       saveLayoutToConfig(projectId);
     },
-    [projectId, removeTab, updateTabLayout],
+    [clearActivePaneForTab, projectId, removeTab, setActivePaneForTab, updateTabLayout],
   );
 
   const handleClosePane = useCallback(
@@ -198,6 +219,7 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
       await invoke('kill_pty', { ptyId: pane.ptyId });
       disposeTerminal(pane.ptyId);
+      removeSession(pane.ptyId);
 
       const latestTab = useAppStore
         .getState()
@@ -208,12 +230,13 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       const nextLayout = removePane(latestTab.splitLayout, paneId);
       if (nextLayout) {
         updateTabLayout(projectId, tabId, nextLayout);
+        setActivePaneForTab(tabId, getFirstPane(nextLayout).id);
         saveLayoutToConfig(projectId);
       } else {
         await handleCloseTab(tabId);
       }
     },
-    [handleCloseTab, projectId, updateTabLayout],
+    [handleCloseTab, projectId, removeSession, setActivePaneForTab, updateTabLayout],
   );
 
   const handleRestartPane = useCallback(
@@ -228,13 +251,14 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       if (!pane) return;
 
       const shell =
-        config.availableShells.find((item) => item.name === pane.shellName) ??
-        config.availableShells.find((item) => item.name === config.defaultShell) ??
-        config.availableShells[0];
+        availableShells.find((item) => item.name === pane.shellName) ??
+        availableShells.find((item) => item.name === defaultShell) ??
+        availableShells[0];
       if (!shell) return;
 
       await invoke('kill_pty', { ptyId: pane.ptyId });
       disposeTerminal(pane.ptyId);
+      removeSession(pane.ptyId);
 
       const ptyId = await invoke<number>('create_pty', {
         shell: shell.command,
@@ -250,18 +274,19 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
       const latestPane = findPane(latestTab.splitLayout, paneId);
       if (!latestPane) return;
+      upsertSession(createTerminalSessionMeta(shell.name, ptyId, projectPath, latestPane.mode));
 
-      const nextLayout = replacePane(latestTab.splitLayout, paneId, {
-        ...latestPane,
-        shellName: shell.name,
-        status: 'idle',
-        ptyId,
-      });
+      const nextLayout = replacePane(
+        latestTab.splitLayout,
+        paneId,
+        createTerminalPane(shell.name, ptyId, latestPane.id, latestPane.mode, latestPane.runCommand),
+      );
 
       updateTabLayout(projectId, tabId, nextLayout);
+      setActivePaneForTab(tabId, latestPane.id);
       saveLayoutToConfig(projectId);
     },
-    [config.availableShells, config.defaultShell, projectId, projectPath, updateTabLayout],
+    [availableShells, defaultShell, projectId, projectPath, removeSession, setActivePaneForTab, updateTabLayout, upsertSession],
   );
 
   const handleRenameTab = useCallback(
@@ -300,9 +325,13 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       }
 
       updateTabLayout(projectId, tabId, updatedNode);
+      const currentActivePaneId = activePaneByTab.get(tabId);
+      if (!currentActivePaneId || !findPane(updatedNode, currentActivePaneId)) {
+        setActivePaneForTab(tabId, getFirstPane(updatedNode).id);
+      }
       saveLayoutToConfig(projectId);
     },
-    [projectId, updateTabLayout],
+    [activePaneByTab, projectId, setActivePaneForTab, updateTabLayout],
   );
 
   return (
@@ -310,29 +339,42 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       <TabBar projectId={projectId} onNewTab={handleNewTabClick} onCloseTab={handleCloseTab} />
 
       <div className="relative flex-1 overflow-hidden">
-        {ps?.tabs.map((tab) => (
-          <div
-            key={tab.id}
-            className="absolute inset-0"
-            style={{ display: tab.id === ps.activeTabId ? 'block' : 'none' }}
-          >
-            <SplitLayout
-              node={tab.splitLayout}
-              tabId={tab.id}
-              onSplit={(paneId, direction) => handleSplitPane(tab.id, paneId, direction)}
-              onClose={(paneId) => handleClosePane(tab.id, paneId)}
-              onRestart={(paneId) => handleRestartPane(tab.id, paneId)}
-              onNewTab={() => handleNewTab()}
-              onRenameTab={() => handleRenameTab(tab.id)}
-              onCloseTab={() => handleCloseTab(tab.id)}
-              onOpenSettings={onOpenSettings}
-              onTabDrop={(sourceTabId, targetPaneId, direction, position) =>
-                handleTabDrop(tab.id, sourceTabId, targetPaneId, direction, position)
-              }
-              onLayoutChange={(updatedNode) => handleLayoutChange(tab.id, updatedNode)}
-            />
-          </div>
-        ))}
+        {ps?.tabs.map((tab) => {
+          const activePane = getActivePane(tab);
+          const session = sessions.get(activePane.ptyId);
+
+          return (
+            <div
+              key={tab.id}
+              className="absolute inset-0"
+              style={{ display: tab.id === ps.activeTabId ? 'block' : 'none' }}
+            >
+              <Allotment defaultSizes={[1000, 320]}>
+                <Allotment.Pane minSize={320}>
+                  <SplitLayout
+                    node={tab.splitLayout}
+                    tabId={tab.id}
+                    onActivatePane={(paneId) => setActivePaneForTab(tab.id, paneId)}
+                    onSplit={(paneId, direction) => handleSplitPane(tab.id, paneId, direction)}
+                    onClose={(paneId) => handleClosePane(tab.id, paneId)}
+                    onRestart={(paneId) => handleRestartPane(tab.id, paneId)}
+                    onNewTab={() => handleNewTab()}
+                    onRenameTab={() => handleRenameTab(tab.id)}
+                    onCloseTab={() => handleCloseTab(tab.id)}
+                    onOpenSettings={onOpenSettings}
+                    onTabDrop={(sourceTabId, targetPaneId, direction, position) =>
+                      handleTabDrop(tab.id, sourceTabId, targetPaneId, direction, position)
+                    }
+                    onLayoutChange={(updatedNode) => handleLayoutChange(tab.id, updatedNode)}
+                  />
+                </Allotment.Pane>
+                <Allotment.Pane minSize={260} preferredSize={320} maxSize={420}>
+                  <SessionInspector pane={activePane} session={session} />
+                </Allotment.Pane>
+              </Allotment>
+            </div>
+          );
+        })}
 
         {(!ps || ps.tabs.length === 0) && (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--text-muted)]">

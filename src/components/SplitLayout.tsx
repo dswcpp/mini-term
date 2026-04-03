@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { memo, useRef } from 'react';
 import { Allotment } from 'allotment';
 import { TerminalInstance } from './TerminalInstance';
 import type { SplitNode } from '../types';
@@ -6,6 +6,7 @@ import type { SplitNode } from '../types';
 interface Props {
   node: SplitNode;
   tabId: string;
+  onActivatePane?: (paneId: string) => void;
   onSplit?: (paneId: string, direction: 'horizontal' | 'vertical') => void;
   onClose?: (paneId: string) => void;
   onRestart?: (paneId: string) => void;
@@ -27,9 +28,10 @@ function getNodeKey(node: SplitNode): string {
   return node.children.map(getNodeKey).join('-');
 }
 
-export function SplitLayout({
+export const SplitLayout = memo(function SplitLayout({
   node,
   tabId,
+  onActivatePane,
   onSplit,
   onClose,
   onRestart,
@@ -52,6 +54,8 @@ export function SplitLayout({
         paneId={node.pane.id}
         shellName={node.pane.shellName}
         status={node.pane.status}
+        runCommand={node.pane.runCommand}
+        onActivatePane={onActivatePane}
         onSplit={onSplit}
         onClose={onClose}
         onRestart={onRestart}
@@ -100,6 +104,7 @@ export function SplitLayout({
           <SplitLayout
             node={child}
             tabId={tabId}
+            onActivatePane={onActivatePane}
             onSplit={onSplit}
             onClose={onClose}
             onRestart={onRestart}
@@ -114,4 +119,4 @@ export function SplitLayout({
       ))}
     </Allotment>
   );
-}
+});

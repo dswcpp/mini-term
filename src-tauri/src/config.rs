@@ -97,6 +97,8 @@ impl<'de> Deserialize<'de> for ThemeConfig {
 #[serde(rename_all = "camelCase")]
 pub struct SavedPane {
     pub shell_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,16 +428,8 @@ mod tests {
                 split_layout: SavedSplitNode::Split {
                     direction: "horizontal".into(),
                     children: vec![
-                        SavedSplitNode::Leaf {
-                            pane: SavedPane {
-                                shell_name: "cmd".into(),
-                            },
-                        },
-                        SavedSplitNode::Leaf {
-                            pane: SavedPane {
-                                shell_name: "powershell".into(),
-                            },
-                        },
+                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "cmd".into(), run_command: None } },
+                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "powershell".into(), run_command: None } },
                     ],
                     sizes: vec![50.0, 50.0],
                 },

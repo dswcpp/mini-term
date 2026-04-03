@@ -25,10 +25,10 @@ import { ProjectList } from './components/ProjectList';
 import { FileTree } from './components/FileTree';
 import { GitHistory } from './components/GitHistory';
 import { SettingsModal } from './components/SettingsModal';
-import { useTauriEvent } from './hooks/useTauriEvent';
+import { useSessionRuntimeBridge } from './hooks/useSessionRuntimeBridge';
 import { applyDocumentTheme, resolveTheme } from './theme';
 import { checkForUpdate, type ReleaseInfo } from './utils/updateChecker';
-import type { AppConfig, PaneStatus, PtyExitPayload, PtyStatusChangePayload } from './types';
+import type { AppConfig } from './types';
 
 const appWindow = getCurrentWindow();
 const isWindows = typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
@@ -71,11 +71,12 @@ export function App() {
   const activeProjectId = useAppStore((state) => state.activeProjectId);
   const config = useAppStore((state) => state.config);
   const setConfig = useAppStore((state) => state.setConfig);
-  const updatePaneStatusByPty = useAppStore((state) => state.updatePaneStatusByPty);
 
   const activeProjectName =
     config.projects.find((project) => project.id === activeProjectId)?.name ?? 'Workspace';
   const resolvedTheme = resolveTheme(config.theme);
+
+  useSessionRuntimeBridge();
 
   useEffect(() => {
     void invoke<AppConfig>('load_config').then((loadedConfig) => {
@@ -122,28 +123,6 @@ export function App() {
       })
       .catch(() => {});
   }, []);
-
-  useTauriEvent<PtyStatusChangePayload>(
-    'pty-status-change',
-    useCallback(
-      (payload) => {
-        updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus);
-      },
-      [updatePaneStatusByPty],
-    ),
-  );
-
-  useTauriEvent<PtyExitPayload>(
-    'pty-exit',
-    useCallback(
-      (payload) => {
-        if (payload.exitCode !== 0) {
-          updatePaneStatusByPty(payload.ptyId, 'error');
-        }
-      },
-      [updatePaneStatusByPty],
-    ),
-  );
 
   useEffect(() => {
     const handleBeforeUnload = () => {

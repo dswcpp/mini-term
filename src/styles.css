@@ -341,76 +341,128 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  padding: 24px;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.05), transparent 36%),
+    rgba(7, 7, 8, 0.5);
+  backdrop-filter: blur(12px) saturate(120%);
+  -webkit-backdrop-filter: blur(12px) saturate(120%);
 }
 
 .prompt-dialog {
-  width: 360px;
-  background: var(--bg-surface);
+  width: min(460px, 100%);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.01) 28%, rgba(0, 0, 0, 0.05)),
+    var(--bg-surface);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-  padding: 20px;
-  animation: slideIn 0.12s ease-out;
+  border-radius: 18px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 18px;
+  animation: slideIn 0.14s ease-out;
+  backdrop-filter: blur(24px) saturate(135%);
+  -webkit-backdrop-filter: blur(24px) saturate(135%);
+}
+
+.prompt-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prompt-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.9;
 }
 
 .prompt-title {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 650;
   color: var(--text-primary);
-  margin-bottom: 12px;
+  line-height: 1.25;
+}
+
+.prompt-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.prompt-body {
+  margin-top: 16px;
 }
 
 .prompt-input {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-elevated);
+  background: rgba(10, 10, 11, 0.28);
   color: var(--text-primary);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  font-size: 14px;
+  border-radius: 12px;
+  padding: 13px 14px;
+  font-size: 15px;
   outline: none;
   font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
 }
 
 .prompt-input:focus {
   border-color: var(--accent);
+  background: rgba(10, 10, 11, 0.42);
+  box-shadow: 0 0 0 4px var(--accent-subtle);
+}
+
+.prompt-hint {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .prompt-buttons {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 18px;
 }
 
 .prompt-btn {
-  padding: 6px 16px;
-  border-radius: var(--radius-sm);
+  min-width: 86px;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 10px;
   font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
-  border: none;
-  transition: all 0.15s ease;
+  border: 1px solid transparent;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.12s ease;
 }
 
 .prompt-btn-cancel {
-  background: transparent;
-  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-secondary);
+  border-color: var(--border-default);
 }
 
 .prompt-btn-cancel:hover {
   color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--border-strong);
 }
 
 .prompt-btn-confirm {
   background: var(--accent);
   color: var(--bg-base);
+  box-shadow: 0 8px 18px rgba(200, 128, 90, 0.22);
 }
 
 .prompt-btn-confirm:hover {
-  opacity: 0.9;
+  filter: brightness(1.03);
+}
+
+.prompt-btn:active {
+  transform: translateY(1px);
 }
 
 /* ===== Selection ===== */

@@ -1,4 +1,4 @@
-import type { ContextMenuEntry } from '../../utils/contextMenu';
+﻿import type { ContextMenuEntry } from '../../utils/contextMenu';
 
 export interface TerminalContextMenuOptions {
   hasSelection: boolean;
@@ -12,6 +12,7 @@ export interface TerminalContextMenuOptions {
   onPaste: () => void;
   onToggleNotifyOnCompletion: () => void;
   onClearScreen: () => void;
+  onRunCommand: () => void;
   onRestartTerminal: () => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
@@ -50,6 +51,10 @@ export function buildTerminalContextMenu(
     {
       label: '清空屏幕',
       onClick: options.onClearScreen,
+    },
+    {
+      label: '运行命令',
+      onClick: options.onRunCommand,
     },
     {
       label: '重置终端',
