@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AboutSettings } from './settings/AboutSettings';
+import { ShortcutsSettings } from './settings/ShortcutsSettings';
 import { SystemSettings } from './settings/SystemSettings';
 import { TerminalSettings } from './settings/TerminalSettings';
 import { ThemeSettings } from './settings/ThemeSettings';
@@ -9,12 +10,13 @@ interface Props {
   onClose: () => void;
 }
 
-type SettingsPage = 'terminal' | 'theme' | 'system' | 'about';
+type SettingsPage = 'terminal' | 'theme' | 'system' | 'shortcuts' | 'about';
 
 const MENU_ITEMS: { key: SettingsPage; label: string }[] = [
   { key: 'terminal', label: '终端' },
   { key: 'theme', label: '主题' },
   { key: 'system', label: '系统' },
+  { key: 'shortcuts', label: '快捷键' },
   { key: 'about', label: '关于' },
 ];
 
@@ -74,6 +76,7 @@ export function SettingsModal({ open, onClose }: Props) {
             {activePage === 'terminal' && <TerminalSettings />}
             {activePage === 'theme' && <ThemeSettings />}
             {activePage === 'system' && <SystemSettings />}
+            {activePage === 'shortcuts' && <ShortcutsSettings />}
             {activePage === 'about' && <AboutSettings />}
           </div>
         </div>

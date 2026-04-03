@@ -88,7 +88,7 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     <div>
       <div
         className={`flex items-center gap-1 py-[3px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 ${
-          entry.isDir ? 'text-[var(--color-folder)]' : 'text-[var(--color-file)]'
+          entry.ignored ? 'text-[var(--text-muted)] opacity-50' : entry.isDir ? 'text-[var(--color-folder)]' : 'text-[var(--color-file)]'
         }`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleToggle}
@@ -172,8 +172,12 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
           const rel = getRelativePath(entry.path, projectRoot).replace(/\\/g, '/');
           const fileStatus = gitStatusMap.get(rel);
           const GIT_COLORS: Record<string, string> = {
-            M: 'text-amber-400', A: 'text-green-400', D: 'text-red-400',
-            R: 'text-blue-400', '?': 'text-green-500', C: 'text-red-500',
+            M: 'text-[var(--color-warning)]',
+            A: 'text-[var(--color-success)]',
+            D: 'text-[var(--color-error)]',
+            R: 'text-[var(--color-info)]',
+            '?': 'text-[var(--color-success)]',
+            C: 'text-[var(--color-error)]',
           };
           if (fileStatus) {
             return (

@@ -197,25 +197,43 @@ fn find_repos(project_path: &Path) -> Vec<(String, PathBuf, Repository)> {
         }
     }
 
-    // 2) 扫描一级子目录（使用 open 避免向上搜索）
-    if let Ok(entries) = std::fs::read_dir(project_path) {
+    // 2) 递归扫描子目录查找 git 仓库（最多 5 层）
+    const MAX_DEPTH: u32 = 5;
+    const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".next", "dist", "__pycache__", ".superpowers"];
+    fn scan(dir: &Path, depth: u32, repos: &mut Vec<(String, PathBuf, Repository)>) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
         for entry in entries.flatten() {
             let sub = entry.path();
-            if sub.is_dir() {
-                if let Ok(repo) = Repository::open(&sub) {
-                    if let Some(workdir) = repo.workdir() {
-                        if workdir.canonicalize().ok() == sub.canonicalize().ok() {
-                            let name = sub
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_default();
-                            repos.push((name, sub, repo));
-                        }
+            if !sub.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name();
+            let dir_name_str = dir_name.to_string_lossy();
+            if SKIP_DIRS.contains(&dir_name_str.as_ref()) {
+                continue;
+            }
+            if let Ok(repo) = Repository::open(&sub) {
+                if let Some(workdir) = repo.workdir() {
+                    if workdir.canonicalize().ok() == sub.canonicalize().ok() {
+                        let name = sub
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        repos.push((name, sub, repo));
+                        continue; // 找到仓库后不再深入其内部
                     }
                 }
             }
+            scan(&sub, depth + 1, repos);
         }
     }
+    scan(project_path, 1, &mut repos);
 
     repos
 }

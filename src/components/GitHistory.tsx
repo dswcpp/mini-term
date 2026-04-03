@@ -14,6 +14,53 @@ interface RepoState {
   hasMore: boolean;
 }
 
+// === 仓库树结构 ===
+
+interface RepoTreeNode {
+  name: string;
+  key: string;          // 用于展开/折叠状态跟踪的稳定标识
+  repo?: GitRepoInfo;   // 仅叶节点（实际仓库）有值
+  children: RepoTreeNode[];
+}
+
+function buildRepoTree(repos: GitRepoInfo[], projectPath: string): RepoTreeNode[] {
+  const normalize = (p: string) => p.replace(/[\\/]+/g, '/').replace(/\/$/, '');
+  const root: RepoTreeNode[] = [];
+  const normalizedProject = normalize(projectPath);
+
+  for (const repo of repos) {
+    const normalizedRepo = normalize(repo.path);
+    let relative: string;
+    if (normalizedRepo === normalizedProject) {
+      relative = '.';
+    } else if (normalizedRepo.startsWith(normalizedProject + '/')) {
+      relative = normalizedRepo.slice(normalizedProject.length + 1);
+    } else {
+      relative = repo.name;
+    }
+
+    if (relative === '.' || !relative.includes('/')) {
+      root.push({ name: repo.name, key: repo.path, repo, children: [] });
+    } else {
+      const parts = relative.split('/');
+      let current = root;
+      let pathSoFar = normalizedProject;
+      for (let i = 0; i < parts.length - 1; i++) {
+        pathSoFar += '/' + parts[i];
+        let found = current.find((n) => n.name === parts[i] && !n.repo);
+        if (!found) {
+          found = { name: parts[i], key: 'dir:' + pathSoFar, children: [] };
+          current.push(found);
+        }
+        current = found.children;
+      }
+      current.push({ name: parts[parts.length - 1], key: repo.path, repo, children: [] });
+    }
+  }
+
+  return root;
+}
+
 const GIT_REFRESH_PATTERNS = [
   /create mode/,
   /Switched to/,
@@ -189,6 +236,113 @@ export function GitHistory() {
     ),
   );
 
+  const repoTree = project ? buildRepoTree(repos, project.path) : [];
+
+  // 递归渲染树节点
+  const renderTreeNode = (node: RepoTreeNode, depth: number) => {
+    // 仓库叶节点 —— 可展开显示 commits
+    if (node.repo) {
+      const repo = node.repo;
+      const isExpanded = expandedRepos.has(repo.path);
+      const state = repoStates.get(repo.path);
+      return (
+        <div key={repo.path}>
+          <div
+            className="sticky bg-[var(--bg-surface)] h-[30px] flex items-center"
+            style={{ top: `${depth * 30}px`, zIndex: 10 - depth }}
+          >
+            <div
+              className="flex items-center gap-1 w-full py-[5px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
+              style={{ paddingLeft: `${depth * 16 + 8}px` }}
+              onClick={() => toggleRepo(repo.path)}
+            >
+              <span
+                className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
+                style={{
+                  transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+                  display: 'inline-block',
+                }}
+              >
+                &#9662;
+              </span>
+              <span className="truncate font-medium">{node.name}</span>
+            </div>
+          </div>
+
+          {isExpanded && (
+            <div className="relative" style={{ zIndex: 0 }}>
+              {state?.commits.map((commit) => (
+                <div
+                  key={commit.hash}
+                  className="py-1.5 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] transition-colors duration-100"
+                  style={{ paddingLeft: `${(depth + 1) * 16 + 8}px`, paddingRight: '8px' }}
+                  onContextMenu={(e) => handleCommitContextMenu(e, repo.path, commit)}
+                  onDoubleClick={() => handleViewDiff(repo.path, commit)}
+                >
+                  <div className="text-sm text-[var(--text-primary)] truncate">
+                    {commit.message}
+                  </div>
+                  <div className="text-xs text-[var(--text-muted)] flex items-center gap-1.5 mt-0.5">
+                    <span>{commit.author}</span>
+                    <span>&middot;</span>
+                    <span>{formatRelativeTime(commit.timestamp)}</span>
+                    <span>&middot;</span>
+                    <span className="font-mono">{commit.shortHash}</span>
+                  </div>
+                </div>
+              ))}
+
+              {state?.loading && (
+                <div className="text-center text-[var(--text-muted)] text-xs py-2">
+                  加载中...
+                </div>
+              )}
+
+              {state && !state.loading && state.commits.length === 0 && (
+                <div className="text-center text-[var(--text-muted)] text-xs py-2">
+                  暂无提交
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // 纯目录节点 —— 可折叠
+    const isDirExpanded = expandedRepos.has(node.key);
+    return (
+      <div key={node.key}>
+        <div
+          className="sticky bg-[var(--bg-surface)] h-[30px] flex items-center"
+          style={{ top: `${depth * 30}px`, zIndex: 10 - depth }}
+        >
+          <div
+            className="flex items-center gap-1 w-full py-[3px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base text-[var(--text-muted)] transition-colors duration-100"
+            style={{ paddingLeft: `${depth * 16 + 8}px` }}
+            onClick={() => {
+              setExpandedRepos((prev) => {
+                const next = new Set(prev);
+                if (next.has(node.key)) next.delete(node.key);
+                else next.add(node.key);
+                return next;
+              });
+            }}
+          >
+            <span
+              className="text-[13px] w-3 text-center transition-transform duration-150"
+              style={{ transform: isDirExpanded ? 'rotate(0deg)' : 'rotate(-90deg)', display: 'inline-block' }}
+            >
+              ▾
+            </span>
+            <span className="truncate">{node.name}</span>
+          </div>
+        </div>
+        {isDirExpanded && node.children.map((child) => renderTreeNode(child, depth + 1))}
+      </div>
+    );
+  };
+
   if (!project) {
     return (
       <div className="h-full bg-[var(--bg-surface)] flex items-center justify-center text-[var(--text-muted)] text-base">
@@ -224,70 +378,7 @@ export function GitHistory() {
           </div>
         )}
 
-        {repos.map((repo) => {
-          const isExpanded = expandedRepos.has(repo.path);
-          const state = repoStates.get(repo.path);
-          return (
-            <div key={repo.path}>
-              <div
-                className="sticky top-0 bg-[var(--bg-surface)] px-1"
-                style={{ zIndex: 2 }}
-              >
-                <div
-                  className="flex items-center gap-1 py-[5px] px-2 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
-                  onClick={() => toggleRepo(repo.path)}
-                >
-                  <span
-                    className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
-                    style={{
-                      transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-                      display: 'inline-block',
-                    }}
-                  >
-                    &#9662;
-                  </span>
-                  <span className="truncate font-medium">{repo.name}</span>
-                </div>
-              </div>
-
-              {isExpanded && (
-                <div className="ml-4">
-                  {state?.commits.map((commit) => (
-                    <div
-                      key={commit.hash}
-                      className="py-1.5 px-2 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] transition-colors duration-100"
-                      onContextMenu={(e) => handleCommitContextMenu(e, repo.path, commit)}
-                      onDoubleClick={() => handleViewDiff(repo.path, commit)}
-                    >
-                      <div className="text-sm text-[var(--text-primary)] truncate">
-                        {commit.message}
-                      </div>
-                      <div className="text-xs text-[var(--text-muted)] flex items-center gap-1.5 mt-0.5">
-                        <span>{commit.author}</span>
-                        <span>&middot;</span>
-                        <span>{formatRelativeTime(commit.timestamp)}</span>
-                        <span>&middot;</span>
-                        <span className="font-mono">{commit.shortHash}</span>
-                      </div>
-                    </div>
-                  ))}
-
-                  {state?.loading && (
-                    <div className="text-center text-[var(--text-muted)] text-xs py-2">
-                      加载中...
-                    </div>
-                  )}
-
-                  {state && !state.loading && state.commits.length === 0 && (
-                    <div className="text-center text-[var(--text-muted)] text-xs py-2">
-                      暂无提交
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+        {repoTree.map((node) => renderTreeNode(node, 0))}
       </div>
 
       {diffModal && (

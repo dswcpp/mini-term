@@ -42,7 +42,7 @@ export function FileViewerModal({ open, onClose, filePath }: FileViewerModalProp
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
       <div
-        className="relative flex flex-col overflow-hidden bg-[var(--bg-surface)] border border-[var(--border-strong)] rounded-[var(--radius-md)] shadow-2xl animate-slide-in"
+        className="relative flex flex-col overflow-hidden bg-[var(--bg-surface)] border border-[var(--border-strong)] rounded-[var(--radius-md)] shadow-[var(--shadow-overlay)] animate-slide-in"
         style={{ width: '90vw', height: '80vh' }}
         onClick={(e) => e.stopPropagation()}
       >

@@ -1,4 +1,4 @@
-// === 配置持久化 ===
+// === ????? ===
 
 export type ProjectTreeItem = string | ProjectGroup;
 
@@ -12,7 +12,7 @@ export interface ProjectGroup {
 export interface AppConfig {
   projects: ProjectConfig[];
   projectTree?: ProjectTreeItem[];
-  // 旧字段仅用于迁移兼容（Rust 端处理后不再出现）
+  // ???????????Rust ?????????
   projectGroups?: { id: string; name: string; collapsed: boolean; projectIds: string[] }[];
   projectOrdering?: string[];
   defaultShell: string;
@@ -46,7 +46,7 @@ export interface ShellConfig {
   args?: string[];
 }
 
-// === 布局持久化 ===
+// === ????? ===
 
 export interface SavedPane {
   shellName: string;
@@ -66,7 +66,7 @@ export interface SavedProjectLayout {
   activeTabIndex: number;
 }
 
-// === 运行时状态 ===
+// === ????? ===
 
 export type PaneStatus = 'idle' | 'ai-idle' | 'ai-working' | 'error';
 
@@ -94,7 +94,7 @@ export interface PaneState {
   ptyId: number;
 }
 
-// === AI 会话 ===
+// === AI ?? ===
 
 export interface AiSession {
   id: string;
@@ -103,16 +103,17 @@ export interface AiSession {
   timestamp: string; // ISO 8601
 }
 
-// === 文件树 ===
+// === ??? ===
 
 export interface FileEntry {
   name: string;
   path: string;
   isDir: boolean;
+  ignored?: boolean;
   children?: FileEntry[];
 }
 
-// === Tauri 事件 payload ===
+// === Tauri ?? payload ===
 
 export interface PtyOutputPayload {
   ptyId: number;
@@ -135,7 +136,7 @@ export interface FsChangePayload {
   kind: string;
 }
 
-// === Git 状态 ===
+// === Git ?? ===
 
 export type GitStatusType = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
 
@@ -169,7 +170,7 @@ export interface GitDiffResult {
   tooLarge: boolean;
 }
 
-// === 文件查看 ===
+// === ???? ===
 
 export interface FileContentResult {
   content: string;
@@ -177,7 +178,7 @@ export interface FileContentResult {
   tooLarge: boolean;
 }
 
-// === Git 历史 ===
+// === Git ?? ===
 
 export interface GitRepoInfo {
   name: string;

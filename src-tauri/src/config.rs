@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
-// 注意：variant 顺序不可调换！untagged 按声明顺序尝试匹配
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProjectTreeItem {
@@ -49,16 +48,49 @@ pub struct AppConfig {
     pub layout_sizes: Option<Vec<f64>>,
     #[serde(default)]
     pub theme: ThemeConfig,
+    #[serde(default)]
     pub middle_column_sizes: Option<Vec<f64>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeConfig {
-    #[serde(default = "default_theme_preset")]
     pub preset: String,
-    #[serde(default = "default_theme_window_effect")]
     pub window_effect: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ThemeConfigRepr {
+    Modern {
+        #[serde(default = "default_theme_preset")]
+        preset: String,
+        #[serde(default = "default_theme_window_effect")]
+        window_effect: String,
+    },
+    Legacy(String),
+}
+
+impl<'de> Deserialize<'de> for ThemeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let repr = ThemeConfigRepr::deserialize(deserializer)?;
+        Ok(match repr {
+            ThemeConfigRepr::Modern {
+                preset,
+                window_effect,
+            } => Self {
+                preset,
+                window_effect,
+            },
+            ThemeConfigRepr::Legacy(mode) => Self {
+                preset: legacy_theme_mode_to_preset(&mode),
+                window_effect: default_theme_window_effect(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,10 +145,29 @@ pub struct ShellConfig {
     pub args: Option<Vec<String>>,
 }
 
-fn default_ui_font_size() -> f64 { 13.0 }
-fn default_terminal_font_size() -> f64 { 14.0 }
-fn default_theme_preset() -> String { "warm-carbon".into() }
-fn default_theme_window_effect() -> String { "auto".into() }
+fn default_ui_font_size() -> f64 {
+    13.0
+}
+
+fn default_terminal_font_size() -> f64 {
+    14.0
+}
+
+fn default_theme_preset() -> String {
+    "warm-carbon".into()
+}
+
+fn default_theme_window_effect() -> String {
+    "auto".into()
+}
+
+fn legacy_theme_mode_to_preset(mode: &str) -> String {
+    match mode {
+        "light" => "ghostty-light".into(),
+        "dark" => "ghostty-dark".into(),
+        _ => default_theme_preset(),
+    }
+}
 
 impl Default for ThemeConfig {
     fn default() -> Self {
@@ -146,47 +197,85 @@ impl Default for AppConfig {
 }
 
 #[cfg(target_os = "windows")]
-fn default_shell_name() -> String { "cmd".into() }
+fn default_shell_name() -> String {
+    "cmd".into()
+}
 
 #[cfg(target_os = "macos")]
-fn default_shell_name() -> String { "zsh".into() }
+fn default_shell_name() -> String {
+    "zsh".into()
+}
 
 #[cfg(target_os = "linux")]
-fn default_shell_name() -> String { "bash".into() }
+fn default_shell_name() -> String {
+    "bash".into()
+}
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-fn default_shell_name() -> String { "sh".into() }
+fn default_shell_name() -> String {
+    "sh".into()
+}
 
 #[cfg(target_os = "windows")]
 fn default_shells() -> Vec<ShellConfig> {
     vec![
-        ShellConfig { name: "cmd".into(), command: "cmd".into(), args: None },
-        ShellConfig { name: "powershell".into(), command: "powershell".into(), args: None },
+        ShellConfig {
+            name: "cmd".into(),
+            command: "cmd".into(),
+            args: None,
+        },
+        ShellConfig {
+            name: "powershell".into(),
+            command: "powershell".into(),
+            args: None,
+        },
     ]
 }
 
 #[cfg(target_os = "macos")]
 fn default_shells() -> Vec<ShellConfig> {
     vec![
-        ShellConfig { name: "zsh".into(), command: "/bin/zsh".into(), args: Some(vec!["--login".into()]) },
-        ShellConfig { name: "bash".into(), command: "/bin/bash".into(), args: Some(vec!["--login".into()]) },
+        ShellConfig {
+            name: "zsh".into(),
+            command: "/bin/zsh".into(),
+            args: Some(vec!["--login".into()]),
+        },
+        ShellConfig {
+            name: "bash".into(),
+            command: "/bin/bash".into(),
+            args: Some(vec!["--login".into()]),
+        },
     ]
 }
 
 #[cfg(target_os = "linux")]
 fn default_shells() -> Vec<ShellConfig> {
     vec![
-        ShellConfig { name: "bash".into(), command: "/bin/bash".into(), args: None },
-        ShellConfig { name: "zsh".into(), command: "/usr/bin/zsh".into(), args: None },
-        ShellConfig { name: "sh".into(), command: "/bin/sh".into(), args: None },
+        ShellConfig {
+            name: "bash".into(),
+            command: "/bin/bash".into(),
+            args: None,
+        },
+        ShellConfig {
+            name: "zsh".into(),
+            command: "/usr/bin/zsh".into(),
+            args: None,
+        },
+        ShellConfig {
+            name: "sh".into(),
+            command: "/bin/sh".into(),
+            args: None,
+        },
     ]
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn default_shells() -> Vec<ShellConfig> {
-    vec![
-        ShellConfig { name: "sh".into(), command: "/bin/sh".into(), args: None },
-    ]
+    vec![ShellConfig {
+        name: "sh".into(),
+        command: "/bin/sh".into(),
+        args: None,
+    }]
 }
 
 fn config_path(app: &AppHandle) -> PathBuf {
@@ -201,6 +290,7 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
         config.project_ordering = None;
         return config;
     }
+
     let groups = match config.project_groups.take() {
         Some(g) if !g.is_empty() => g,
         _ => return config,
@@ -216,7 +306,9 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
                 id: old_group.id.clone(),
                 name: old_group.name.clone(),
                 collapsed: old_group.collapsed,
-                children: old_group.project_ids.iter()
+                children: old_group
+                    .project_ids
+                    .iter()
                     .map(|pid| ProjectTreeItem::ProjectId(pid.clone()))
                     .collect(),
             }));
@@ -314,6 +406,19 @@ mod tests {
     }
 
     #[test]
+    fn old_theme_mode_deserializes() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [{"name": "cmd", "command": "cmd"}],
+            "theme": "light"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.theme.preset, "ghostty-light");
+        assert_eq!(config.theme.window_effect, "auto");
+    }
+
+    #[test]
     fn layout_round_trip() {
         let layout = SavedProjectLayout {
             tabs: vec![SavedTab {
@@ -321,8 +426,16 @@ mod tests {
                 split_layout: SavedSplitNode::Split {
                     direction: "horizontal".into(),
                     children: vec![
-                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "cmd".into() } },
-                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "powershell".into() } },
+                        SavedSplitNode::Leaf {
+                            pane: SavedPane {
+                                shell_name: "cmd".into(),
+                            },
+                        },
+                        SavedSplitNode::Leaf {
+                            pane: SavedPane {
+                                shell_name: "powershell".into(),
+                            },
+                        },
                     ],
                     sizes: vec![50.0, 50.0],
                 },

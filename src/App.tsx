@@ -147,10 +147,11 @@ export function App() {
 
   useEffect(() => {
     const handleBeforeUnload = () => {
-      const { activeProjectId: currentProjectId } = useAppStore.getState();
-      if (!currentProjectId) return;
-      flushLayoutToConfig(currentProjectId);
-      flushExpandedDirsToConfig(currentProjectId);
+      const { projectStates } = useAppStore.getState();
+      for (const projectId of projectStates.keys()) {
+        flushLayoutToConfig(projectId);
+        flushExpandedDirsToConfig(projectId);
+      }
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
@@ -169,10 +170,10 @@ export function App() {
         return;
       }
 
-      const { activeProjectId: currentProjectId } = useAppStore.getState();
-      if (currentProjectId) {
-        flushLayoutToConfig(currentProjectId);
-        flushExpandedDirsToConfig(currentProjectId);
+      const { projectStates } = useAppStore.getState();
+      for (const projectId of projectStates.keys()) {
+        flushLayoutToConfig(projectId);
+        flushExpandedDirsToConfig(projectId);
       }
 
       void appWindow.destroy();

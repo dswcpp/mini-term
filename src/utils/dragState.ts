@@ -13,7 +13,6 @@ export function getDragPayload() {
   return _payload;
 }
 
-// 兼容旧 API（TabBar / TerminalInstance）
 export function setDraggingTabId(id: string | null) {
   _payload = id ? { type: 'tab', tabId: id } : null;
 }

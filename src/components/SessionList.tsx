@@ -32,8 +32,8 @@ function formatTime(iso: string): string {
 }
 
 const TYPE_BADGE: Record<string, { label: string; color: string }> = {
-  claude: { label: 'C', color: '#b08cd4' },
-  codex: { label: 'X', color: '#4aa87a' },
+  claude: { label: 'C', color: 'var(--color-ai)' },
+  codex: { label: 'X', color: 'var(--color-success)' },
 };
 
 export function SessionList() {

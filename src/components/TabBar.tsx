@@ -22,16 +22,16 @@ export function TabBar({ projectId, onNewTab, onCloseTab }: Props) {
   if (!ps) return null;
 
   return (
-    <div className="flex bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-[11px] overflow-x-auto select-none">
+    <div className="flex overflow-x-auto border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[11px] select-none">
       {ps.tabs.map((tab) => {
         const isActive = tab.id === ps.activeTabId;
         return (
           <div
             key={tab.id}
-            className={`flex items-center gap-2 px-3 py-[7px] cursor-pointer whitespace-nowrap transition-all duration-100 relative ${
+            className={`relative flex cursor-pointer items-center gap-2 whitespace-nowrap px-3 py-[7px] transition-all duration-100 ${
               isActive
                 ? 'bg-[var(--bg-terminal)] text-[var(--text-primary)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]'
+                : 'text-[var(--text-muted)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-secondary)]'
             }`}
             draggable
             onDragStart={(e) => {
@@ -45,24 +45,24 @@ export function TabBar({ projectId, onNewTab, onCloseTab }: Props) {
             onClick={() => setActiveTab(projectId, tab.id)}
           >
             {isActive && (
-              <span className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full bg-[var(--accent)]" />
+              <span className="absolute right-2 bottom-0 left-2 h-[2px] rounded-full bg-[var(--accent)]" />
             )}
             <StatusDot status={tab.status} />
             <span className="font-medium">{getTabTitle(tab)}</span>
             <span
-              className="ml-0.5 text-[var(--text-muted)] hover:text-[var(--color-error)] text-[9px] transition-colors"
+              className="ml-0.5 text-[9px] text-[var(--text-muted)] transition-colors hover:text-[var(--color-error)]"
               onClick={(e) => {
                 e.stopPropagation();
                 onCloseTab(tab.id);
               }}
             >
-              ✕
+              ?
             </span>
           </div>
         );
       })}
       <div
-        className="px-3 py-[7px] text-[var(--text-muted)] cursor-pointer hover:text-[var(--accent)] transition-colors"
+        className="cursor-pointer px-3 py-[7px] text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]"
         onClick={onNewTab}
       >
         +
