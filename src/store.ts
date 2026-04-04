@@ -1,12 +1,19 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { getDefaultThemeConfig } from './theme';
-import { createTerminalPane, createTerminalSessionMeta, getSessionIdForPty } from './utils/session';
+import {
+  createTerminalPane,
+  getSavedRunCommand,
+  normalizeRunProfile,
+} from './utils/session';
+import { closeTerminalSession, createTerminalSession } from './runtime/terminalApi';
+import { mapCreatedTerminalSession } from './runtime/terminalSessionMeta';
 import {
   buildRecentWorkspaceEntry,
   createWorkspaceConfig,
   ensureSinglePrimaryRoot,
   getPathBaseName,
+  getWorkspacePrimaryRoot,
   getWorkspaceLookupByRootPath,
   getWorkspacePrimaryRootPath,
   normalizeWorkspacePath,
@@ -17,17 +24,23 @@ import type {
   CommandBlock,
   CommitFileInfo,
   GitFileStatus,
+  LegacyProjectConfig,
   PaneRuntimeState,
   PaneStatus,
   PreviewMode,
+  RunProfile,
   SavedProjectLayout,
+  ShellConfig,
   SavedSplitNode,
   SavedTab,
   SessionPhase,
   SettingsPage,
   SplitNode,
   TerminalSessionMeta,
+  TerminalSessionState,
   TerminalTab,
+  TerminalUiState,
+  TerminalViewState,
   UiDialog,
   WorkspaceConfig,
   WorkspaceExplorerRuntime,
@@ -36,7 +49,8 @@ import type {
 } from './types';
 import { createEmptyCompletionUsage, recordCompletionUsage } from './utils/terminalCompletion/usage';
 import { isMarkdownFilePath } from './utils/markdownPreview';
-import { disposeTerminal } from './utils/terminalCache';
+import { areSplitNodesEquivalent } from './utils/splitLayout';
+import { disposeTerminalBySession } from './utils/terminalCache';
 
 let idCounter = 0;
 export const genId = () => `id-${Date.now()}-${++idCounter}`;
@@ -49,9 +63,46 @@ const STATUS_PRIORITY: Record<PaneStatus, number> = {
 };
 
 export interface PtyPaneIndexEntry {
-  workspaceId: string;
+  projectId: string;
   tabId: string;
   paneId: string;
+}
+
+function legacyProjectToWorkspace(project: LegacyProjectConfig): WorkspaceConfig {
+  const workspace = createWorkspaceConfig({
+    id: project.id,
+    name: project.name,
+    paths: [project.path],
+    savedLayout: project.savedLayout,
+  });
+
+  const primaryRoot = workspace.roots[0];
+  return {
+    ...workspace,
+    expandedDirsByRoot: primaryRoot
+      ? {
+          [primaryRoot.id]: project.expandedDirs ?? [],
+        }
+      : {},
+  };
+}
+
+function workspaceToLegacyProject(workspace: WorkspaceConfig): LegacyProjectConfig {
+  const primaryRoot = getWorkspacePrimaryRoot(workspace) ?? workspace.roots[0];
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    path: primaryRoot?.path ?? '',
+    savedLayout: workspace.savedLayout,
+    expandedDirs: primaryRoot ? workspace.expandedDirsByRoot?.[primaryRoot.id] ?? [] : [],
+  };
+}
+
+function getConfigWorkspaces(config: AppConfig): WorkspaceConfig[] {
+  if (config.workspaces.length > 0) {
+    return config.workspaces;
+  }
+  return (config.projects ?? []).map(legacyProjectToWorkspace);
 }
 
 function buildConfigIndexes(workspaces: WorkspaceConfig[]) {
@@ -62,9 +113,10 @@ function buildConfigIndexes(workspaces: WorkspaceConfig[]) {
 }
 
 function withConfigIndexes(config: AppConfig) {
+  const normalizedConfig = normalizeWorkspaceStoreConfig(config);
   return {
-    config,
-    ...buildConfigIndexes(config.workspaces),
+    config: normalizedConfig,
+    ...buildConfigIndexes(normalizedConfig.workspaces),
   };
 }
 
@@ -93,20 +145,73 @@ function getHighestStatusFromEntries(entries: Iterable<PaneRuntimeState>): PaneS
   return highestStatus;
 }
 
-function updatePaneRunCommand(node: SplitNode, paneId: string, runCommand?: string): SplitNode {
+function updatePaneRunProfile(node: SplitNode, paneId: string, runProfile?: RunProfile): SplitNode {
   if (node.type === 'leaf') {
     if (node.pane.id !== paneId) {
       return node;
     }
-    if (node.pane.runCommand === runCommand) {
+    const nextRunProfile = normalizeRunProfile(runProfile, node.pane.runCommand);
+    const nextRunCommand = nextRunProfile?.savedCommand;
+    if (
+      node.pane.runCommand === nextRunCommand
+      && JSON.stringify(node.pane.runProfile ?? null) === JSON.stringify(nextRunProfile ?? null)
+    ) {
       return node;
     }
-    return { ...node, pane: { ...node.pane, runCommand } };
+    return {
+      ...node,
+      pane: {
+        ...node.pane,
+        runCommand: nextRunCommand,
+        runProfile: nextRunProfile,
+      },
+    };
   }
 
   let changed = false;
   const children = node.children.map((child) => {
-    const nextChild = updatePaneRunCommand(child, paneId, runCommand);
+    const nextChild = updatePaneRunProfile(child, paneId, runProfile);
+    if (nextChild !== child) {
+      changed = true;
+    }
+    return nextChild;
+  });
+
+  return changed ? { ...node, children } : node;
+}
+
+function updatePaneSessionBinding(
+  node: SplitNode,
+  paneId: string,
+  binding: Pick<TerminalSessionMeta, 'sessionId' | 'ptyId'> & Partial<Pick<TerminalSessionMeta, 'phase'>>,
+): SplitNode {
+  if (node.type === 'leaf') {
+    if (node.pane.id !== paneId) {
+      return node;
+    }
+
+    if (
+      node.pane.sessionId === binding.sessionId
+      && node.pane.ptyId === binding.ptyId
+      && (!binding.phase || node.pane.phase === binding.phase)
+    ) {
+      return node;
+    }
+
+    return {
+      ...node,
+      pane: {
+        ...node.pane,
+        sessionId: binding.sessionId,
+        ptyId: binding.ptyId,
+        phase: binding.phase ?? node.pane.phase,
+      },
+    };
+  }
+
+  let changed = false;
+  const children = node.children.map((child) => {
+    const nextChild = updatePaneSessionBinding(child, paneId, binding);
     if (nextChild !== child) {
       changed = true;
     }
@@ -127,7 +232,7 @@ function indexSplitNode(
 ) {
   if (node.type === 'leaf') {
     ptyToPaneIndex.set(node.pane.ptyId, {
-      workspaceId,
+      projectId: workspaceId,
       tabId,
       paneId: node.pane.id,
     });
@@ -209,17 +314,85 @@ export function buildWorkspaceStatePatch(
 ) {
   return {
     workspaceStates,
+    projectStates: workspaceStates,
     ...rebuildWorkspaceIndexes(workspaceStates, existingPaneRuntime, activePaneByTab),
   };
 }
 
 export const buildProjectStatePatch = buildWorkspaceStatePatch;
 
+function buildExplorerRuntimePatch(workspaceExplorerRuntime: Map<string, WorkspaceExplorerRuntime>) {
+  return {
+    workspaceExplorerRuntime,
+    projectExplorerRuntime: workspaceExplorerRuntime,
+  };
+}
+
 export function collectPtyIds(node: SplitNode): number[] {
   if (node.type === 'leaf') {
     return [node.pane.ptyId];
   }
   return node.children.flatMap(collectPtyIds);
+}
+
+export function collectPaneBindings(node: SplitNode): Array<{ ptyId: number; sessionId: string }> {
+  if (node.type === 'leaf') {
+    return [{ ptyId: node.pane.ptyId, sessionId: node.pane.sessionId }];
+  }
+  return node.children.flatMap(collectPaneBindings);
+}
+
+function collectReferencedPtyIds(workspaceStates: Map<string, WorkspaceState>) {
+  const referenced = new Set<number>();
+
+  for (const workspaceState of workspaceStates.values()) {
+    for (const tab of workspaceState.tabs) {
+      if (!isTerminalTab(tab)) {
+        continue;
+      }
+
+      for (const ptyId of collectPtyIds(tab.splitLayout)) {
+        referenced.add(ptyId);
+      }
+    }
+  }
+
+  return referenced;
+}
+
+async function openTerminalPane(
+  shell: ShellConfig,
+  cwd: string,
+  options?: {
+    mode?: TerminalSessionMeta['mode'];
+    runCommand?: string;
+    runProfile?: RunProfile;
+  },
+): Promise<SplitNode | null> {
+  try {
+    const payload = await createTerminalSession({
+      shell: shell.command,
+      args: shell.args ?? [],
+      cwd,
+      mode: options?.mode,
+    });
+    useAppStore.getState().upsertSession(mapCreatedTerminalSession(payload));
+
+    return {
+      type: 'leaf',
+      pane: createTerminalPane(
+        shell.name,
+        payload.ptyId,
+        genId(),
+        options?.mode ?? 'human',
+        options?.runCommand,
+        options?.runProfile,
+        payload.sessionId,
+      ),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function serializeSplitNode(node: SplitNode): SavedSplitNode {
@@ -229,6 +402,7 @@ function serializeSplitNode(node: SplitNode): SavedSplitNode {
       pane: {
         shellName: node.pane.shellName,
         runCommand: node.pane.runCommand,
+        runProfile: node.pane.runProfile,
       },
     };
   }
@@ -264,29 +438,10 @@ async function restoreSplitNode(saved: SavedSplitNode, cwd: string, config: AppC
       return null;
     }
 
-    try {
-      const ptyId = await invoke<number>('create_pty', {
-        shell: shell.command,
-        args: shell.args ?? [],
-        cwd,
-      });
-      useAppStore.getState().upsertSession(createTerminalSessionMeta(shell.name, ptyId, cwd));
-      return {
-        type: 'leaf',
-        pane: {
-          id: genId(),
-          sessionId: getSessionIdForPty(ptyId),
-          shellName: shell.name,
-          runCommand: saved.pane.runCommand,
-          status: 'idle',
-          mode: 'human',
-          phase: 'starting',
-          ptyId,
-        },
-      };
-    } catch {
-      return null;
-    }
+    return openTerminalPane(shell, cwd, {
+      runCommand: getSavedRunCommand(saved.pane.runProfile, saved.pane.runCommand),
+      runProfile: normalizeRunProfile(saved.pane.runProfile, saved.pane.runCommand),
+    });
   }
 
   const children: SplitNode[] = [];
@@ -390,8 +545,9 @@ function doSaveExpandedDirs(workspaceId: string) {
     ),
   };
 
-  useAppStore.getState().setConfig(nextConfig);
-  void invoke('save_config', { config: nextConfig });
+  const normalizedConfig = normalizeWorkspaceStoreConfig(nextConfig);
+  useAppStore.getState().setConfig(normalizedConfig);
+  void invoke('save_config', { config: normalizedConfig });
 }
 
 function saveExpandedDirsToConfig(workspaceId: string) {
@@ -453,8 +609,9 @@ function doSaveLayout(workspaceId: string) {
     ),
   };
 
-  useAppStore.getState().setConfig(nextConfig);
-  void invoke('save_config', { config: nextConfig });
+  const normalizedConfig = normalizeWorkspaceStoreConfig(nextConfig);
+  useAppStore.getState().setConfig(normalizedConfig);
+  void invoke('save_config', { config: normalizedConfig });
 }
 
 export function saveLayoutToConfig(workspaceId: string) {
@@ -515,6 +672,47 @@ function moveArrayItem<T>(items: T[], fromIndex: number, toIndex: number) {
   return next;
 }
 
+function insertItemAfter<T>(items: T[], targetIndex: number, item: T) {
+  return [...items.slice(0, targetIndex + 1), item, ...items.slice(targetIndex + 1)];
+}
+
+function buildWorkspacePathSignature(paths: string[]) {
+  return [...new Set(paths.map(normalizeWorkspacePath).filter(Boolean))].sort().join('::');
+}
+
+function cloneWorkspaceConfig(
+  workspace: WorkspaceConfig,
+  nextWorkspaceId: string,
+  name: string,
+  savedLayout: SavedProjectLayout | undefined,
+): WorkspaceConfig {
+  const rootIdMap = new Map<string, string>();
+  const roots = workspace.roots.map((root, index) => {
+    const nextRootId = `${nextWorkspaceId}-root-${index + 1}`;
+    rootIdMap.set(root.id, nextRootId);
+    return {
+      ...root,
+      id: nextRootId,
+    };
+  });
+
+  return {
+    ...workspace,
+    id: nextWorkspaceId,
+    name,
+    roots,
+    savedLayout,
+    expandedDirsByRoot: Object.fromEntries(
+      Object.entries(workspace.expandedDirsByRoot ?? {}).flatMap(([rootId, dirs]) => {
+        const nextRootId = rootIdMap.get(rootId);
+        return nextRootId ? [[nextRootId, [...dirs]]] : [];
+      }),
+    ),
+    createdAt: Date.now(),
+    lastOpenedAt: Date.now(),
+  };
+}
+
 function removeWorkspaceRootState(workspaceId: string, rootId: string) {
   expandedDirsMap.delete(getExpandedKey(workspaceId, rootId));
 }
@@ -527,19 +725,129 @@ function upsertRecentEntry(recent: AppConfig['recentWorkspaces'], entry: AppConf
 
 function normalizeWorkspaceStoreConfig(config: AppConfig): AppConfig {
   const now = Date.now();
+  const workspaces = getConfigWorkspaces(config).map((workspace) => ({
+    ...workspace,
+    roots: ensureSinglePrimaryRoot(workspace.roots),
+    expandedDirsByRoot: workspace.expandedDirsByRoot ?? {},
+    pinned: workspace.pinned ?? false,
+    createdAt: workspace.createdAt ?? now,
+    lastOpenedAt: workspace.lastOpenedAt ?? now,
+  }));
+
   return {
     ...config,
-    workspaces: (config.workspaces ?? []).map((workspace) => ({
-      ...workspace,
-      roots: ensureSinglePrimaryRoot(workspace.roots),
-      expandedDirsByRoot: workspace.expandedDirsByRoot ?? {},
-      pinned: workspace.pinned ?? false,
-      createdAt: workspace.createdAt ?? now,
-      lastOpenedAt: workspace.lastOpenedAt ?? now,
-    })),
+    workspaces,
+    projects: workspaces.map(workspaceToLegacyProject),
     recentWorkspaces: config.recentWorkspaces ?? [],
-    lastWorkspaceId: config.lastWorkspaceId ?? config.workspaces?.[0]?.id,
+    lastWorkspaceId: config.lastWorkspaceId ?? workspaces[0]?.id,
     completionUsage: config.completionUsage ?? createEmptyCompletionUsage(),
+  };
+}
+
+function createDefaultTerminalUi(): TerminalUiState {
+  return {
+    runProfileInspectorPaneId: null,
+  };
+}
+
+type SessionMapState = Pick<AppStore, 'sessions' | 'terminalSessions' | 'sessionIdByPty' | 'ptyBySessionId'>;
+
+function buildSessionIndexes(
+  sessions: Map<number, TerminalSessionMeta>,
+  terminalSessions?: Map<string, TerminalSessionState>,
+): SessionMapState {
+  const nextTerminalSessions = terminalSessions ? new Map(terminalSessions) : new Map<string, TerminalSessionState>();
+  const sessionIdByPty = new Map<number, string>();
+  const ptyBySessionId = new Map<string, number>();
+
+  for (const [ptyId, session] of sessions) {
+    const nextSession = { ...session } as TerminalSessionState;
+    nextTerminalSessions.set(nextSession.sessionId, nextSession);
+    sessionIdByPty.set(ptyId, nextSession.sessionId);
+    ptyBySessionId.set(nextSession.sessionId, ptyId);
+  }
+
+  return {
+    sessions,
+    terminalSessions: nextTerminalSessions,
+    sessionIdByPty,
+    ptyBySessionId,
+  };
+}
+
+function buildSessionStatePatch(
+  state: SessionMapState,
+  session: TerminalSessionMeta,
+): SessionMapState & { nextSession: TerminalSessionState; previousPtyId?: number } {
+  const sessions = new Map(state.sessions);
+  const terminalSessions = new Map(state.terminalSessions);
+  const sessionIdByPty = new Map(state.sessionIdByPty);
+  const ptyBySessionId = new Map(state.ptyBySessionId);
+
+  const existingBySessionId = terminalSessions.get(session.sessionId);
+  const existingByPty = sessions.get(session.ptyId);
+  const existing = existingBySessionId ?? existingByPty;
+  const previousPtyId = existingBySessionId?.ptyId;
+
+  if (previousPtyId != null && previousPtyId !== session.ptyId) {
+    sessions.delete(previousPtyId);
+    sessionIdByPty.delete(previousPtyId);
+  }
+
+  const nextSession: TerminalSessionState = existing
+    ? {
+        ...existing,
+        ...session,
+        runProfile: normalizeRunProfile(session.runProfile, getSavedRunCommand(existing.runProfile)),
+        commands: session.commands.length > 0 ? session.commands : existing.commands,
+      }
+    : {
+        ...session,
+        runProfile: normalizeRunProfile(session.runProfile, session.runProfile?.savedCommand),
+      };
+
+  sessions.set(session.ptyId, nextSession);
+  terminalSessions.set(session.sessionId, nextSession);
+  sessionIdByPty.set(session.ptyId, session.sessionId);
+  ptyBySessionId.set(session.sessionId, session.ptyId);
+
+  return {
+    sessions,
+    terminalSessions,
+    sessionIdByPty,
+    ptyBySessionId,
+    nextSession,
+    previousPtyId,
+  };
+}
+
+function removeSessionStatePatch(
+  state: SessionMapState,
+  identifier: { ptyId?: number; sessionId?: string },
+): SessionMapState {
+  const sessions = new Map(state.sessions);
+  const terminalSessions = new Map(state.terminalSessions);
+  const sessionIdByPty = new Map(state.sessionIdByPty);
+  const ptyBySessionId = new Map(state.ptyBySessionId);
+
+  const sessionId = identifier.sessionId ?? (identifier.ptyId != null ? sessionIdByPty.get(identifier.ptyId) : undefined);
+  const ptyId = identifier.ptyId ?? (sessionId ? ptyBySessionId.get(sessionId) : undefined);
+
+  if (ptyId != null) {
+    sessions.delete(ptyId);
+    sessionIdByPty.delete(ptyId);
+  }
+
+  if (sessionId) {
+    terminalSessions.delete(sessionId);
+    ptyBySessionId.delete(sessionId);
+  }
+
+  return {
+    sessions,
+    terminalSessions,
+    sessionIdByPty,
+    ptyBySessionId,
   };
 }
 
@@ -550,6 +858,10 @@ interface AppStore {
   setConfig: (config: AppConfig) => void;
 
   sessions: Map<number, TerminalSessionMeta>;
+  terminalSessions: Map<string, TerminalSessionState>;
+  sessionIdByPty: Map<number, string>;
+  ptyBySessionId: Map<string, number>;
+  terminalViews: Map<string, TerminalViewState>;
   activePaneByTab: Map<string, string>;
   ptyToPaneIndex: Map<number, PtyPaneIndexEntry>;
   paneIdToPty: Map<string, number>;
@@ -557,6 +869,7 @@ interface AppStore {
   tabKindIndex: Map<string, WorkspaceTab['kind']>;
   tabRuntimeAggregate: Map<string, PaneStatus>;
   workspaceExplorerRuntime: Map<string, WorkspaceExplorerRuntime>;
+  projectExplorerRuntime: Map<string, WorkspaceExplorerRuntime>;
 
   upsertSession: (session: TerminalSessionMeta) => void;
   updateSessionCwd: (ptyId: number, cwd: string, updatedAt?: number) => void;
@@ -564,16 +877,31 @@ interface AppStore {
   recordSessionCommand: (ptyId: number, command: string, updatedAt?: number, usageScope?: string) => void;
   finishSessionCommand: (ptyId: number, exitCode: number | undefined, phase: SessionPhase, updatedAt?: number) => void;
   removeSession: (ptyId: number) => void;
+  removeSessionBySessionId: (sessionId: string) => void;
 
   setPaneRunCommand: (tabId: string, paneId: string, runCommand?: string) => void;
+  setPaneRunProfile: (tabId: string, paneId: string, runProfile?: RunProfile) => void;
+  updatePaneSessionBinding: (
+    tabId: string,
+    paneId: string,
+    binding: Pick<TerminalSessionMeta, 'sessionId' | 'ptyId'> & Partial<Pick<TerminalSessionMeta, 'phase'>>,
+  ) => void;
   setActivePaneForTab: (tabId: string, paneId: string) => void;
   clearActivePaneForTab: (tabId: string) => void;
+  upsertTerminalView: (view: TerminalViewState) => void;
+  updateTerminalView: (viewId: string, patch: Partial<TerminalViewState>) => void;
+  removeTerminalView: (viewId: string) => void;
 
   activeWorkspaceId: string | null;
   workspaceStates: Map<string, WorkspaceState>;
+  projectStates: Map<string, WorkspaceState>;
   setActiveWorkspace: (id: string) => void;
   createWorkspaceFromFolder: (path: string, options?: { name?: string; pinned?: boolean }) => string | null;
   createWorkspaceFromFolders: (paths: string[], options?: { name?: string; pinned?: boolean }) => string | null;
+  duplicateWorkspace: (
+    workspaceId: string,
+    options?: { name?: string; restoreTabs?: boolean },
+  ) => Promise<string | null>;
   renameWorkspace: (workspaceId: string, name: string) => void;
   pinWorkspace: (workspaceId: string, pinned?: boolean) => void;
   moveWorkspace: (workspaceId: string, direction: 'up' | 'down') => void;
@@ -581,6 +909,8 @@ interface AppStore {
   reopenRecentWorkspace: (workspaceId: string) => string | null;
   forgetRecentWorkspace: (workspaceId: string) => void;
   addRootToWorkspace: (workspaceId: string, rootPath: string) => void;
+  renameWorkspaceRoot: (workspaceId: string, rootId: string, name: string) => void;
+  moveWorkspaceRoot: (workspaceId: string, rootId: string, direction: 'up' | 'down') => void;
   removeRootFromWorkspace: (workspaceId: string, rootId: string) => void;
   setPrimaryWorkspaceRoot: (workspaceId: string, rootId: string) => void;
   createTerminalTab: (workspaceId: string, options?: { cwd?: string; shellName?: string }) => Promise<string | null>;
@@ -594,12 +924,17 @@ interface AppStore {
   updatePaneStatusByPty: (ptyId: number, status: PaneStatus) => void;
   updatePaneStatusesByPty: (updates: Array<{ ptyId: number; status: PaneStatus }>) => void;
   recordWorkspaceFsChanges: (rootPath: string, changes: { path: string; kind: string }[]) => void;
+  recordProjectFsChanges: (rootPath: string, changes: { path: string; kind: string }[]) => void;
   markWorkspaceGitDirty: (rootPath: string) => void;
+  markProjectGitDirty: (rootPath: string) => void;
 
   ui: {
     activeDialog: UiDialog | null;
   };
+  terminalUi: TerminalUiState;
   openSettings: (page?: SettingsPage) => void;
+  openRunProfileInspector: (paneId: string) => void;
+  closeRunProfileInspector: () => void;
   openFileViewer: (workspaceId: string, filePath: string, options?: { initialMode?: PreviewMode }) => void;
   setFileViewerTabMode: (workspaceId: string, tabId: string, mode: PreviewMode) => void;
   openInteractionDialog: (payload: {
@@ -617,7 +952,8 @@ interface AppStore {
   }) => void;
   openWorktreeDiff: (workspaceId: string, projectPath: string, status: GitFileStatus) => void;
   openCommitDiff: (payload: {
-    workspaceId: string;
+    workspaceId?: string;
+    projectId?: string;
     repoPath: string;
     commitHash: string;
     commitMessage: string;
@@ -626,51 +962,109 @@ interface AppStore {
   closeDialog: () => void;
 }
 
+function getWorkspaceStateMap(state: {
+  workspaceStates: Map<string, WorkspaceState>;
+  projectStates: Map<string, WorkspaceState>;
+}, workspaceId?: string) {
+  if (workspaceId) {
+    if (state.workspaceStates.has(workspaceId)) {
+      return state.workspaceStates;
+    }
+    if (state.projectStates.has(workspaceId)) {
+      return state.projectStates;
+    }
+  }
+
+  return state.workspaceStates.size > 0 || state.projectStates.size === 0 ? state.workspaceStates : state.projectStates;
+}
+
+function getWorkspaceExplorerRuntimeMap(state: {
+  workspaceExplorerRuntime: Map<string, WorkspaceExplorerRuntime>;
+  projectExplorerRuntime: Map<string, WorkspaceExplorerRuntime>;
+}) {
+  return state.workspaceExplorerRuntime.size > 0 || state.projectExplorerRuntime.size === 0
+    ? state.workspaceExplorerRuntime
+    : state.projectExplorerRuntime;
+}
+
+function getWorkspaceConfigById(
+  state: Pick<AppStore, 'config' | 'workspaceById'>,
+  workspaceId: string | null | undefined,
+): WorkspaceConfig | undefined {
+  if (!workspaceId) {
+    return undefined;
+  }
+
+  const workspace = state.workspaceById.get(workspaceId);
+  if (workspace) {
+    return workspace;
+  }
+
+  const legacyProject = state.config.projects?.find((project) => project.id === workspaceId);
+  return legacyProject ? legacyProjectToWorkspace(legacyProject) : undefined;
+}
+
 export const selectWorkspaceState =
   (workspaceId: string) =>
   (state: AppStore): WorkspaceState | undefined =>
-    state.workspaceStates.get(workspaceId);
+    getWorkspaceStateMap(state, workspaceId).get(workspaceId);
 
 export const selectWorkspaceConfig =
   (workspaceId: string | null | undefined) =>
   (state: AppStore): WorkspaceConfig | undefined =>
-    workspaceId ? state.workspaceById.get(workspaceId) : undefined;
+    getWorkspaceConfigById(state, workspaceId);
 
 export const selectWorkspacePrimaryRootPath =
   (workspaceId: string | null | undefined) =>
   (state: AppStore): string | undefined =>
-    getWorkspacePrimaryRootPath(workspaceId ? state.workspaceById.get(workspaceId) : undefined);
+    getWorkspacePrimaryRootPath(getWorkspaceConfigById(state, workspaceId));
 
 export const selectWorkspaceRootPaths =
   (workspaceId: string | null | undefined) =>
   (state: AppStore): string[] =>
-    workspaceId ? (state.workspaceById.get(workspaceId)?.roots.map((root) => root.path) ?? []) : [];
+    workspaceId ? (getWorkspaceConfigById(state, workspaceId)?.roots.map((root) => root.path) ?? []) : [];
 
 export const selectSessionByPty =
   (ptyId: number | undefined, enabled = true) =>
   (state: AppStore): TerminalSessionMeta | undefined =>
     enabled && ptyId != null ? state.sessions.get(ptyId) : undefined;
 
+export const selectSessionById =
+  (sessionId: string | undefined, enabled = true) =>
+  (state: AppStore): TerminalSessionState | undefined =>
+    enabled && sessionId ? state.terminalSessions.get(sessionId) : undefined;
+
 export const selectPaneRuntimeByPty =
   (ptyId: number | undefined, enabled = true) =>
   (state: AppStore): PaneRuntimeState | undefined =>
     enabled && ptyId != null ? state.paneRuntimeByPty.get(ptyId) : undefined;
 
+export const selectPaneRuntimeBySessionId =
+  (sessionId: string | undefined, enabled = true) =>
+  (state: AppStore): PaneRuntimeState | undefined => {
+    if (!enabled || !sessionId) {
+      return undefined;
+    }
+
+    const ptyId = state.ptyBySessionId.get(sessionId);
+    return ptyId != null ? state.paneRuntimeByPty.get(ptyId) : undefined;
+  };
+
 export const selectWorkspaceSections = (state: AppStore) => ({
-  pinned: state.config.workspaces.filter((workspace) => workspace.pinned),
-  open: state.config.workspaces.filter((workspace) => !workspace.pinned),
+  pinned: getConfigWorkspaces(state.config).filter((workspace) => workspace.pinned),
+  open: getConfigWorkspaces(state.config).filter((workspace) => !workspace.pinned),
   recent: [...state.config.recentWorkspaces].sort((left, right) => right.lastOpenedAt - left.lastOpenedAt),
 });
 
-export const selectWorkspaces = (state: AppStore) => state.config.workspaces;
+export const selectWorkspaces = (state: AppStore) => getConfigWorkspaces(state.config);
 export const selectRecentWorkspaces = (state: AppStore) => state.config.recentWorkspaces;
 export const selectActiveWorkspace = (state: AppStore) =>
-  state.activeWorkspaceId ? state.workspaceById.get(state.activeWorkspaceId) : undefined;
+  getWorkspaceConfigById(state, state.activeWorkspaceId);
 
 export const selectWorkspaceRuntimeSummary =
   (workspaceId: string) =>
   (state: AppStore) => {
-    const workspaceState = state.workspaceStates.get(workspaceId);
+    const workspaceState = getWorkspaceStateMap(state, workspaceId).get(workspaceId);
     const terminalTabs = workspaceState?.tabs.filter(isTerminalTab) ?? [];
     const status = terminalTabs.length > 0
       ? getHighestStatusFromEntries(
@@ -702,10 +1096,11 @@ export const selectThemePreset = (state: AppStore) => state.config.theme.preset;
 export const selectWorkspaceGitDirtyToken =
   (rootPath: string | undefined) =>
   (state: AppStore): number =>
-    (rootPath ? state.workspaceExplorerRuntime.get(normalizeWorkspacePath(rootPath))?.gitDirtyToken : undefined) ?? 0;
+    (rootPath ? getWorkspaceExplorerRuntimeMap(state).get(normalizeWorkspacePath(rootPath))?.gitDirtyToken : undefined) ?? 0;
 
 const defaultConfig: AppConfig = normalizeWorkspaceStoreConfig({
   workspaces: [],
+  projects: [],
   recentWorkspaces: [],
   defaultShell: '',
   availableShells: [],
@@ -717,9 +1112,13 @@ const defaultConfig: AppConfig = normalizeWorkspaceStoreConfig({
 
 export const useAppStore = create<AppStore>((set, get) => ({
   ...withConfigIndexes(defaultConfig),
-  setConfig: (config) => set(withConfigIndexes(normalizeWorkspaceStoreConfig(config))),
+  setConfig: (config) => set(withConfigIndexes(config)),
 
   sessions: new Map(),
+  terminalSessions: new Map(),
+  sessionIdByPty: new Map(),
+  ptyBySessionId: new Map(),
+  terminalViews: new Map(),
   activePaneByTab: new Map(),
   ptyToPaneIndex: new Map(),
   paneIdToPty: new Map(),
@@ -727,30 +1126,26 @@ export const useAppStore = create<AppStore>((set, get) => ({
   tabKindIndex: new Map(),
   tabRuntimeAggregate: new Map(),
   workspaceExplorerRuntime: new Map(),
+  projectExplorerRuntime: new Map(),
   activeWorkspaceId: null,
   workspaceStates: new Map(),
+  projectStates: new Map(),
   ui: {
     activeDialog: null,
   },
+  terminalUi: createDefaultTerminalUi(),
 
   upsertSession: (session) =>
     set((state) => {
-      const sessions = new Map(state.sessions);
-      const existing = sessions.get(session.ptyId);
-      sessions.set(
-        session.ptyId,
-        existing
-          ? {
-              ...existing,
-              ...session,
-              commands: session.commands.length > 0 ? session.commands : existing.commands,
-            }
-          : session,
-      );
+      const {
+        nextSession: _nextSession,
+        previousPtyId,
+        ...sessionPatch
+      } = buildSessionStatePatch(state, session);
 
       const paneRuntime = state.paneRuntimeByPty.get(session.ptyId);
       if (!paneRuntime) {
-        return { sessions };
+        return sessionPatch;
       }
 
       const paneRuntimeByPty = new Map(state.paneRuntimeByPty);
@@ -758,7 +1153,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
         ...paneRuntime,
         phase: session.phase,
       });
-      return { sessions, paneRuntimeByPty };
+      if (
+        previousPtyId != null
+        && previousPtyId !== session.ptyId
+        && paneRuntimeByPty.has(previousPtyId)
+      ) {
+        const previousRuntime = paneRuntimeByPty.get(previousPtyId);
+        if (previousRuntime) {
+          paneRuntimeByPty.delete(previousPtyId);
+          paneRuntimeByPty.set(session.ptyId, {
+            ...previousRuntime,
+            ptyId: session.ptyId,
+            phase: session.phase,
+          });
+        }
+      }
+
+      return { ...sessionPatch, paneRuntimeByPty };
     }),
 
   updateSessionCwd: (ptyId, cwd, updatedAt) =>
@@ -768,13 +1179,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
         return state;
       }
 
-      const sessions = new Map(state.sessions);
-      sessions.set(ptyId, {
+      const nextSession = {
         ...existing,
         cwd,
         updatedAt: updatedAt ?? Date.now(),
-      });
-      return { sessions };
+      };
+      const { nextSession: _nextSession, previousPtyId: _previousPtyId, ...sessionPatch } = buildSessionStatePatch(
+        state,
+        nextSession,
+      );
+      return sessionPatch;
     }),
 
   updateSessionPhase: (ptyId, phase, patch) =>
@@ -785,17 +1199,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }
 
       const updatedAt = patch?.updatedAt ?? Date.now();
-      const sessions = new Map(state.sessions);
-      sessions.set(ptyId, {
+      const { nextSession: _nextSession, previousPtyId: _previousPtyId, ...sessionPatch } = buildSessionStatePatch(
+        state,
+        {
         ...existing,
         ...patch,
         phase,
         updatedAt,
-      });
+        },
+      );
 
       const paneRuntime = state.paneRuntimeByPty.get(ptyId);
       if (!paneRuntime) {
-        return { sessions };
+        return sessionPatch;
       }
 
       const paneRuntimeByPty = new Map(state.paneRuntimeByPty);
@@ -803,7 +1219,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         ...paneRuntime,
         phase,
       });
-      return { sessions, paneRuntimeByPty };
+      return { ...sessionPatch, paneRuntimeByPty };
     }),
 
   recordSessionCommand: (ptyId, command, updatedAt, usageScope) => {
@@ -837,19 +1253,30 @@ export const useAppStore = create<AppStore>((set, get) => ({
         usageScope ?? existing.cwd,
       );
 
-      const sessions = new Map(state.sessions);
-      sessions.set(ptyId, {
+      const { nextSession: _nextSession, previousPtyId: _previousPtyId, ...sessionPatch } = buildSessionStatePatch(
+        state,
+        {
         ...existing,
         commands: [...settledCommands, nextCommand].slice(-12),
         lastCommand: command,
+        runProfile: normalizeRunProfile(
+          {
+            ...existing.runProfile,
+            lastRunAt: now,
+            usageScope: usageScope ?? existing.runProfile?.usageScope,
+          },
+          existing.runProfile?.savedCommand,
+        ),
+        usageScope: usageScope ?? existing.usageScope,
         phase: 'running',
         updatedAt: now,
         activeCommand: nextCommand,
-      });
+        },
+      );
 
       shouldPersistUsage = true;
       return {
-        sessions,
+        ...sessionPatch,
         config: {
           ...state.config,
           completionUsage: nextCompletionUsage,
@@ -881,8 +1308,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
           }
         : existing.activeCommand;
 
-      const sessions = new Map(state.sessions);
-      sessions.set(ptyId, {
+      const { nextSession: _nextSession, previousPtyId: _previousPtyId, ...sessionPatch } = buildSessionStatePatch(
+        state,
+        {
         ...existing,
         commands: existing.activeCommand
           ? existing.commands.map((command) =>
@@ -891,13 +1319,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
           : existing.commands,
         phase,
         lastExitCode: exitCode,
+        runProfile: normalizeRunProfile(
+          {
+            ...existing.runProfile,
+            lastExitCode: exitCode,
+          },
+          existing.runProfile?.savedCommand,
+        ),
         updatedAt: now,
         activeCommand: nextActiveCommand,
-      });
+        },
+      );
 
       const paneRuntime = state.paneRuntimeByPty.get(ptyId);
       if (!paneRuntime) {
-        return { sessions };
+        return sessionPatch;
       }
 
       const paneRuntimeByPty = new Map(state.paneRuntimeByPty);
@@ -905,7 +1341,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         ...paneRuntime,
         phase,
       });
-      return { sessions, paneRuntimeByPty };
+      return { ...sessionPatch, paneRuntimeByPty };
     }),
 
   removeSession: (ptyId) =>
@@ -914,21 +1350,41 @@ export const useAppStore = create<AppStore>((set, get) => ({
         return state;
       }
 
-      const sessions = new Map(state.sessions);
-      sessions.delete(ptyId);
+      const sessionPatch = removeSessionStatePatch(state, { ptyId });
       if (!state.paneRuntimeByPty.has(ptyId)) {
-        return { sessions };
+        return sessionPatch;
       }
 
       const paneRuntimeByPty = new Map(state.paneRuntimeByPty);
       paneRuntimeByPty.delete(ptyId);
-      return { sessions, paneRuntimeByPty };
+      return { ...sessionPatch, paneRuntimeByPty };
+    }),
+
+  removeSessionBySessionId: (sessionId) =>
+    set((state) => {
+      if (!state.ptyBySessionId.has(sessionId) && !state.terminalSessions.has(sessionId)) {
+        return state;
+      }
+
+      const ptyId = state.ptyBySessionId.get(sessionId);
+      const sessionPatch = removeSessionStatePatch(state, { sessionId });
+      if (ptyId == null || !state.paneRuntimeByPty.has(ptyId)) {
+        return sessionPatch;
+      }
+
+      const paneRuntimeByPty = new Map(state.paneRuntimeByPty);
+      paneRuntimeByPty.delete(ptyId);
+      return { ...sessionPatch, paneRuntimeByPty };
     }),
 
   setPaneRunCommand: (tabId, paneId, runCommand) =>
+    get().setPaneRunProfile(tabId, paneId, normalizeRunProfile(undefined, runCommand)),
+
+  setPaneRunProfile: (tabId, paneId, runProfile) =>
     set((state) => {
       let changed = false;
       const workspaceStates = new Map(state.workspaceStates);
+      const nextRunProfile = normalizeRunProfile(runProfile);
 
       for (const [workspaceId, workspaceState] of workspaceStates) {
         const tabIndex = workspaceState.tabs.findIndex((tab) => tab.id === tabId);
@@ -939,7 +1395,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           if (tab.id !== tabId || !isTerminalTab(tab)) {
             return tab;
           }
-          const nextLayout = updatePaneRunCommand(tab.splitLayout, paneId, runCommand);
+          const nextLayout = updatePaneRunProfile(tab.splitLayout, paneId, nextRunProfile);
           if (nextLayout === tab.splitLayout) {
             return tab;
           }
@@ -953,7 +1409,43 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (!changed) {
         return state;
       }
-      return { workspaceStates };
+      return { workspaceStates, projectStates: workspaceStates };
+    }),
+
+  updatePaneSessionBinding: (tabId, paneId, binding) =>
+    set((state) => {
+      let changed = false;
+      const workspaceStates = new Map(state.workspaceStates);
+
+      for (const [workspaceId, workspaceState] of workspaceStates) {
+        const tabIndex = workspaceState.tabs.findIndex((tab) => tab.id === tabId);
+        if (tabIndex < 0) {
+          continue;
+        }
+
+        const tabs = workspaceState.tabs.map((tab) => {
+          if (tab.id !== tabId || !isTerminalTab(tab)) {
+            return tab;
+          }
+
+          const nextLayout = updatePaneSessionBinding(tab.splitLayout, paneId, binding);
+          if (nextLayout === tab.splitLayout) {
+            return tab;
+          }
+
+          changed = true;
+          return { ...tab, splitLayout: nextLayout };
+        });
+
+        workspaceStates.set(workspaceId, { ...workspaceState, tabs });
+        break;
+      }
+
+      if (!changed) {
+        return state;
+      }
+
+      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
     }),
 
   setActivePaneForTab: (tabId, paneId) =>
@@ -1002,10 +1494,70 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return { activePaneByTab, paneRuntimeByPty };
     }),
 
+  upsertTerminalView: (view) =>
+    set((state) => {
+      const existing = state.terminalViews.get(view.viewId);
+      if (
+        existing
+        && existing.sessionId === view.sessionId
+        && existing.tabId === view.tabId
+        && existing.workspaceId === view.workspaceId
+        && existing.isVisible === view.isVisible
+        && existing.isFocused === view.isFocused
+        && existing.cols === view.cols
+        && existing.rows === view.rows
+      ) {
+        return state;
+      }
+
+      const terminalViews = new Map(state.terminalViews);
+      terminalViews.set(view.viewId, existing ? { ...existing, ...view, updatedAt: Date.now() } : view);
+      return { terminalViews };
+    }),
+
+  updateTerminalView: (viewId, patch) =>
+    set((state) => {
+      const existing = state.terminalViews.get(viewId);
+      if (!existing) {
+        return state;
+      }
+
+      const nextView = {
+        ...existing,
+        ...patch,
+      };
+      if (
+        nextView.sessionId === existing.sessionId
+        && nextView.paneId === existing.paneId
+        && nextView.tabId === existing.tabId
+        && nextView.workspaceId === existing.workspaceId
+        && nextView.isVisible === existing.isVisible
+        && nextView.isFocused === existing.isFocused
+        && nextView.cols === existing.cols
+        && nextView.rows === existing.rows
+      ) {
+        return state;
+      }
+
+      const terminalViews = new Map(state.terminalViews);
+      terminalViews.set(viewId, { ...nextView, updatedAt: Date.now() });
+      return { terminalViews };
+    }),
+
+  removeTerminalView: (viewId) =>
+    set((state) => {
+      if (!state.terminalViews.has(viewId)) {
+        return state;
+      }
+
+      const terminalViews = new Map(state.terminalViews);
+      terminalViews.delete(viewId);
+      return { terminalViews };
+    }),
+
   setActiveWorkspace: (id) =>
-    set((state) => ({
-      activeWorkspaceId: id,
-      config: {
+    set((state) => {
+      const nextConfig: AppConfig = {
         ...state.config,
         lastWorkspaceId: id,
         workspaces: state.config.workspaces.map((workspace) =>
@@ -1016,8 +1568,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
               }
             : workspace,
         ),
-      },
-    })),
+      };
+
+      return {
+        activeWorkspaceId: id,
+        ...withConfigIndexes(nextConfig),
+      };
+    }),
 
   createWorkspaceFromFolder: (path, options) => {
     const normalizedPath = normalizeWorkspacePath(path);
@@ -1074,9 +1631,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
 
     const state = get();
-    const normalizedSignature = [...uniquePaths].sort().join('::');
+    const normalizedSignature = buildWorkspacePathSignature(uniquePaths);
     const existing = state.config.workspaces.find((workspace) => {
-      const signature = [...workspace.roots.map((root) => normalizeWorkspacePath(root.path))].sort().join('::');
+      const signature = buildWorkspacePathSignature(workspace.roots.map((root) => root.path));
       return signature === normalizedSignature;
     });
     if (existing) {
@@ -1089,6 +1646,62 @@ export const useAppStore = create<AppStore>((set, get) => ({
     );
     if (recent) {
       return state.reopenRecentWorkspace(recent.id);
+    }
+
+    const overlappingWorkspaceIds = Array.from(
+      new Set(
+        uniquePaths
+          .map((path) => state.workspaceIdByRootPath.get(path))
+          .filter((workspaceId): workspaceId is string => Boolean(workspaceId)),
+      ),
+    );
+    if (overlappingWorkspaceIds.length > 1) {
+      return null;
+    }
+
+    if (overlappingWorkspaceIds.length === 1) {
+      const existingWorkspace = state.workspaceById.get(overlappingWorkspaceIds[0]);
+      if (existingWorkspace) {
+        const existingRootPaths = new Set(existingWorkspace.roots.map((root) => normalizeWorkspacePath(root.path)));
+        const missingPaths = uniquePaths.filter((path) => !existingRootPaths.has(path));
+        if (missingPaths.length === 0) {
+          state.setActiveWorkspace(existingWorkspace.id);
+          return existingWorkspace.id;
+        }
+
+        set((current) => {
+          const now = Date.now();
+          const nextConfig: AppConfig = {
+            ...current.config,
+            workspaces: current.config.workspaces.map((workspace) =>
+              workspace.id === existingWorkspace.id
+                ? {
+                    ...workspace,
+                    name: options?.name?.trim() ? options.name.trim() : workspace.name,
+                    roots: ensureSinglePrimaryRoot([
+                      ...workspace.roots,
+                      ...missingPaths.map((path) => ({
+                        id: genId(),
+                        name: getPathBaseName(path),
+                        path,
+                        role: 'member' as const,
+                      })),
+                    ]),
+                    lastOpenedAt: now,
+                  }
+                : workspace,
+            ),
+            lastWorkspaceId: existingWorkspace.id,
+          };
+
+          return {
+            activeWorkspaceId: existingWorkspace.id,
+            ...withConfigIndexes(nextConfig),
+          };
+        });
+
+        return existingWorkspace.id;
+      }
     }
 
     const workspaceId = genId();
@@ -1117,6 +1730,54 @@ export const useAppStore = create<AppStore>((set, get) => ({
     });
 
     return workspaceId;
+  },
+
+  duplicateWorkspace: async (workspaceId, options) => {
+    const state = get();
+    const workspace = state.workspaceById.get(workspaceId);
+    if (!workspace) {
+      return null;
+    }
+
+    const sourceWorkspaceState = state.workspaceStates.get(workspaceId);
+    const savedLayout = sourceWorkspaceState ? serializeLayout(sourceWorkspaceState) : workspace.savedLayout;
+    const nextWorkspaceId = genId();
+    const nextWorkspaceName = options?.name?.trim() || workspace.name;
+    const nextWorkspace = cloneWorkspaceConfig(workspace, nextWorkspaceId, nextWorkspaceName, savedLayout);
+    const sourceWorkspaceIndex = state.config.workspaces.findIndex((item) => item.id === workspaceId);
+
+    set((current) => {
+      const nextWorkspaces =
+        sourceWorkspaceIndex >= 0
+          ? insertItemAfter(current.config.workspaces, sourceWorkspaceIndex, nextWorkspace)
+          : [...current.config.workspaces, nextWorkspace];
+      const nextConfig: AppConfig = {
+        ...current.config,
+        workspaces: nextWorkspaces,
+        lastWorkspaceId: nextWorkspace.id,
+      };
+
+      const workspaceStates = new Map(current.workspaceStates);
+      workspaceStates.set(nextWorkspace.id, { id: nextWorkspace.id, tabs: [], activeTabId: '' });
+      return {
+        activeWorkspaceId: nextWorkspace.id,
+        ...withConfigIndexes(nextConfig),
+        ...buildWorkspaceStatePatch(workspaceStates, current.paneRuntimeByPty, current.activePaneByTab),
+      };
+    });
+
+    nextWorkspace.roots.forEach((root) => {
+      initExpandedDirs(nextWorkspace.id, root.id, nextWorkspace.expandedDirsByRoot?.[root.id] ?? []);
+    });
+
+    if (options?.restoreTabs !== false && savedLayout?.tabs.length) {
+      const primaryRootPath = getWorkspacePrimaryRootPath(nextWorkspace);
+      if (primaryRootPath) {
+        await restoreLayout(nextWorkspace.id, savedLayout, primaryRootPath, get().config);
+      }
+    }
+
+    return nextWorkspace.id;
   },
 
   renameWorkspace: (workspaceId, name) =>
@@ -1199,10 +1860,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
 
     const workspaceState = stateBefore.workspaceStates.get(workspaceId);
-    const ptyIds = workspaceState?.tabs.flatMap((tab) => (isTerminalTab(tab) ? collectPtyIds(tab.splitLayout) : [])) ?? [];
-    for (const ptyId of ptyIds) {
-      await invoke('kill_pty', { ptyId }).catch(() => undefined);
-      disposeTerminal(ptyId);
+    const sessionBindings =
+      workspaceState?.tabs.flatMap((tab) => (isTerminalTab(tab) ? collectPaneBindings(tab.splitLayout) : [])) ?? [];
+    const uniqueSessionBindings = Array.from(
+      new Map(sessionBindings.map((binding) => [binding.sessionId, binding])).values(),
+    );
+
+    for (const binding of uniqueSessionBindings) {
+      await closeTerminalSession(binding.sessionId).catch(() => undefined);
+      disposeTerminalBySession(binding.sessionId);
     }
 
     set((state) => {
@@ -1219,8 +1885,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const workspaceStates = new Map(state.workspaceStates);
       workspaceStates.delete(workspaceId);
 
-      const sessions = new Map(state.sessions);
-      ptyIds.forEach((ptyId) => sessions.delete(ptyId));
+      let sessionStatePatch: SessionMapState = {
+        sessions: state.sessions,
+        terminalSessions: state.terminalSessions,
+        sessionIdByPty: state.sessionIdByPty,
+        ptyBySessionId: state.ptyBySessionId,
+      };
+      uniqueSessionBindings.forEach((binding) => {
+        sessionStatePatch = removeSessionStatePatch(sessionStatePatch, { sessionId: binding.sessionId });
+      });
 
       const activePaneByTab = new Map(state.activePaneByTab);
       workspaceState?.tabs.forEach((tab) => activePaneByTab.delete(tab.id));
@@ -1232,7 +1905,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       });
 
       return {
-        sessions,
+        ...sessionStatePatch,
         activePaneByTab,
         activeWorkspaceId:
           state.activeWorkspaceId === workspaceId
@@ -1284,10 +1957,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => {
       const workspace = state.workspaceById.get(workspaceId);
       const normalizedRootPath = normalizeWorkspacePath(rootPath);
+      const existingWorkspaceId = state.workspaceIdByRootPath.get(normalizedRootPath);
       if (!workspace || !normalizedRootPath) {
         return state;
       }
       if (workspace.roots.some((root) => normalizeWorkspacePath(root.path) === normalizedRootPath)) {
+        return state;
+      }
+      if (existingWorkspaceId && existingWorkspaceId !== workspaceId) {
         return state;
       }
 
@@ -1306,6 +1983,66 @@ export const useAppStore = create<AppStore>((set, get) => ({
                     role: 'member',
                   },
                 ]),
+              }
+            : item,
+        ),
+      };
+      return withConfigIndexes(nextConfig);
+    }),
+
+  renameWorkspaceRoot: (workspaceId, rootId, name) =>
+    set((state) => {
+      const workspace = state.workspaceById.get(workspaceId);
+      const trimmed = name.trim();
+      if (!workspace || !trimmed) {
+        return state;
+      }
+
+      const root = workspace.roots.find((item) => item.id === rootId);
+      if (!root || root.name === trimmed) {
+        return state;
+      }
+
+      const nextConfig: AppConfig = {
+        ...state.config,
+        workspaces: state.config.workspaces.map((item) =>
+          item.id === workspaceId
+            ? {
+                ...item,
+                roots: item.roots.map((currentRoot) =>
+                  currentRoot.id === rootId ? { ...currentRoot, name: trimmed } : currentRoot,
+                ),
+              }
+            : item,
+        ),
+      };
+      return withConfigIndexes(nextConfig);
+    }),
+
+  moveWorkspaceRoot: (workspaceId, rootId, direction) =>
+    set((state) => {
+      const workspace = state.workspaceById.get(workspaceId);
+      if (!workspace || workspace.roots.length <= 1) {
+        return state;
+      }
+
+      const currentIndex = workspace.roots.findIndex((root) => root.id === rootId);
+      if (currentIndex < 0) {
+        return state;
+      }
+
+      const nextIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+      if (nextIndex < 0 || nextIndex >= workspace.roots.length) {
+        return state;
+      }
+
+      const nextConfig: AppConfig = {
+        ...state.config,
+        workspaces: state.config.workspaces.map((item) =>
+          item.id === workspaceId
+            ? {
+                ...item,
+                roots: moveArrayItem(item.roots, currentIndex, nextIndex),
               }
             : item,
         ),
@@ -1375,19 +2112,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return null;
     }
 
-    const ptyId = await invoke<number>('create_pty', {
-      shell: shell.command,
-      args: shell.args ?? [],
-      cwd,
-    });
-    get().upsertSession(createTerminalSessionMeta(shell.name, ptyId, cwd));
+    const splitNode = await openTerminalPane(shell, cwd);
+    if (!splitNode || splitNode.type !== 'leaf') {
+      return null;
+    }
 
-    const pane = createTerminalPane(shell.name, ptyId, genId());
+    const pane = splitNode.pane;
     const tab: TerminalTab = {
       kind: 'terminal',
       id: genId(),
       status: 'idle',
-      splitLayout: { type: 'leaf', pane },
+      splitLayout: splitNode,
     };
 
     set((state) => {
@@ -1445,14 +2180,26 @@ export const useAppStore = create<AppStore>((set, get) => ({
         activeTabId: nextActiveTabId,
       });
 
-      const sessions = new Map(state.sessions);
-      removedPtyIds.forEach((ptyId) => sessions.delete(ptyId));
+      const referencedPtyIds = collectReferencedPtyIds(workspaceStates);
+
+      let sessionStatePatch: SessionMapState = {
+        sessions: state.sessions,
+        terminalSessions: state.terminalSessions,
+        sessionIdByPty: state.sessionIdByPty,
+        ptyBySessionId: state.ptyBySessionId,
+      };
+      removedPtyIds.forEach((ptyId) => {
+        if (referencedPtyIds.has(ptyId)) {
+          return;
+        }
+        sessionStatePatch = removeSessionStatePatch(sessionStatePatch, { ptyId });
+      });
 
       const activePaneByTab = new Map(state.activePaneByTab);
       activePaneByTab.delete(tabId);
 
       return {
-        sessions,
+        ...sessionStatePatch,
         activePaneByTab,
         ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
       };
@@ -1469,7 +2216,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         ...workspaceState,
         activeTabId: tabId,
       });
-      return { workspaceStates };
+      return { workspaceStates, projectStates: workspaceStates };
     }),
 
   setTabCustomTitle: (workspaceId, tabId, customTitle) =>
@@ -1487,7 +2234,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
             : tab,
         ),
       });
-      return { workspaceStates };
+      return { workspaceStates, projectStates: workspaceStates };
     }),
 
   updateTabLayout: (workspaceId, tabId, layout) =>
@@ -1497,6 +2244,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (!workspaceState) {
         return state;
       }
+
+      const existingTab = workspaceState.tabs.find((tab) => tab.id === tabId);
+      if (existingTab && isTerminalTab(existingTab) && areSplitNodesEquivalent(existingTab.splitLayout, layout)) {
+        return state;
+      }
+
       workspaceStates.set(workspaceId, {
         ...workspaceState,
         tabs: workspaceState.tabs.map((tab) =>
@@ -1573,20 +2326,22 @@ export const useAppStore = create<AppStore>((set, get) => ({
   recordWorkspaceFsChanges: (rootPath, changes) =>
     set((state) => {
       const normalizedRootPath = normalizeWorkspacePath(rootPath);
-      const workspaceExplorerRuntime = new Map(state.workspaceExplorerRuntime);
+      const workspaceExplorerRuntime = new Map(getWorkspaceExplorerRuntimeMap(state));
       const current = workspaceExplorerRuntime.get(normalizedRootPath) ?? createExplorerRuntimeState();
       workspaceExplorerRuntime.set(normalizedRootPath, {
         ...current,
         dirtyPaths: Array.from(new Set([...current.dirtyPaths, ...changes.map((change) => change.path)])).slice(-200),
         lastFsChangeAt: Date.now(),
       });
-      return { workspaceExplorerRuntime };
+      return buildExplorerRuntimePatch(workspaceExplorerRuntime);
     }),
+
+  recordProjectFsChanges: (rootPath, changes) => get().recordWorkspaceFsChanges(rootPath, changes),
 
   markWorkspaceGitDirty: (rootPath) =>
     set((state) => {
       const normalizedRootPath = normalizeWorkspacePath(rootPath);
-      const workspaceExplorerRuntime = new Map(state.workspaceExplorerRuntime);
+      const workspaceExplorerRuntime = new Map(getWorkspaceExplorerRuntimeMap(state));
       const current = workspaceExplorerRuntime.get(normalizedRootPath) ?? createExplorerRuntimeState();
       workspaceExplorerRuntime.set(normalizedRootPath, {
         ...current,
@@ -1594,8 +2349,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
         lastGitDirtyAt: Date.now(),
         gitDirtyToken: current.gitDirtyToken + 1,
       });
-      return { workspaceExplorerRuntime };
+      return buildExplorerRuntimePatch(workspaceExplorerRuntime);
     }),
+
+  markProjectGitDirty: (rootPath) => get().markWorkspaceGitDirty(rootPath),
 
   openSettings: (page = 'terminal') =>
     set({
@@ -1607,15 +2364,38 @@ export const useAppStore = create<AppStore>((set, get) => ({
       },
     }),
 
+  openRunProfileInspector: (paneId) =>
+    set((state) => ({
+      terminalUi:
+        state.terminalUi.runProfileInspectorPaneId === paneId
+          ? state.terminalUi
+          : {
+              ...state.terminalUi,
+              runProfileInspectorPaneId: paneId,
+            },
+    })),
+
+  closeRunProfileInspector: () =>
+    set((state) => ({
+      terminalUi:
+        state.terminalUi.runProfileInspectorPaneId == null
+          ? state.terminalUi
+          : {
+              ...state.terminalUi,
+              runProfileInspectorPaneId: null,
+            },
+    })),
+
   openFileViewer: (workspaceId, filePath, options) =>
     set((state) => {
-      const workspaceState = state.workspaceStates.get(workspaceId);
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
       if (!workspaceState) {
         return state;
       }
       const nextMode = normalizeFileViewerMode(filePath, options?.initialMode);
       const existing = workspaceState.tabs.find((tab) => tab.kind === 'file-viewer' && tab.filePath === filePath);
-      const workspaceStates = new Map(state.workspaceStates);
+      const workspaceStates = new Map(sourceWorkspaceStates);
 
       if (existing) {
         workspaceStates.set(workspaceId, {
@@ -1645,7 +2425,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   setFileViewerTabMode: (workspaceId, tabId, mode) =>
     set((state) => {
-      const workspaceState = state.workspaceStates.get(workspaceId);
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
       if (!workspaceState) {
         return state;
       }
@@ -1667,7 +2448,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         return state;
       }
 
-      const workspaceStates = new Map(state.workspaceStates);
+      const workspaceStates = new Map(sourceWorkspaceStates);
       workspaceStates.set(workspaceId, { ...workspaceState, tabs });
       return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
     }),
@@ -1684,14 +2465,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   openWorktreeDiff: (workspaceId, projectPath, status) =>
     set((state) => {
-      const workspaceState = state.workspaceStates.get(workspaceId);
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
       if (!workspaceState) {
         return state;
       }
       const existing = workspaceState.tabs.find(
         (tab) => tab.kind === 'worktree-diff' && tab.projectPath === projectPath && tab.status.path === status.path,
       );
-      const workspaceStates = new Map(state.workspaceStates);
+      const workspaceStates = new Map(sourceWorkspaceStates);
 
       if (existing) {
         workspaceStates.set(workspaceId, {
@@ -1718,19 +2500,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
     }),
 
-  openCommitDiff: ({ workspaceId, repoPath, commitHash, commitMessage, files }) =>
+  openCommitDiff: ({ workspaceId, projectId, repoPath, commitHash, commitMessage, files }) =>
     set((state) => {
-      const workspaceState = state.workspaceStates.get(workspaceId);
+      const resolvedWorkspaceId = workspaceId ?? projectId;
+      if (!resolvedWorkspaceId) {
+        return state;
+      }
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, resolvedWorkspaceId);
+      const workspaceState = sourceWorkspaceStates.get(resolvedWorkspaceId);
       if (!workspaceState) {
         return state;
       }
       const existing = workspaceState.tabs.find(
         (tab) => tab.kind === 'commit-diff' && tab.repoPath === repoPath && tab.commitHash === commitHash,
       );
-      const workspaceStates = new Map(state.workspaceStates);
+      const workspaceStates = new Map(sourceWorkspaceStates);
 
       if (existing) {
-        workspaceStates.set(workspaceId, {
+        workspaceStates.set(resolvedWorkspaceId, {
           ...workspaceState,
           activeTabId: existing.id,
           tabs: workspaceState.tabs.map((tab) =>
@@ -1748,7 +2535,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           commitMessage,
           files,
         };
-        workspaceStates.set(workspaceId, {
+        workspaceStates.set(resolvedWorkspaceId, {
           ...workspaceState,
           tabs: [...workspaceState.tabs, tab],
           activeTabId: tab.id,
@@ -1766,10 +2553,81 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }),
 }));
 
+function normalizeStoreStatePatch(patch: Partial<AppStore> | AppStore, previousState: AppStore) {
+  const normalizedPatch: Partial<AppStore> = { ...patch };
+
+  if (normalizedPatch.config) {
+    const projectsChanged = normalizedPatch.config.projects !== previousState.config.projects;
+    const workspacesChanged = normalizedPatch.config.workspaces !== previousState.config.workspaces;
+    const configInput =
+      projectsChanged && !workspacesChanged
+        ? {
+            ...normalizedPatch.config,
+            workspaces: [],
+          }
+        : normalizedPatch.config;
+    const normalizedConfig = normalizeWorkspaceStoreConfig(configInput);
+    normalizedPatch.config = normalizedConfig;
+    Object.assign(normalizedPatch, buildConfigIndexes(normalizedConfig.workspaces));
+  }
+
+  if (normalizedPatch.sessions && !normalizedPatch.terminalSessions) {
+    Object.assign(normalizedPatch, buildSessionIndexes(normalizedPatch.sessions));
+  } else if (normalizedPatch.terminalSessions && !normalizedPatch.sessions) {
+    const sessions = new Map<number, TerminalSessionMeta>();
+    for (const session of normalizedPatch.terminalSessions.values()) {
+      sessions.set(session.ptyId, session);
+    }
+    Object.assign(normalizedPatch, buildSessionIndexes(sessions, normalizedPatch.terminalSessions));
+  }
+
+  const workspaceStatesChanged = normalizedPatch.workspaceStates !== previousState.workspaceStates;
+  const projectStatesChanged = normalizedPatch.projectStates !== previousState.projectStates;
+  const workspaceStates =
+    projectStatesChanged && !workspaceStatesChanged
+      ? normalizedPatch.projectStates
+      : normalizedPatch.workspaceStates ?? normalizedPatch.projectStates;
+  if (workspaceStates) {
+    Object.assign(
+      normalizedPatch,
+      buildWorkspaceStatePatch(
+        workspaceStates,
+        normalizedPatch.paneRuntimeByPty ?? previousState.paneRuntimeByPty,
+        normalizedPatch.activePaneByTab ?? previousState.activePaneByTab,
+      ),
+    );
+  }
+
+  const workspaceExplorerRuntimeChanged =
+    normalizedPatch.workspaceExplorerRuntime !== previousState.workspaceExplorerRuntime;
+  const projectExplorerRuntimeChanged =
+    normalizedPatch.projectExplorerRuntime !== previousState.projectExplorerRuntime;
+  const workspaceExplorerRuntime =
+    projectExplorerRuntimeChanged && !workspaceExplorerRuntimeChanged
+      ? normalizedPatch.projectExplorerRuntime
+      : normalizedPatch.workspaceExplorerRuntime ?? normalizedPatch.projectExplorerRuntime;
+  if (workspaceExplorerRuntime) {
+    Object.assign(normalizedPatch, buildExplorerRuntimePatch(workspaceExplorerRuntime));
+  }
+
+  return normalizedPatch;
+}
+
+const rawSetAppStoreState = useAppStore.setState as (partial: unknown, replace?: boolean) => void;
+useAppStore.setState = ((partial, replace) => {
+  if (typeof partial === 'function') {
+    return rawSetAppStoreState(
+      (state: AppStore) => normalizeStoreStatePatch(partial(state), state),
+      replace,
+    );
+  }
+  return rawSetAppStoreState((state: AppStore) => normalizeStoreStatePatch(partial, state), replace);
+}) as typeof useAppStore.setState;
+
 export const selectProjectState = selectWorkspaceState;
 export const selectProjects = selectWorkspaces;
 export const selectProjectGitDirtyToken = selectWorkspaceGitDirtyToken;
 export const selectProjectPath =
   (workspaceId: string) =>
   (state: AppStore): string | undefined =>
-    getWorkspacePrimaryRootPath(state.workspaceById.get(workspaceId));
+    getWorkspacePrimaryRootPath(getWorkspaceConfigById(state, workspaceId));

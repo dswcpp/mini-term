@@ -26,11 +26,16 @@ function normalizePath(value: string) {
 
 function resolveProjectPathForScope(scope: string): string | undefined {
   const normalizedScope = normalizePath(scope);
-  const projects = useAppStore.getState().config.projects;
+  const { config } = useAppStore.getState();
+
+  const candidatePaths =
+    config.workspaces.length > 0
+      ? config.workspaces.flatMap((workspace) => workspace.roots.map((root) => root.path))
+      : (config.projects ?? []).map((project) => project.path);
 
   let bestMatch: string | undefined;
-  for (const project of projects) {
-    const normalizedProjectPath = normalizePath(project.path);
+  for (const candidatePath of candidatePaths) {
+    const normalizedProjectPath = normalizePath(candidatePath);
     if (
       normalizedScope === normalizedProjectPath
       || normalizedScope.startsWith(`${normalizedProjectPath}/`)
@@ -61,7 +66,7 @@ function scheduleFsFlush(projectPath: string) {
         return;
       }
 
-      useAppStore.getState().recordProjectFsChanges(projectPath, events);
+      useAppStore.getState().recordWorkspaceFsChanges(projectPath, events);
       projectFsListeners.get(projectPath)?.forEach((listener) => listener(events));
       scheduleGitDirty(projectPath);
     }, WATCH_DEBOUNCE_MS),
@@ -78,7 +83,7 @@ function scheduleGitDirty(projectPath: string) {
     projectPath,
     setTimeout(() => {
       gitDirtyTimers.delete(projectPath);
-      useAppStore.getState().markProjectGitDirty(projectPath);
+      useAppStore.getState().markWorkspaceGitDirty(projectPath);
       projectGitDirtyListeners.get(projectPath)?.forEach((listener) => listener());
     }, GIT_DIRTY_DEBOUNCE_MS),
   );

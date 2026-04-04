@@ -4,7 +4,7 @@ import type { AppConfig } from '../../types';
 
 export async function saveAppConfig(nextConfig: AppConfig) {
   useAppStore.getState().setConfig(nextConfig);
-  await invoke('save_config', { config: nextConfig });
+  await invoke('save_config', { config: useAppStore.getState().config });
 }
 
 export async function patchAppConfig(updater: (config: AppConfig) => AppConfig) {

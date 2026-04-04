@@ -17,7 +17,6 @@ import { EyeIcon } from './documentViewer/controls';
 import { resolveViewerSkin } from './documentViewer/viewerSkin';
 import { StatusDot } from './StatusDot';
 import type { ThemePresetId, WorkspaceTab } from '../types';
-import { getWorkspaceMatch } from '../utils/workspace';
 
 type FileViewerTab = Extract<WorkspaceTab, { kind: 'file-viewer' }>;
 
@@ -253,7 +252,8 @@ function LanguageBadge({
 }
 
 interface Props {
-  workspaceId: string;
+  workspaceId?: string;
+  projectId?: string;
   onNewTab: (e: React.MouseEvent) => void;
   onCloseTab: (tabId: string) => void;
 }
@@ -339,20 +339,24 @@ const TabBarItem = memo(function TabBarItem({
   );
 });
 
-export function TabBar({ workspaceId, onNewTab, onCloseTab }: Props) {
+export function TabBar({ workspaceId, projectId, onNewTab, onCloseTab }: Props) {
+  const resolvedWorkspaceId = workspaceId ?? projectId;
   const setActiveTab = useAppStore((state) => state.setActiveTab);
-  const workspaceState = useAppStore(selectWorkspaceState(workspaceId));
-  const workspace = useAppStore(selectWorkspaceConfig(workspaceId));
+  const workspaceState = useAppStore(selectWorkspaceState(resolvedWorkspaceId ?? ''));
+  const workspace = useAppStore(selectWorkspaceConfig(resolvedWorkspaceId));
   const themePreset = useAppStore(selectThemePreset);
   const rootPaths = workspace?.roots.map((root) => root.path) ?? [];
   const handleSelectTab = useCallback(
     (tabId: string) => {
-      setActiveTab(workspaceId, tabId);
+      if (!resolvedWorkspaceId) {
+        return;
+      }
+      setActiveTab(resolvedWorkspaceId, tabId);
     },
-    [setActiveTab, workspaceId],
+    [resolvedWorkspaceId, setActiveTab],
   );
 
-  if (!workspaceState) return null;
+  if (!resolvedWorkspaceId || !workspaceState) return null;
 
   return (
     <div className="flex select-none overflow-x-auto border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[11px]">

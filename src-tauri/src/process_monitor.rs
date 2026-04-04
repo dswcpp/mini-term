@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter};
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtyStatusChangePayload {
+    pub session_id: String,
     pub pty_id: u32,
     pub status: String,
 }
@@ -34,7 +35,9 @@ pub fn start_monitor(app: AppHandle, pty_manager: crate::pty::PtyManager) {
 
                 let prev = prev_statuses.get(pty_id);
                 if prev.map(|s| s.as_str()) != Some(status) {
+                    let session_id = pty_manager.get_session_id(*pty_id);
                     let _ = app.emit("pty-status-change", PtyStatusChangePayload {
+                        session_id,
                         pty_id: *pty_id,
                         status: status.to_string(),
                     });

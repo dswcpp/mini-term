@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter};
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PtyOutputPayload {
+    session_id: String,
     pty_id: u32,
     data: String,
 }
@@ -21,13 +22,14 @@ struct PtyOutputPayload {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PtyExitPayload {
+    session_id: String,
     pty_id: u32,
     exit_code: i32,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PtySessionCreatedPayload {
+pub struct PtySessionCreatedPayload {
     session_id: String,
     pty_id: u32,
     shell: String,
@@ -42,6 +44,7 @@ struct PtySessionCreatedPayload {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PtySessionPhasePayload {
+    session_id: String,
     pty_id: u32,
     phase: String,
     last_exit_code: Option<i32>,
@@ -51,6 +54,7 @@ struct PtySessionPhasePayload {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PtySessionCommandPayload {
+    session_id: String,
     pty_id: u32,
     command: String,
     usage_scope: Option<String>,
@@ -60,6 +64,7 @@ struct PtySessionCommandPayload {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PtySessionCwdPayload {
+    session_id: String,
     pty_id: u32,
     cwd: String,
     updated_at: u64,
@@ -336,6 +341,8 @@ fn resolve_usage_scope(command: &str, shell_kind: &str, current_cwd: &str, defau
 pub struct PtyManager {
     instances: Arc<Mutex<HashMap<u32, PtyInstance>>>,
     next_id: Arc<Mutex<u32>>,
+    session_id_by_pty: Arc<Mutex<HashMap<u32, String>>>,
+    pty_id_by_session: Arc<Mutex<HashMap<String, u32>>>,
     last_output: Arc<Mutex<HashMap<u32, Instant>>>,
     startup_output: Arc<Mutex<HashMap<u32, String>>>,
     ai_sessions: Arc<Mutex<HashSet<u32>>>,
@@ -471,6 +478,8 @@ impl PtyManager {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
+            session_id_by_pty: Arc::new(Mutex::new(HashMap::new())),
+            pty_id_by_session: Arc::new(Mutex::new(HashMap::new())),
             last_output: Arc::new(Mutex::new(HashMap::new())),
             startup_output: Arc::new(Mutex::new(HashMap::new())),
             ai_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -490,6 +499,23 @@ impl PtyManager {
         let map = self.last_output.lock().unwrap();
         map.get(&pty_id)
             .map_or(false, |timestamp| timestamp.elapsed() < within)
+    }
+
+    pub fn get_session_id(&self, pty_id: u32) -> String {
+        self.session_id_by_pty
+            .lock()
+            .unwrap()
+            .get(&pty_id)
+            .cloned()
+            .unwrap_or_else(|| session_id_for_pty(pty_id))
+    }
+
+    pub fn get_pty_id_for_session(&self, session_id: &str) -> Option<u32> {
+        self.pty_id_by_session
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .copied()
     }
 
     pub fn is_ai_session(&self, pty_id: u32) -> bool {
@@ -628,14 +654,36 @@ impl PtyManager {
     }
 }
 
-#[tauri::command]
-pub fn create_pty(
-    app: AppHandle,
-    state: tauri::State<'_, PtyManager>,
+fn link_session(state: &PtyManager, pty_id: u32, session_id: &str) {
+    state
+        .session_id_by_pty
+        .lock()
+        .unwrap()
+        .insert(pty_id, session_id.to_string());
+    state
+        .pty_id_by_session
+        .lock()
+        .unwrap()
+        .insert(session_id.to_string(), pty_id);
+}
+
+fn unlink_session(state: &PtyManager, pty_id: u32, session_id: &str) {
+    state.session_id_by_pty.lock().unwrap().remove(&pty_id);
+    let mut pty_by_session = state.pty_id_by_session.lock().unwrap();
+    if pty_by_session.get(session_id).copied() == Some(pty_id) {
+        pty_by_session.remove(session_id);
+    }
+}
+
+fn create_pty_internal(
+    app: &AppHandle,
+    state: &PtyManager,
     shell: String,
     args: Vec<String>,
     cwd: String,
-) -> Result<u32, String> {
+    session_id: Option<String>,
+    mode: Option<String>,
+) -> Result<PtySessionCreatedPayload, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -672,10 +720,13 @@ pub fn create_pty(
     let writer = pair.master.take_writer().map_err(|error| error.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|error| error.to_string())?;
     let master = pair.master;
+    let session_id = session_id.unwrap_or_else(|| session_id_for_pty(pty_id));
+    let mode = mode.unwrap_or_else(|| "human".to_string());
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let instances_clone = state.instances.clone();
     let pty_id_for_reader = pty_id;
+    let session_id_for_reader = session_id.clone();
 
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -693,6 +744,8 @@ pub fn create_pty(
     });
 
     let app_flush = app.clone();
+    let session_id_by_pty = state.session_id_by_pty.clone();
+    let pty_id_by_session = state.pty_id_by_session.clone();
     let last_output = state.last_output.clone();
     let startup_output = state.startup_output.clone();
     let ai_sessions = state.ai_sessions.clone();
@@ -720,6 +773,7 @@ pub fn create_pty(
                         let _ = app_flush.emit(
                             "pty-output",
                             PtyOutputPayload {
+                                session_id: session_id_for_reader.clone(),
                                 pty_id: pty_id_for_reader,
                                 data,
                             },
@@ -743,6 +797,7 @@ pub fn create_pty(
                     let _ = app_flush.emit(
                         "pty-session-phase-change",
                         PtySessionPhasePayload {
+                            session_id: session_id_for_reader.clone(),
                             pty_id: pty_id_for_reader,
                             phase: "exited".to_string(),
                             last_exit_code: Some(exit_code),
@@ -752,11 +807,17 @@ pub fn create_pty(
                     let _ = app_flush.emit(
                         "pty-exit",
                         PtyExitPayload {
+                            session_id: session_id_for_reader.clone(),
                             pty_id: pty_id_for_reader,
                             exit_code,
                         },
                     );
 
+                    session_id_by_pty.lock().unwrap().remove(&pty_id_for_reader);
+                    let mut session_map = pty_id_by_session.lock().unwrap();
+                    if session_map.get(&session_id_for_reader).copied() == Some(pty_id_for_reader) {
+                        session_map.remove(&session_id_for_reader);
+                    }
                     last_output.lock().unwrap().remove(&pty_id_for_reader);
                     startup_output.lock().unwrap().remove(&pty_id_for_reader);
                     ai_sessions.lock().unwrap().remove(&pty_id_for_reader);
@@ -784,6 +845,7 @@ pub fn create_pty(
                 let _ = app_flush.emit(
                     "pty-output",
                     PtyOutputPayload {
+                        session_id: session_id_for_reader.clone(),
                         pty_id: pty_id_for_reader,
                         data,
                     },
@@ -827,30 +889,28 @@ pub fn create_pty(
         .lock()
         .unwrap()
         .insert(pty_id, infer_shell_kind(&shell));
+    link_session(state, pty_id, &session_id);
 
     let now = now_timestamp_ms();
-    let _ = app.emit(
-        "pty-session-created",
-        PtySessionCreatedPayload {
-            session_id: session_id_for_pty(pty_id),
-            pty_id,
-            shell: shell.clone(),
-            shell_kind: infer_shell_kind(&shell),
-            cwd,
-            mode: "human".to_string(),
-            phase: "starting".to_string(),
-            created_at: now,
-            updated_at: now,
-        },
-    );
+    let payload = PtySessionCreatedPayload {
+        session_id,
+        pty_id,
+        shell: shell.clone(),
+        shell_kind: infer_shell_kind(&shell),
+        cwd,
+        mode,
+        phase: "starting".to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    let _ = app.emit("pty-session-created", payload.clone());
 
-    Ok(pty_id)
+    Ok(payload)
 }
 
-#[tauri::command]
-pub fn write_pty(
-    app: AppHandle,
-    state: tauri::State<'_, PtyManager>,
+fn write_pty_internal(
+    app: &AppHandle,
+    state: &PtyManager,
     pty_id: u32,
     data: String,
 ) -> Result<(), String> {
@@ -865,6 +925,7 @@ pub fn write_pty(
     }
 
     let tracked = state.track_input(pty_id, &data);
+    let session_id = state.get_session_id(pty_id);
     for command in tracked.commands {
         let updated_at = now_timestamp_ms();
         let current_cwd = state
@@ -898,6 +959,7 @@ pub fn write_pty(
         let _ = app.emit(
             "pty-session-command-started",
             PtySessionCommandPayload {
+                session_id: session_id.clone(),
                 pty_id,
                 command,
                 usage_scope,
@@ -907,6 +969,7 @@ pub fn write_pty(
         let _ = app.emit(
             "pty-session-phase-change",
             PtySessionPhasePayload {
+                session_id: session_id.clone(),
                 pty_id,
                 phase: "running".to_string(),
                 last_exit_code: None,
@@ -923,6 +986,7 @@ pub fn write_pty(
             let _ = app.emit(
                 "pty-session-cwd-changed",
                 PtySessionCwdPayload {
+                    session_id: session_id.clone(),
                     pty_id,
                     cwd: next_cwd,
                     updated_at,
@@ -934,9 +998,8 @@ pub fn write_pty(
     Ok(())
 }
 
-#[tauri::command]
-pub fn resize_pty(
-    state: tauri::State<'_, PtyManager>,
+fn resize_pty_internal(
+    state: &PtyManager,
     pty_id: u32,
     cols: u16,
     rows: u16,
@@ -954,8 +1017,8 @@ pub fn resize_pty(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-pub fn kill_pty(state: tauri::State<'_, PtyManager>, pty_id: u32) -> Result<(), String> {
+fn kill_pty_internal(state: &PtyManager, pty_id: u32) -> Result<(), String> {
+    let session_id = state.get_session_id(pty_id);
     state.instances.lock().unwrap().remove(&pty_id);
     state.last_output.lock().unwrap().remove(&pty_id);
     state.startup_output.lock().unwrap().remove(&pty_id);
@@ -965,7 +1028,130 @@ pub fn kill_pty(state: tauri::State<'_, PtyManager>, pty_id: u32) -> Result<(), 
     state.session_cwds.lock().unwrap().remove(&pty_id);
     state.session_roots.lock().unwrap().remove(&pty_id);
     state.shell_kinds.lock().unwrap().remove(&pty_id);
+    unlink_session(state, pty_id, &session_id);
     Ok(())
+}
+
+fn take_startup_output_internal(state: &PtyManager, pty_id: u32) -> Result<String, String> {
+    let mut startup_output = state.startup_output.lock().unwrap();
+    Ok(startup_output.remove(&pty_id).unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn create_pty(
+    app: AppHandle,
+    state: tauri::State<'_, PtyManager>,
+    shell: String,
+    args: Vec<String>,
+    cwd: String,
+) -> Result<u32, String> {
+    create_pty_internal(&app, state.inner(), shell, args, cwd, None, None).map(|payload| payload.pty_id)
+}
+
+#[tauri::command]
+pub fn create_terminal_session(
+    app: AppHandle,
+    state: tauri::State<'_, PtyManager>,
+    shell: String,
+    args: Vec<String>,
+    cwd: String,
+    session_id: Option<String>,
+    mode: Option<String>,
+) -> Result<PtySessionCreatedPayload, String> {
+    create_pty_internal(&app, state.inner(), shell, args, cwd, session_id, mode)
+}
+
+#[tauri::command]
+pub fn write_pty(
+    app: AppHandle,
+    state: tauri::State<'_, PtyManager>,
+    pty_id: u32,
+    data: String,
+) -> Result<(), String> {
+    write_pty_internal(&app, state.inner(), pty_id, data)
+}
+
+#[tauri::command]
+pub fn write_terminal_input(
+    app: AppHandle,
+    state: tauri::State<'_, PtyManager>,
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    let pty_id = state
+        .get_pty_id_for_session(&session_id)
+        .ok_or("PTY not found for session")?;
+    write_pty_internal(&app, state.inner(), pty_id, data)
+}
+
+#[tauri::command]
+pub fn run_terminal_command(
+    app: AppHandle,
+    state: tauri::State<'_, PtyManager>,
+    session_id: String,
+    command: String,
+) -> Result<(), String> {
+    let mut data = command;
+    if !data.ends_with('\n') && !data.ends_with('\r') {
+        data.push('\r');
+    }
+    write_terminal_input(app, state, session_id, data)
+}
+
+#[tauri::command]
+pub fn resize_pty(
+    state: tauri::State<'_, PtyManager>,
+    pty_id: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    resize_pty_internal(state.inner(), pty_id, cols, rows)
+}
+
+#[tauri::command]
+pub fn resize_terminal_session(
+    state: tauri::State<'_, PtyManager>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    let pty_id = state
+        .get_pty_id_for_session(&session_id)
+        .ok_or("PTY not found for session")?;
+    resize_pty_internal(state.inner(), pty_id, cols, rows)
+}
+
+#[tauri::command]
+pub fn kill_pty(state: tauri::State<'_, PtyManager>, pty_id: u32) -> Result<(), String> {
+    kill_pty_internal(state.inner(), pty_id)
+}
+
+#[tauri::command]
+pub fn close_terminal_session(
+    state: tauri::State<'_, PtyManager>,
+    session_id: String,
+) -> Result<(), String> {
+    let pty_id = state
+        .get_pty_id_for_session(&session_id)
+        .ok_or("PTY not found for session")?;
+    kill_pty_internal(state.inner(), pty_id)
+}
+
+#[tauri::command]
+pub fn restart_terminal_session(
+    app: AppHandle,
+    state: tauri::State<'_, PtyManager>,
+    session_id: String,
+    shell: String,
+    args: Vec<String>,
+    cwd: String,
+    mode: Option<String>,
+) -> Result<PtySessionCreatedPayload, String> {
+    if let Some(existing_pty_id) = state.get_pty_id_for_session(&session_id) {
+        let _ = kill_pty_internal(state.inner(), existing_pty_id);
+    }
+
+    create_pty_internal(&app, state.inner(), shell, args, cwd, Some(session_id), mode)
 }
 
 #[tauri::command]
@@ -973,8 +1159,18 @@ pub fn take_startup_output(
     state: tauri::State<'_, PtyManager>,
     pty_id: u32,
 ) -> Result<String, String> {
-    let mut startup_output = state.startup_output.lock().unwrap();
-    Ok(startup_output.remove(&pty_id).unwrap_or_default())
+    take_startup_output_internal(state.inner(), pty_id)
+}
+
+#[tauri::command]
+pub fn take_terminal_startup_output(
+    state: tauri::State<'_, PtyManager>,
+    session_id: String,
+) -> Result<String, String> {
+    let pty_id = state
+        .get_pty_id_for_session(&session_id)
+        .ok_or("PTY not found for session")?;
+    take_startup_output_internal(state.inner(), pty_id)
 }
 
 #[cfg(test)]

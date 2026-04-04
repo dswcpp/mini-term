@@ -1,10 +1,16 @@
 import { memo, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import type { TerminalThemeDefinition } from '../../theme';
+import { resizeTerminalSession } from '../../runtime/terminalApi';
+import { clearTerminalResize, scheduleTerminalResize } from '../../runtime/terminalResizeScheduler';
+import { useAppStore } from '../../store';
 import { getOrCreateTerminal } from '../../utils/terminalCache';
 import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalViewportProps {
+  workspaceId: string;
+  tabId: string;
+  sessionId: string;
+  paneId?: string;
   ptyId: number;
   fontSize: number;
   terminalTheme: TerminalThemeDefinition;
@@ -14,6 +20,10 @@ export interface TerminalViewportProps {
 }
 
 export const TerminalViewport = memo(function TerminalViewport({
+  workspaceId,
+  tabId,
+  sessionId,
+  paneId,
   ptyId,
   fontSize,
   terminalTheme,
@@ -31,12 +41,49 @@ export const TerminalViewport = memo(function TerminalViewport({
   }, [onContextMenuRequest]);
 
   useEffect(() => {
+    if (!paneId) {
+      return;
+    }
+
+    const { upsertTerminalView, removeTerminalView } = useAppStore.getState();
+    upsertTerminalView({
+      viewId: paneId,
+      paneId,
+      tabId,
+      workspaceId,
+      sessionId,
+      isVisible,
+      isFocused: isActive,
+      mountedAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    return () => {
+      removeTerminalView(paneId);
+    };
+  }, [isActive, isVisible, paneId, sessionId, tabId, workspaceId]);
+
+  useEffect(() => {
+    if (!paneId) {
+      return;
+    }
+
+    useAppStore.getState().updateTerminalView(paneId, {
+      tabId,
+      workspaceId,
+      isVisible,
+      isFocused: isActive,
+      sessionId,
+    });
+  }, [isActive, isVisible, paneId, sessionId, tabId, workspaceId]);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container) {
       return;
     }
 
-    const { term, fitAddon, wrapper } = getOrCreateTerminal(ptyId);
+    const { term, fitAddon, wrapper } = getOrCreateTerminal(sessionId, ptyId);
     termRef.current = term;
     fitAddonRef.current = fitAddon;
     container.appendChild(wrapper);
@@ -62,21 +109,22 @@ export const TerminalViewport = memo(function TerminalViewport({
         fitAddonRef.current = null;
       }
     };
-  }, [ptyId]);
+  }, [ptyId, sessionId]);
 
   useEffect(() => {
     const term = termRef.current;
-    const fitAddon = fitAddonRef.current;
-    if (!term || !fitAddon || !fontSize) {
+    if (!term || !fontSize) {
       return;
     }
 
     term.options.fontSize = fontSize;
     if (isVisible) {
-      fitAddon.fit();
-      term.refresh(0, term.rows - 1);
+      scheduleTerminalResize(sessionId, () => {
+        fitAddonRef.current?.fit();
+        term.refresh(0, term.rows - 1);
+      });
     }
-  }, [fontSize, isVisible]);
+  }, [fontSize, isVisible, sessionId]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -103,7 +151,7 @@ export const TerminalViewport = memo(function TerminalViewport({
     return () => {
       cancelAnimationFrame(rafId);
     };
-  }, [isActive, isVisible, ptyId]);
+  }, [isActive, isVisible, sessionId]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -113,10 +161,8 @@ export const TerminalViewport = memo(function TerminalViewport({
       return;
     }
 
-    let rafId = 0;
     const scheduleFit = (forceRefresh = false) => {
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
+      scheduleTerminalResize(sessionId, () => {
         if (container.clientWidth <= 0 || container.clientHeight <= 0) {
           return;
         }
@@ -126,8 +172,15 @@ export const TerminalViewport = memo(function TerminalViewport({
         fitAddon.fit();
 
         const sizeChanged = term.cols !== previousCols || term.rows !== previousRows;
+        if (paneId) {
+          useAppStore.getState().updateTerminalView(paneId, {
+            cols: term.cols,
+            rows: term.rows,
+          });
+        }
+
         if (sizeChanged) {
-          void invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
+          void resizeTerminalSession(sessionId, term.cols, term.rows);
         }
 
         if (sizeChanged || forceRefresh) {
@@ -151,11 +204,11 @@ export const TerminalViewport = memo(function TerminalViewport({
     visibilityObserver.observe(container);
 
     return () => {
-      cancelAnimationFrame(rafId);
+      clearTerminalResize(sessionId);
       observer.disconnect();
       visibilityObserver.disconnect();
     };
-  }, [isActive, isVisible, ptyId]);
+  }, [isVisible, paneId, sessionId]);
 
   return <div ref={containerRef} className="absolute top-1.5 right-0 bottom-0 left-2.5 cursor-text" />;
 });

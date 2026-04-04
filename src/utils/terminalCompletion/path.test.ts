@@ -77,6 +77,30 @@ describe('terminalCompletion path utilities', () => {
     expect(candidate.commitSuffix).toBe(' ');
   });
 
+  it('quotes unquoted powershell paths that contain spaces', () => {
+    const context = createCompletionContext({
+      inputText: 'cd My Fo',
+      cursor: 'cd My Fo'.length,
+      shellKind: 'powershell',
+      cwd: 'D:/code/JavaScript/mini-term',
+    });
+
+    const candidate = buildPathCandidateText({
+      activeToken: context.activeToken,
+      entry: {
+        name: 'My Folder',
+        path: 'D:/code/JavaScript/mini-term/My Folder',
+        isDir: true,
+      },
+      shellKind: 'powershell',
+      displayPrefix: '',
+      separator: '\\',
+    });
+
+    expect(candidate.insertText).toBe('"My Folder\\"');
+    expect(candidate.commitSuffix).toBe('');
+  });
+
   it('normalizes dot segments when joining paths', () => {
     expect(joinPath('/workspace/project', './src/../tests')).toBe('/workspace/project/tests');
     expect(normalizePath('C:/Users/demo/../temp')).toBe('C:/Users/temp');

@@ -40,7 +40,7 @@ export function GitHistory() {
           const repos = await invoke<GitRepoInfo[]>('discover_git_repos', { projectPath: root.path });
           return [root.id, repos] as const;
         } catch {
-          return [root.id, []] as const;
+          return [root.id, [] as GitRepoInfo[]] as const;
         }
       }),
     ).then((entries) => {

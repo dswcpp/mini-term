@@ -41,16 +41,16 @@ describe('tauriEventHub', () => {
     await Promise.resolve();
     expect(listenMock.mock.calls.filter(([event]) => event === 'pty-output')).toHaveLength(1);
 
-    eventHandlers.get('pty-output')?.({ payload: { ptyId: 1, data: 'git ' } });
-    eventHandlers.get('pty-output')?.({ payload: { ptyId: 1, data: 'status' } });
-    eventHandlers.get('pty-output')?.({ payload: { ptyId: 2, data: 'npm test' } });
+    eventHandlers.get('pty-output')?.({ payload: { sessionId: 'session-1', ptyId: 1, data: 'git ' } });
+    eventHandlers.get('pty-output')?.({ payload: { sessionId: 'session-1', ptyId: 1, data: 'status' } });
+    eventHandlers.get('pty-output')?.({ payload: { sessionId: 'session-2', ptyId: 2, data: 'npm test' } });
 
     await vi.advanceTimersByTimeAsync(1);
 
     expect(sinkA).toHaveBeenCalledTimes(1);
-    expect(sinkA).toHaveBeenCalledWith({ ptyId: 1, data: 'git status' });
+    expect(sinkA).toHaveBeenCalledWith({ sessionId: 'session-1', ptyId: 1, data: 'git status' });
     expect(sinkB).toHaveBeenCalledTimes(1);
-    expect(sinkB).toHaveBeenCalledWith({ ptyId: 2, data: 'npm test' });
+    expect(sinkB).toHaveBeenCalledWith({ sessionId: 'session-2', ptyId: 2, data: 'npm test' });
 
     unsubscribeA();
     unsubscribeB();

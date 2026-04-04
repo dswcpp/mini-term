@@ -4,6 +4,7 @@ import { formatCommandStatusLabel, formatSessionPhaseLabel } from '../../utils/s
 interface Props {
   pane?: PaneState | null;
   session?: TerminalSessionMeta;
+  onClose?: () => void;
 }
 
 function formatTimestamp(timestamp?: number) {
@@ -30,7 +31,7 @@ function getStatusTone(status: TerminalSessionMeta['commands'][number]['status']
   }
 }
 
-export function SessionInspector({ pane, session }: Props) {
+export function SessionInspector({ pane, session, onClose }: Props) {
   if (!pane || !session) {
     return (
       <div className="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--text-muted)]">
@@ -40,12 +41,32 @@ export function SessionInspector({ pane, session }: Props) {
   }
 
   const recentCommands = session.commands.slice(-8).reverse();
+  const runProfile = {
+    ...session.runProfile,
+    ...pane.runProfile,
+    savedCommand: pane.runProfile?.savedCommand ?? session.runProfile?.savedCommand ?? pane.runCommand,
+  };
 
   return (
     <div className="flex h-full flex-col border-l border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
       <div className="border-b border-[var(--border-subtle)] px-4 py-3">
-        <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--text-muted)]">
-          Runtime Inspector
+        <div className="flex items-center justify-between">
+          <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--text-muted)]">
+            Runtime Inspector
+          </div>
+          {onClose && (
+            <button
+              type="button"
+              title="关闭 Inspector"
+              className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[color-mix(in_srgb,var(--bg-overlay)_72%,transparent)] hover:text-[var(--text-primary)]"
+              onClick={onClose}
+            >
+              <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" aria-hidden="true">
+                <path d="M3 3l6 6" fill="none" stroke="currentColor" strokeWidth="1" />
+                <path d="M9 3 3 9" fill="none" stroke="currentColor" strokeWidth="1" />
+              </svg>
+            </button>
+          )}
         </div>
         <div className="mt-1 text-sm font-semibold text-[var(--text-primary)]">
           {pane.shellName}
@@ -86,6 +107,21 @@ export function SessionInspector({ pane, session }: Props) {
         <div className="text-[var(--text-muted)]">Working Directory</div>
         <div className="mt-1 break-all font-mono text-[var(--text-primary)]">
           {session.cwd ?? '未知'}
+        </div>
+      </div>
+
+      <div className="border-b border-[var(--border-subtle)] px-4 py-3 text-[11px]">
+        <div className="text-[var(--text-muted)]">Run Profile</div>
+        <div className="mt-2 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-overlay)] px-3 py-2">
+          <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">Saved Command</div>
+          <div className="mt-1 break-all font-mono text-[var(--text-primary)]">
+            {runProfile.savedCommand ?? '未设置'}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-[var(--text-muted)]">
+            <span>最近运行 {formatTimestamp(runProfile.lastRunAt)}</span>
+            <span>最近退出码 {runProfile.lastExitCode ?? '未知'}</span>
+            <span className="truncate">作用域 {runProfile.usageScope ?? '当前终端'}</span>
+          </div>
         </div>
       </div>
 

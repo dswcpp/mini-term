@@ -2,17 +2,26 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { useShallow } from 'zustand/react/shallow';
 import {
   selectWorkspaceRuntimeSummary,
-  selectWorkspaceSections,
   useAppStore,
 } from '../store';
 import type { RecentWorkspaceEntry, WorkspaceConfig } from '../types';
 import { showContextMenu } from '../utils/contextMenu';
+import { showAlert } from '../utils/messageBox';
 import { showPrompt } from '../utils/prompt';
-import { getPathBaseName, getWorkspacePrimaryRoot, getWorkspacePrimaryRootPath } from '../utils/workspace';
+import {
+  getPathBaseName,
+  getWorkspaceCopyName,
+  getWorkspacePrimaryRoot,
+  getWorkspacePrimaryRootPath,
+  normalizeWorkspacePath,
+} from '../utils/workspace';
 import { SessionList } from './SessionList';
 import { StatusDot } from './StatusDot';
+
+const MAX_ROOT_BADGES = 3;
 
 function formatRecentLabel(lastOpenedAt: number) {
   const diff = Date.now() - lastOpenedAt;
@@ -33,6 +42,26 @@ function buildWorkspaceSearchText(workspace: WorkspaceConfig | RecentWorkspaceEn
   return [workspace.name, ...rootNames, ...rootPaths].join(' ').toLowerCase();
 }
 
+function getWorkspaceRootBadges(workspace: WorkspaceConfig) {
+  const badges = workspace.roots.slice(0, MAX_ROOT_BADGES).map((root) => ({
+    id: root.id,
+    label: root.role === 'primary' ? root.name : `+ ${root.name}`,
+    title: root.path,
+    primary: root.role === 'primary',
+  }));
+
+  if (workspace.roots.length > MAX_ROOT_BADGES) {
+    badges.push({
+      id: `${workspace.id}-more`,
+      label: `+${workspace.roots.length - MAX_ROOT_BADGES}`,
+      title: `${workspace.roots.length - MAX_ROOT_BADGES} more roots`,
+      primary: false,
+    });
+  }
+
+  return badges;
+}
+
 function WorkspaceRow({
   workspace,
   active,
@@ -46,9 +75,10 @@ function WorkspaceRow({
   onClick: () => void;
   onContextMenu: (event: React.MouseEvent) => void;
 }) {
-  const summary = useAppStore(selectWorkspaceRuntimeSummary(workspace.id));
+  const summary = useAppStore(useShallow(selectWorkspaceRuntimeSummary(workspace.id)));
   const primaryRoot = getWorkspacePrimaryRoot(workspace);
   const rootCount = workspace.roots.length;
+  const rootBadges = getWorkspaceRootBadges(workspace);
 
   return (
     <div
@@ -84,6 +114,21 @@ function WorkspaceRow({
         <span>{summary.totalTabCount} tabs</span>
         <span>{formatRecentLabel(workspace.lastOpenedAt)}</span>
       </div>
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        {rootBadges.map((badge) => (
+          <span
+            key={badge.id}
+            title={badge.title}
+            className={`rounded-full border px-1.5 py-px text-[9px] tracking-[0.08em] ${
+              badge.primary
+                ? 'border-[var(--accent)]/40 bg-[var(--accent-subtle)] text-[var(--accent)]'
+                : 'border-[var(--border-default)] text-[var(--text-muted)]'
+            }`}
+          >
+            {badge.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -114,11 +159,22 @@ function RecentRow({
 }
 
 export function WorkspaceSidebar() {
-  const { pinned, open: openWorkspaces, recent } = useAppStore(selectWorkspaceSections);
+  const allWorkspaces = useAppStore((state) => state.config.workspaces);
+  const recentWorkspaces = useAppStore((state) => state.config.recentWorkspaces);
+
+  const pinned = useMemo(() => allWorkspaces.filter((w) => w.pinned), [allWorkspaces]);
+  const openWorkspaces = useMemo(() => allWorkspaces.filter((w) => !w.pinned), [allWorkspaces]);
+  const recent = useMemo(
+    () => [...recentWorkspaces].sort((a, b) => b.lastOpenedAt - a.lastOpenedAt),
+    [recentWorkspaces],
+  );
   const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const workspaceById = useAppStore((state) => state.workspaceById);
+  const workspaceIdByRootPath = useAppStore((state) => state.workspaceIdByRootPath);
   const setActiveWorkspace = useAppStore((state) => state.setActiveWorkspace);
   const createWorkspaceFromFolder = useAppStore((state) => state.createWorkspaceFromFolder);
   const createWorkspaceFromFolders = useAppStore((state) => state.createWorkspaceFromFolders);
+  const duplicateWorkspace = useAppStore((state) => state.duplicateWorkspace);
   const renameWorkspace = useAppStore((state) => state.renameWorkspace);
   const pinWorkspace = useAppStore((state) => state.pinWorkspace);
   const moveWorkspace = useAppStore((state) => state.moveWorkspace);
@@ -126,14 +182,32 @@ export function WorkspaceSidebar() {
   const reopenRecentWorkspace = useAppStore((state) => state.reopenRecentWorkspace);
   const forgetRecentWorkspace = useAppStore((state) => state.forgetRecentWorkspace);
   const addRootToWorkspace = useAppStore((state) => state.addRootToWorkspace);
+  const renameWorkspaceRoot = useAppStore((state) => state.renameWorkspaceRoot);
+  const moveWorkspaceRoot = useAppStore((state) => state.moveWorkspaceRoot);
+  const removeRootFromWorkspace = useAppStore((state) => state.removeRootFromWorkspace);
   const setPrimaryWorkspaceRoot = useAppStore((state) => state.setPrimaryWorkspaceRoot);
 
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [selectedIndex, setSelectedIndex] = useState(0);
 
   const persistConfig = useCallback(async () => {
     await invoke('save_config', { config: useAppStore.getState().config });
   }, []);
+
+  const getOwnedWorkspacesForPaths = useCallback((paths: string[]) => {
+    const ownerIds = Array.from(
+      new Set(
+        paths
+          .map((path) => workspaceIdByRootPath.get(normalizeWorkspacePath(path)))
+          .filter((workspaceId): workspaceId is string => Boolean(workspaceId)),
+      ),
+    );
+
+    return ownerIds
+      .map((workspaceId) => workspaceById.get(workspaceId))
+      .filter((workspace): workspace is WorkspaceConfig => Boolean(workspace));
+  }, [workspaceById, workspaceIdByRootPath]);
 
   const handleCreateWorkspace = useCallback(async (multiple: boolean) => {
     const selected = await open({ directory: true, multiple });
@@ -142,6 +216,19 @@ export function WorkspaceSidebar() {
     }
 
     if (Array.isArray(selected)) {
+      const ownerWorkspaces = getOwnedWorkspacesForPaths(selected);
+      if (ownerWorkspaces.length > 1) {
+        await showAlert(
+          'Folders Already Belong To Multiple Workspaces',
+          'Mini-Term will not duplicate the same root across several open workspaces.',
+          {
+            detail: ownerWorkspaces.map((workspace) => `- ${workspace.name}`).join('\n'),
+            tone: 'warning',
+          },
+        );
+        return;
+      }
+
       const id = createWorkspaceFromFolders(selected, {});
       if (id) {
         await persistConfig();
@@ -153,11 +240,18 @@ export function WorkspaceSidebar() {
     if (id) {
       await persistConfig();
     }
-  }, [createWorkspaceFromFolder, createWorkspaceFromFolders, persistConfig]);
+  }, [createWorkspaceFromFolder, createWorkspaceFromFolders, getOwnedWorkspacesForPaths, persistConfig]);
 
   const quickSwitcherItems = useMemo(() => {
     const normalizedQuery = normalizeSearchText(query);
-    const openItems = [...pinned, ...openWorkspaces].map((workspace) => ({
+    const pinnedItems = pinned.map((workspace) => ({
+      id: workspace.id,
+      label: workspace.name,
+      detail: getWorkspacePrimaryRootPath(workspace) ?? '',
+      mode: 'pinned' as const,
+      searchText: buildWorkspaceSearchText(workspace),
+    }));
+    const openItems = openWorkspaces.map((workspace) => ({
       id: workspace.id,
       label: workspace.name,
       detail: getWorkspacePrimaryRootPath(workspace) ?? '',
@@ -172,10 +266,23 @@ export function WorkspaceSidebar() {
       searchText: buildWorkspaceSearchText(workspace),
     }));
 
-    return [...openItems, ...recentItems].filter((item) =>
+    return [...pinnedItems, ...openItems, ...recentItems].filter((item) =>
       normalizedQuery ? item.searchText.includes(normalizedQuery) : true,
     );
   }, [openWorkspaces, pinned, query, recent]);
+
+  useEffect(() => {
+    setSelectedIndex(0);
+  }, [query, switcherOpen]);
+
+  useEffect(() => {
+    if (quickSwitcherItems.length === 0) {
+      setSelectedIndex(0);
+      return;
+    }
+
+    setSelectedIndex((current) => Math.min(current, quickSwitcherItems.length - 1));
+  }, [quickSwitcherItems]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -183,6 +290,8 @@ export function WorkspaceSidebar() {
       if (isSwitcherShortcut) {
         event.preventDefault();
         setSwitcherOpen(true);
+        setQuery('');
+        setSelectedIndex(0);
       }
       if (event.key === 'Escape') {
         setSwitcherOpen(false);
@@ -193,11 +302,99 @@ export function WorkspaceSidebar() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  const activateQuickSwitcherItem = useCallback(async (index: number) => {
+    const item = quickSwitcherItems[index];
+    if (!item) {
+      return;
+    }
+
+    if (item.mode === 'recent') {
+      const id = reopenRecentWorkspace(item.id);
+      if (id) {
+        await persistConfig();
+      }
+    } else {
+      setActiveWorkspace(item.id);
+    }
+
+    setSwitcherOpen(false);
+    setQuery('');
+  }, [persistConfig, quickSwitcherItems, reopenRecentWorkspace, setActiveWorkspace]);
+
+  const allWorkspaceNames = useMemo(
+    () => [...pinned, ...openWorkspaces, ...recent].map((workspace) => workspace.name),
+    [openWorkspaces, pinned, recent],
+  );
+
   const handleWorkspaceContextMenu = useCallback(
     (event: React.MouseEvent, workspace: WorkspaceConfig) => {
       event.preventDefault();
       event.stopPropagation();
       const primaryRoot = getWorkspacePrimaryRoot(workspace);
+      const rootItems: Parameters<typeof showContextMenu>[2] = workspace.roots.map((root, index) => {
+        const children: Parameters<typeof showContextMenu>[2] = [
+          {
+            label: 'Reveal In Explorer',
+            onClick: () => revealItemInDir(root.path),
+          },
+          {
+            label: 'Copy Path',
+            onClick: () => navigator.clipboard.writeText(root.path),
+          },
+          { separator: true },
+          {
+            label: 'Rename Root',
+            onClick: async () => {
+              const nextName = await showPrompt('Rename Root', 'Enter a root label', root.name);
+              if (!nextName?.trim()) {
+                return;
+              }
+              renameWorkspaceRoot(workspace.id, root.id, nextName);
+              await persistConfig();
+            },
+          },
+          {
+            label: 'Set As Primary',
+            disabled: root.role === 'primary',
+            onClick: async () => {
+              setPrimaryWorkspaceRoot(workspace.id, root.id);
+              await persistConfig();
+            },
+          },
+          {
+            label: 'Move Up',
+            disabled: index === 0,
+            onClick: async () => {
+              moveWorkspaceRoot(workspace.id, root.id, 'up');
+              await persistConfig();
+            },
+          },
+          {
+            label: 'Move Down',
+            disabled: index === workspace.roots.length - 1,
+            onClick: async () => {
+              moveWorkspaceRoot(workspace.id, root.id, 'down');
+              await persistConfig();
+            },
+          },
+          { separator: true },
+          {
+            label: 'Remove Root',
+            danger: true,
+            disabled: workspace.roots.length <= 1,
+            onClick: async () => {
+              removeRootFromWorkspace(workspace.id, root.id);
+              await persistConfig();
+            },
+          },
+        ];
+
+        return {
+          label: root.name,
+          checked: root.role === 'primary',
+          children,
+        };
+      });
       const items: Parameters<typeof showContextMenu>[2] = [
         {
           label: 'Reveal Primary Root',
@@ -222,27 +419,72 @@ export function WorkspaceSidebar() {
           },
         },
         {
+          label: 'Save Workspace As...',
+          onClick: async () => {
+            const nextName = await showPrompt(
+              'Save Workspace As',
+              'Enter a name for the duplicated workspace',
+              getWorkspaceCopyName(allWorkspaceNames, workspace.name),
+            );
+            if (!nextName?.trim()) {
+              return;
+            }
+            const id = await duplicateWorkspace(workspace.id, { name: nextName, restoreTabs: true });
+            if (id) {
+              await persistConfig();
+            }
+          },
+        },
+        {
+          label: 'Duplicate Workspace',
+          onClick: async () => {
+            const id = await duplicateWorkspace(workspace.id, {
+              name: getWorkspaceCopyName(allWorkspaceNames, workspace.name),
+              restoreTabs: true,
+            });
+            if (id) {
+              await persistConfig();
+            }
+          },
+        },
+        {
           label: 'Add Folder To Workspace',
           onClick: async () => {
             const selected = await open({ directory: true, multiple: false });
             if (!selected || Array.isArray(selected)) {
               return;
             }
+
+            const normalizedSelectedPath = normalizeWorkspacePath(selected);
+            const existingWorkspaceId = workspaceIdByRootPath.get(normalizedSelectedPath);
+            if (existingWorkspaceId === workspace.id) {
+              await showAlert('Folder Already In Workspace', 'That folder is already part of this workspace.', {
+                detail: selected,
+              });
+              return;
+            }
+            if (existingWorkspaceId) {
+              const owner = workspaceById.get(existingWorkspaceId);
+              await showAlert(
+                'Folder Already Open Elsewhere',
+                'Add the folder to its existing workspace, or remove it there before reusing it.',
+                {
+                  detail: owner ? `${selected}\n\nCurrent workspace: ${owner.name}` : selected,
+                  tone: 'warning',
+                },
+              );
+              return;
+            }
+
             addRootToWorkspace(workspace.id, selected);
             await persistConfig();
           },
         },
+        {
+          label: 'Roots',
+          children: rootItems,
+        },
       ];
-
-      for (const root of workspace.roots.filter((root) => root.role !== 'primary')) {
-        items.push({
-          label: `Set Primary: ${root.name}`,
-          onClick: async () => {
-            setPrimaryWorkspaceRoot(workspace.id, root.id);
-            await persistConfig();
-          },
-        });
-      }
 
       items.push(
         { separator: true },
@@ -279,7 +521,22 @@ export function WorkspaceSidebar() {
 
       showContextMenu(event.clientX, event.clientY, items);
     },
-    [addRootToWorkspace, moveWorkspace, persistConfig, pinWorkspace, removeWorkspace, renameWorkspace, setPrimaryWorkspaceRoot],
+    [
+      addRootToWorkspace,
+      allWorkspaceNames,
+      duplicateWorkspace,
+      moveWorkspace,
+      moveWorkspaceRoot,
+      persistConfig,
+      pinWorkspace,
+      removeRootFromWorkspace,
+      removeWorkspace,
+      renameWorkspace,
+      renameWorkspaceRoot,
+      setPrimaryWorkspaceRoot,
+      workspaceById,
+      workspaceIdByRootPath,
+    ],
   );
 
   const handleRecentContextMenu = useCallback(
@@ -417,23 +674,30 @@ export function WorkspaceSidebar() {
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 onKeyDown={async (event) => {
-                  if (event.key !== 'Enter') {
-                    return;
-                  }
-                  const first = quickSwitcherItems[0];
-                  if (!first) {
-                    return;
-                  }
-                  if (first.mode === 'open') {
-                    setActiveWorkspace(first.id);
-                  } else {
-                    const id = reopenRecentWorkspace(first.id);
-                    if (id) {
-                      await persistConfig();
+                  if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    if (quickSwitcherItems.length > 0) {
+                      setSelectedIndex((current) => (current + 1) % quickSwitcherItems.length);
                     }
+                    return;
                   }
-                  setSwitcherOpen(false);
-                  setQuery('');
+                  if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    if (quickSwitcherItems.length > 0) {
+                      setSelectedIndex((current) => (current - 1 + quickSwitcherItems.length) % quickSwitcherItems.length);
+                    }
+                    return;
+                  }
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    await activateQuickSwitcherItem(selectedIndex);
+                    return;
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setSwitcherOpen(false);
+                    setQuery('');
+                  }
                 }}
                 placeholder="Search workspace, root or path"
                 className="w-full bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
@@ -443,22 +707,19 @@ export function WorkspaceSidebar() {
               {quickSwitcherItems.length === 0 ? (
                 <div className="px-2.5 py-4 text-center text-xs text-[var(--text-muted)]">No matching workspace</div>
               ) : (
-                quickSwitcherItems.map((item) => (
+                quickSwitcherItems.map((item, index) => (
                   <button
                     key={`${item.mode}:${item.id}`}
                     type="button"
-                    className="flex w-full items-center justify-between rounded-[var(--radius-md)] px-2.5 py-2 text-left transition-colors hover:bg-[var(--border-subtle)]"
-                    onClick={async () => {
-                      if (item.mode === 'open') {
-                        setActiveWorkspace(item.id);
-                      } else {
-                        const id = reopenRecentWorkspace(item.id);
-                        if (id) {
-                          await persistConfig();
-                        }
-                      }
-                      setSwitcherOpen(false);
-                      setQuery('');
+                    data-selected={index === selectedIndex}
+                    className={`flex w-full items-center justify-between rounded-[var(--radius-md)] px-2.5 py-2 text-left transition-colors ${
+                      index === selectedIndex
+                        ? 'bg-[var(--accent-subtle)] text-[var(--text-primary)]'
+                        : 'hover:bg-[var(--border-subtle)]'
+                    }`}
+                    onMouseEnter={() => setSelectedIndex(index)}
+                    onClick={() => {
+                      void activateQuickSwitcherItem(index);
                     }}
                   >
                     <div className="min-w-0">
@@ -471,6 +732,9 @@ export function WorkspaceSidebar() {
                   </button>
                 ))
               )}
+            </div>
+            <div className="border-t border-[var(--border-subtle)] px-3 py-2 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+              Enter opens selected · Up/Down navigates · Esc closes
             </div>
           </div>
         </div>

@@ -97,6 +97,7 @@ export interface ShellConfig {
 export interface SavedPane {
   shellName: string;
   runCommand?: string;
+  runProfile?: RunProfile;
 }
 
 export type SavedSplitNode =
@@ -127,6 +128,13 @@ export interface CommandBlock {
   status: 'running' | 'completed' | 'success' | 'error' | 'interrupted';
 }
 
+export interface RunProfile {
+  savedCommand?: string;
+  lastRunAt?: number;
+  lastExitCode?: number;
+  usageScope?: string;
+}
+
 export interface TerminalSessionMeta {
   sessionId: string;
   ptyId: number;
@@ -137,11 +145,41 @@ export interface TerminalSessionMeta {
   title?: string;
   lastCommand?: string;
   lastExitCode?: number;
+  usageScope?: string;
+  runProfile?: RunProfile;
   commands: CommandBlock[];
   activeCommand?: CommandBlock;
   createdAt: number;
   updatedAt: number;
 }
+
+export interface TerminalSessionState extends TerminalSessionMeta {}
+
+export interface TerminalViewState {
+  viewId: string;
+  paneId: string;
+  tabId?: string;
+  workspaceId?: string;
+  sessionId: string;
+  isVisible: boolean;
+  isFocused: boolean;
+  cols?: number;
+  rows?: number;
+  mountedAt: number;
+  updatedAt: number;
+}
+
+export interface TerminalUiState {
+  runProfileInspectorPaneId: string | null;
+}
+
+export type TerminalOrchestratorAction =
+  | { type: 'open-session'; sessionId: string; ptyId: number }
+  | { type: 'restart-session'; sessionId: string; ptyId: number; previousPtyId?: number }
+  | { type: 'close-session'; sessionId: string; ptyId?: number }
+  | { type: 'write-input'; sessionId: string; bytes: number }
+  | { type: 'resize-session'; sessionId: string; cols: number; rows: number }
+  | { type: 'run-command'; sessionId: string; command: string };
 
 export interface WorkspaceState {
   id: string;
@@ -154,6 +192,7 @@ export interface PaneLayoutState {
   sessionId: string;
   shellName: string;
   runCommand?: string;
+  runProfile?: RunProfile;
   mode: SessionMode;
   ptyId: number;
 }
@@ -235,16 +274,19 @@ export interface FileEntry {
 }
 
 export interface PtyOutputPayload {
+  sessionId?: string;
   ptyId: number;
   data: string;
 }
 
 export interface PtyExitPayload {
+  sessionId?: string;
   ptyId: number;
   exitCode: number;
 }
 
 export interface PtyStatusChangePayload {
+  sessionId?: string;
   ptyId: number;
   status: PaneStatus;
 }
@@ -262,6 +304,7 @@ export interface PtySessionCreatedPayload {
 }
 
 export interface PtySessionPhasePayload {
+  sessionId?: string;
   ptyId: number;
   phase: SessionPhase;
   lastExitCode?: number;
@@ -269,6 +312,7 @@ export interface PtySessionPhasePayload {
 }
 
 export interface PtySessionCommandPayload {
+  sessionId?: string;
   ptyId: number;
   command: string;
   usageScope?: string;
@@ -276,6 +320,7 @@ export interface PtySessionCommandPayload {
 }
 
 export interface PtySessionCwdPayload {
+  sessionId?: string;
   ptyId: number;
   cwd: string;
   updatedAt: number;
@@ -372,3 +417,5 @@ export type UiDialog =
 
 export type ProjectConfig = LegacyProjectConfig;
 export type ProjectState = WorkspaceState;
+
+

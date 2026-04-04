@@ -37,7 +37,7 @@ function PaneActionButton({
     <button
       type="button"
       title={title}
-      className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
+      className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] transition-[background-color,color,transform,box-shadow] hover:bg-[color-mix(in_srgb,var(--bg-overlay)_72%,transparent)] hover:text-[var(--text-primary)] active:translate-y-px active:bg-[color-mix(in_srgb,var(--border-default)_78%,transparent)] active:text-[var(--text-primary)]"
       style={noDragStyle}
       onClick={onClick}
       onContextMenu={onContextMenu}
@@ -168,21 +168,22 @@ export function TerminalChrome({
 
       <SessionCommandTimeline session={session} />
 
-      {completionItems.length > 0 && (
+      {menuOpen && completionItems.length > 0 && (
         <div className="border-b border-[var(--border-subtle)] bg-[var(--bg-base)]/75 px-2 py-1 text-[10px] backdrop-blur-sm">
           <div className="flex items-center gap-2 text-[var(--text-muted)]">
             <span className="rounded bg-[var(--accent-subtle)] px-1.5 py-0.5 text-[var(--accent)]">
               Tab
             </span>
             <span className="truncate">
-              提示补全
-              {ghostText ? `：${completionItems[completionIndex]?.label}` : ''}
+              Completion menu
+              {ghostText ? ` - ${completionItems[completionIndex]?.label}` : ''}
             </span>
-            {menuOpen && (
-              <span className="rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[var(--text-secondary)]">
-                菜单已激活
-              </span>
-            )}
+            <span className="rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[var(--text-secondary)]">
+              Enter accept
+            </span>
+            <span className="rounded bg-[var(--bg-elevated)] px-1.5 py-0.5 text-[var(--text-secondary)]">
+              Shift+Tab prev
+            </span>
           </div>
           <div className="mt-1 flex flex-wrap gap-1.5">
             {completionItems.map((item, index) => (

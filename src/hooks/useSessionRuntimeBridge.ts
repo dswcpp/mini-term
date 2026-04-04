@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
+import { isTauriRuntime } from '../runtime/tauriRuntime';
 import {
   subscribePtyExit,
   subscribePtyOutputStream,
@@ -21,6 +22,7 @@ import type {
 } from '../types';
 
 export function useSessionRuntimeBridge() {
+  const tauriAvailable = isTauriRuntime();
   const updatePaneStatusByPty = useAppStore((state) => state.updatePaneStatusByPty);
   const updatePaneStatusesByPty = useAppStore((state) => state.updatePaneStatusesByPty);
   const upsertSession = useAppStore((state) => state.upsertSession);
@@ -32,6 +34,25 @@ export function useSessionRuntimeBridge() {
   const pendingStatusUpdatesRef = useRef(new Map<number, PaneStatus>());
   const lastPaneStatusRef = useRef(new Map<number, PaneStatus>());
   const statusFrameRef = useRef<number | null>(null);
+
+  const resolveActivePtyId = useCallback((payload: { ptyId: number; sessionId?: string }) => {
+    const state = useAppStore.getState();
+    const resolvedSessionId = payload.sessionId ?? state.sessionIdByPty.get(payload.ptyId);
+    if (!resolvedSessionId) {
+      return state.sessions.has(payload.ptyId) ? payload.ptyId : undefined;
+    }
+
+    const activePtyId = state.ptyBySessionId.get(resolvedSessionId);
+    if (activePtyId != null && activePtyId !== payload.ptyId) {
+      return undefined;
+    }
+
+    if (activePtyId != null) {
+      return activePtyId;
+    }
+
+    return state.sessions.has(payload.ptyId) ? payload.ptyId : undefined;
+  }, []);
 
   const flushPendingStatuses = useCallback(() => {
     statusFrameRef.current = null;
@@ -66,20 +87,34 @@ export function useSessionRuntimeBridge() {
   );
 
   useEffect(() => {
+    if (!tauriAvailable) {
+      return;
+    }
+
     const unsubs = [
       subscribePtyStatusChange((payload: PtyStatusChangePayload) => {
-        queuePaneStatus(payload.ptyId, payload.status as PaneStatus);
+        const activePtyId = resolveActivePtyId(payload);
+        if (activePtyId == null) {
+          return;
+        }
+
+        queuePaneStatus(activePtyId, payload.status as PaneStatus);
       }),
       subscribePtyExit((payload: PtyExitPayload) => {
-        const idleTimer = sessionIdleTimersRef.current.get(payload.ptyId);
+        const activePtyId = resolveActivePtyId(payload);
+        if (activePtyId == null) {
+          return;
+        }
+
+        const idleTimer = sessionIdleTimersRef.current.get(activePtyId);
         if (idleTimer) {
           clearTimeout(idleTimer);
-          sessionIdleTimersRef.current.delete(payload.ptyId);
+          sessionIdleTimersRef.current.delete(activePtyId);
         }
 
         if (payload.exitCode !== 0) {
-          lastPaneStatusRef.current.delete(payload.ptyId);
-          updatePaneStatusByPty(payload.ptyId, 'error');
+          lastPaneStatusRef.current.delete(activePtyId);
+          updatePaneStatusByPty(activePtyId, 'error');
         }
       }),
       subscribePtySessionCreated((payload: PtySessionCreatedPayload) => {
@@ -97,54 +132,74 @@ export function useSessionRuntimeBridge() {
         });
       }),
       subscribePtySessionCommandStarted((payload: PtySessionCommandPayload) => {
-        recordSessionCommand(payload.ptyId, payload.command, payload.updatedAt, payload.usageScope);
-      }),
-      subscribePtySessionCwdChanged((payload: PtySessionCwdPayload) => {
-        updateSessionCwd(payload.ptyId, payload.cwd, payload.updatedAt);
-      }),
-      subscribePtySessionPhaseChange((payload: PtySessionPhasePayload) => {
-        const idleTimer = sessionIdleTimersRef.current.get(payload.ptyId);
-        if (idleTimer && (payload.phase === 'running' || payload.phase === 'exited' || payload.phase === 'error')) {
-          clearTimeout(idleTimer);
-          sessionIdleTimersRef.current.delete(payload.ptyId);
-        }
-
-        if (payload.phase === 'exited') {
-          finishSessionCommand(payload.ptyId, payload.lastExitCode, payload.phase, payload.updatedAt);
+        const activePtyId = resolveActivePtyId(payload);
+        if (activePtyId == null) {
           return;
         }
 
-        updateSessionPhase(payload.ptyId, payload.phase, {
+        recordSessionCommand(activePtyId, payload.command, payload.updatedAt, payload.usageScope);
+      }),
+      subscribePtySessionCwdChanged((payload: PtySessionCwdPayload) => {
+        const activePtyId = resolveActivePtyId(payload);
+        if (activePtyId == null) {
+          return;
+        }
+
+        updateSessionCwd(activePtyId, payload.cwd, payload.updatedAt);
+      }),
+      subscribePtySessionPhaseChange((payload: PtySessionPhasePayload) => {
+        const activePtyId = resolveActivePtyId(payload);
+        if (activePtyId == null) {
+          return;
+        }
+
+        const idleTimer = sessionIdleTimersRef.current.get(activePtyId);
+        if (idleTimer && (payload.phase === 'running' || payload.phase === 'exited' || payload.phase === 'error')) {
+          clearTimeout(idleTimer);
+          sessionIdleTimersRef.current.delete(activePtyId);
+        }
+
+        if (payload.phase === 'exited') {
+          finishSessionCommand(activePtyId, payload.lastExitCode, payload.phase, payload.updatedAt);
+          return;
+        }
+
+        updateSessionPhase(activePtyId, payload.phase, {
           lastExitCode: payload.lastExitCode,
           updatedAt: payload.updatedAt,
         });
       }),
       subscribePtyOutputStream((payload: PtyOutputPayload) => {
-        const session = useAppStore.getState().sessions.get(payload.ptyId);
+        const activePtyId = resolveActivePtyId(payload);
+        if (activePtyId == null) {
+          return;
+        }
+
+        const session = useAppStore.getState().sessions.get(activePtyId);
         if (!session || session.phase === 'exited' || session.phase === 'error') {
           return;
         }
 
-        const existingTimer = sessionIdleTimersRef.current.get(payload.ptyId);
+        const existingTimer = sessionIdleTimersRef.current.get(activePtyId);
         if (existingTimer) {
           clearTimeout(existingTimer);
         }
 
         const timer = window.setTimeout(() => {
-          sessionIdleTimersRef.current.delete(payload.ptyId);
-          const current = useAppStore.getState().sessions.get(payload.ptyId);
+          sessionIdleTimersRef.current.delete(activePtyId);
+          const current = useAppStore.getState().sessions.get(activePtyId);
           if (!current || current.phase === 'exited' || current.phase === 'error') {
             return;
           }
 
           updateSessionPhase(
-            payload.ptyId,
+            activePtyId,
             current.lastCommand ? 'waiting-input' : 'ready',
             { updatedAt: Date.now() },
           );
         }, 220);
 
-        sessionIdleTimersRef.current.set(payload.ptyId, timer);
+        sessionIdleTimersRef.current.set(activePtyId, timer);
       }),
     ];
 
@@ -155,6 +210,8 @@ export function useSessionRuntimeBridge() {
     finishSessionCommand,
     queuePaneStatus,
     recordSessionCommand,
+    resolveActivePtyId,
+    tauriAvailable,
     updatePaneStatusByPty,
     updateSessionCwd,
     updateSessionPhase,

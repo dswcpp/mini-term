@@ -1,6 +1,22 @@
-import type { PaneState, SessionPhase, ShellKind, TerminalSessionMeta } from '../types';
+import type { PaneState, RunProfile, SessionPhase, ShellKind, TerminalSessionMeta } from '../types';
 
 export const getSessionIdForPty = (ptyId: number) => `session-${ptyId}`;
+
+export function normalizeRunProfile(runProfile?: RunProfile, runCommand?: string): RunProfile | undefined {
+  const savedCommand = runProfile?.savedCommand ?? runCommand?.trim();
+  if (!savedCommand && !runProfile?.lastRunAt && runProfile?.lastExitCode == null && !runProfile?.usageScope) {
+    return undefined;
+  }
+
+  return {
+    ...runProfile,
+    savedCommand: savedCommand || undefined,
+  };
+}
+
+export function getSavedRunCommand(runProfile?: RunProfile, runCommand?: string): string | undefined {
+  return normalizeRunProfile(runProfile, runCommand)?.savedCommand;
+}
 
 function inferShellKind(label: string): ShellKind {
   const normalized = label.toLowerCase();
@@ -18,12 +34,16 @@ export function createTerminalPane(
   paneId: string,
   mode: PaneState['mode'] = 'human',
   runCommand?: string,
+  runProfile?: RunProfile,
+  sessionId: string = getSessionIdForPty(ptyId),
 ): PaneState {
+  const nextRunProfile = normalizeRunProfile(runProfile, runCommand);
   return {
     id: paneId,
-    sessionId: getSessionIdForPty(ptyId),
+    sessionId,
     shellName,
-    runCommand,
+    runCommand: nextRunProfile?.savedCommand,
+    runProfile: nextRunProfile,
     status: 'idle',
     mode,
     phase: 'starting',
@@ -36,6 +56,7 @@ export function createTerminalSessionMeta(
   ptyId: number,
   cwd?: string,
   mode: TerminalSessionMeta['mode'] = 'human',
+  runProfile?: RunProfile,
 ): TerminalSessionMeta {
   const now = Date.now();
   return {
@@ -46,6 +67,7 @@ export function createTerminalSessionMeta(
     phase: 'starting',
     cwd,
     title: shellName,
+    runProfile: normalizeRunProfile(runProfile),
     createdAt: now,
     updatedAt: now,
     commands: [],

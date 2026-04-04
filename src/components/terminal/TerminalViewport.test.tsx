@@ -3,15 +3,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TerminalViewport } from './TerminalViewport';
 import type { TerminalThemeDefinition } from '../../theme';
 
-const invokeMock = vi.fn();
+const resizeTerminalSessionMock = vi.fn();
 const getOrCreateTerminalMock = vi.fn();
-
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: (...args: unknown[]) => invokeMock(...args),
-}));
 
 vi.mock('../../utils/terminalCache', () => ({
   getOrCreateTerminal: (...args: unknown[]) => getOrCreateTerminalMock(...args),
+}));
+
+vi.mock('../../runtime/terminalApi', () => ({
+  resizeTerminalSession: (...args: unknown[]) => resizeTerminalSessionMock(...args),
 }));
 
 class ResizeObserverMock {
@@ -60,6 +60,10 @@ describe('TerminalViewport', () => {
 
     const { rerender } = render(
       <TerminalViewport
+        workspaceId="workspace-7"
+        tabId="tab-7"
+        sessionId="session-7"
+        paneId="pane-7"
         ptyId={7}
         fontSize={14}
         terminalTheme={terminalTheme}
@@ -75,6 +79,10 @@ describe('TerminalViewport', () => {
 
     rerender(
       <TerminalViewport
+        workspaceId="workspace-7"
+        tabId="tab-7"
+        sessionId="session-7"
+        paneId="pane-7"
         ptyId={7}
         fontSize={14}
         terminalTheme={terminalTheme}
@@ -97,6 +105,10 @@ describe('TerminalViewport', () => {
 
     render(
       <TerminalViewport
+        workspaceId="workspace-9"
+        tabId="tab-9"
+        sessionId="session-9"
+        paneId="pane-9"
         ptyId={9}
         fontSize={14}
         terminalTheme={terminalTheme}

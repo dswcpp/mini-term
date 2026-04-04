@@ -29,6 +29,20 @@ describe('terminalCompletion parser', () => {
     expect(context.activeToken.valuePrefix).toBe('my fi');
   });
 
+  it('tracks single-quoted tokens without losing the active range', () => {
+    const context = createCompletionContext({
+      inputText: "cd 'my fo",
+      cursor: "cd 'my fo".length,
+      shellKind: 'bash',
+      cwd: '/workspace',
+    });
+
+    expect(context.mode).toBe('path');
+    expect(context.activeToken.leadingQuote).toBe("'");
+    expect(context.activeToken.openQuote).toBe("'");
+    expect(context.activeToken.start).toBe(3);
+  });
+
   it('keeps token boundaries when the cursor is in the middle of a token', () => {
     const parsed = parseCommandLine('git sttus --short', 'git st'.length, 'bash');
 

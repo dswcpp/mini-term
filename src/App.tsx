@@ -20,7 +20,6 @@ import {
   initExpandedDirs,
   flushExpandedDirsToConfig,
   flushCompletionUsageToConfig,
-  selectWorkspaces,
   selectThemeConfig,
 } from './store';
 import { TerminalArea } from './components/TerminalArea';
@@ -29,14 +28,16 @@ import { FileTree } from './components/FileTree';
 import { GitHistory } from './components/GitHistory';
 import { WorkspaceDialogHost } from './components/WorkspaceDialogHost';
 import { useSessionRuntimeBridge } from './hooks/useSessionRuntimeBridge';
+import { createFallbackAppConfig, isTauriRuntime } from './runtime/tauriRuntime';
 import { applyDocumentTheme, resolveTheme } from './theme';
 import { showConfirm } from './utils/messageBox';
 import { checkForUpdate, type ReleaseInfo } from './utils/updateChecker';
 import { getWorkspacePrimaryRootPath } from './utils/workspace';
 import type { AppConfig } from './types';
 
-const appWindow = getCurrentWindow();
 const isWindows = typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
+const tauriAvailable = isTauriRuntime();
+const appWindow = tauriAvailable ? getCurrentWindow() : null;
 const dragRegionStyle = { WebkitAppRegion: 'drag' } as CSSProperties;
 const noDragRegionStyle = { WebkitAppRegion: 'no-drag' } as CSSProperties;
 
@@ -66,6 +67,33 @@ function TitleBarButton({
 }
 
 export function App() {
+  return tauriAvailable ? <TauriApp /> : <BrowserPreview />;
+}
+
+function BrowserPreview() {
+  return (
+    <div className="flex h-full items-center justify-center bg-[var(--bg-base)] px-6 text-[var(--text-primary)]">
+      <div className="w-full max-w-[720px] rounded-2xl border border-[var(--border-strong)] bg-[var(--bg-surface)] p-8 shadow-[var(--app-shell-shadow-focused)]">
+        <div className="text-[11px] uppercase tracking-[0.2em] text-[var(--accent)]">Browser Preview</div>
+        <h1 className="mt-3 text-3xl font-semibold" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+          Mini-Term is loading in a web browser.
+        </h1>
+        <p className="mt-4 text-sm leading-6 text-[var(--text-secondary)]">
+          The full terminal workspace depends on Tauri window APIs, PTY commands, and native filesystem plugins.
+          In browser mode the app now renders this fallback screen instead of a blank page.
+        </p>
+        <div className="mt-6 rounded-xl border border-[var(--border-default)] bg-[var(--bg-terminal)] px-4 py-3 font-mono text-sm text-[var(--text-primary)]">
+          npm run tauri dev
+        </div>
+        <p className="mt-3 text-xs text-[var(--text-muted)]">
+          Use `npm run dev` only for lightweight front-end checks. Use `npm run tauri dev` for the actual desktop app.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function TauriApp() {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [isFocused, setIsFocused] = useState(true);
@@ -73,7 +101,7 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<ReleaseInfo | null>(null);
 
   const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
-  const workspaces = useAppStore(selectWorkspaces);
+  const workspaces = useAppStore((state) => state.config.workspaces);
   const themeConfig = useAppStore(selectThemeConfig);
   const layoutSizes = useAppStore((state) => state.config.layoutSizes);
   const middleColumnSizes = useAppStore((state) => state.config.middleColumnSizes);
@@ -87,16 +115,21 @@ export function App() {
   useSessionRuntimeBridge();
 
   useEffect(() => {
-    void invoke<AppConfig>('load_config').then((loadedConfig) => {
-      setConfig(loadedConfig);
+    const bootstrapConfig = async () => {
+      const loadedConfig = tauriAvailable
+        ? await invoke<AppConfig>('load_config')
+        : createFallbackAppConfig();
 
-      if (loadedConfig.uiFontSize) {
-        document.documentElement.style.fontSize = `${loadedConfig.uiFontSize}px`;
+      setConfig(loadedConfig);
+      const normalizedConfig = useAppStore.getState().config;
+
+      if (normalizedConfig.uiFontSize) {
+        document.documentElement.style.fontSize = `${normalizedConfig.uiFontSize}px`;
       }
 
       const { workspaceStates } = useAppStore.getState();
       const nextStates = new Map(workspaceStates);
-      for (const workspace of loadedConfig.workspaces) {
+      for (const workspace of normalizedConfig.workspaces) {
         if (!nextStates.has(workspace.id)) {
           nextStates.set(workspace.id, { id: workspace.id, tabs: [], activeTabId: '' });
         }
@@ -106,27 +139,39 @@ export function App() {
       }
 
       useAppStore.setState({
-        activeWorkspaceId: loadedConfig.lastWorkspaceId ?? loadedConfig.workspaces[0]?.id ?? null,
+        activeWorkspaceId: normalizedConfig.lastWorkspaceId ?? normalizedConfig.workspaces[0]?.id ?? null,
         ...buildWorkspaceStatePatch(nextStates),
       });
 
-      void Promise.all(
-        loadedConfig.workspaces
-          .filter((workspace) => workspace.savedLayout && workspace.savedLayout.tabs.length > 0)
-          .map((workspace) => {
-            const primaryRootPath = getWorkspacePrimaryRootPath(workspace);
-            if (!primaryRootPath) {
-              return Promise.resolve();
-            }
-            return restoreLayout(workspace.id, workspace.savedLayout!, primaryRootPath, loadedConfig);
-          }),
-      ).catch(console.error);
+      if (tauriAvailable) {
+        void Promise.all(
+          normalizedConfig.workspaces
+            .filter((workspace) => workspace.savedLayout && workspace.savedLayout.tabs.length > 0)
+            .map((workspace) => {
+              const primaryRootPath = getWorkspacePrimaryRootPath(workspace);
+              if (!primaryRootPath) {
+                return Promise.resolve();
+              }
+              return restoreLayout(workspace.id, workspace.savedLayout!, primaryRootPath, normalizedConfig);
+            }),
+        ).catch(console.error);
+      }
 
+      setConfigLoaded(true);
+    };
+
+    void bootstrapConfig().catch((error) => {
+      console.error('Failed to bootstrap app config', error);
+      setConfig(createFallbackAppConfig());
       setConfigLoaded(true);
     });
   }, [setConfig]);
 
   useEffect(() => {
+    if (!tauriAvailable) {
+      return;
+    }
+
     void getVersion()
       .then((version) => {
         setCurrentVersion(version);
@@ -155,7 +200,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unlistenPromise = appWindow.onCloseRequested(async (event) => {
+    if (!tauriAvailable) {
+      return;
+    }
+
+    const currentWindow = appWindow;
+    if (!currentWindow) {
+      return;
+    }
+
+    const unlistenPromise = currentWindow.onCloseRequested(async (event) => {
       event.preventDefault();
 
       const confirmed = await showConfirm('关闭确认', '确定要关闭 Mini-Term 吗？', {
@@ -175,7 +229,7 @@ export function App() {
       }
       flushCompletionUsageToConfig();
 
-      void appWindow.destroy();
+      void currentWindow.destroy();
     });
 
     return () => {
@@ -200,7 +254,7 @@ export function App() {
         const currentConfig = useAppStore.getState().config;
         const nextConfig = { ...currentConfig, layoutSizes: sizes };
         setConfig(nextConfig);
-        void invoke('save_config', { config: nextConfig });
+        void invoke('save_config', { config: useAppStore.getState().config });
       }, 500);
     },
     [setConfig],
@@ -214,26 +268,35 @@ export function App() {
         const currentConfig = useAppStore.getState().config;
         const nextConfig = { ...currentConfig, middleColumnSizes: sizes };
         setConfig(nextConfig);
-        void invoke('save_config', { config: nextConfig });
+        void invoke('save_config', { config: useAppStore.getState().config });
       }, 500);
     },
     [setConfig],
   );
 
   useEffect(() => {
+    if (!tauriAvailable) {
+      return;
+    }
+
+    const currentWindow = appWindow;
+    if (!currentWindow) {
+      return;
+    }
+
     let disposed = false;
     let unlistenResize: (() => void) | undefined;
     let unlistenFocus: (() => void) | undefined;
 
     const syncMaximizedState = async () => {
-      const maximized = await appWindow.isMaximized();
+      const maximized = await currentWindow.isMaximized();
       if (!disposed) {
         setIsMaximized(maximized);
       }
     };
 
     const syncFocusedState = async () => {
-      const focused = await appWindow.isFocused();
+      const focused = await currentWindow.isFocused();
       if (!disposed) {
         setIsFocused(focused);
       }
@@ -242,7 +305,7 @@ export function App() {
     void syncMaximizedState();
     void syncFocusedState();
 
-    void appWindow
+    void currentWindow
       .onResized(() => {
         void syncMaximizedState();
       })
@@ -255,7 +318,7 @@ export function App() {
       })
       .catch(console.error);
 
-    void appWindow
+    void currentWindow
       .onFocusChanged(({ payload }) => {
         if (!disposed) {
           setIsFocused(payload);
@@ -282,7 +345,12 @@ export function App() {
   }, [themeConfig.preset, themeConfig.windowEffect]);
 
   useEffect(() => {
-    if (!isWindows) {
+    if (!tauriAvailable || !isWindows) {
+      return;
+    }
+
+    const currentWindow = appWindow;
+    if (!currentWindow) {
       return;
     }
 
@@ -294,8 +362,8 @@ export function App() {
 
     const applyWindowMaterial = async () => {
       if (resolvedTheme.windowEffect === 'none') {
-        await appWindow.clearEffects();
-        await appWindow.setShadow(true);
+        await currentWindow.clearEffects();
+        await currentWindow.setShadow(true);
         return;
       }
 
@@ -311,11 +379,11 @@ export function App() {
 
       for (const effects of effectCandidates) {
         try {
-          await appWindow.setEffects({
+          await currentWindow.setEffects({
             effects,
             color: effects[0] === Effect.Acrylic ? [24, 22, 20, 180] : undefined,
           });
-          await appWindow.setShadow(true);
+          await currentWindow.setShadow(true);
           return;
         } catch {
           // Try the next effect supported by the current Windows build.
@@ -327,10 +395,20 @@ export function App() {
   }, [themeConfig.preset, themeConfig.windowEffect]);
 
   const handleWindowMinimize = useCallback(() => {
-    void appWindow.minimize();
+    if (!tauriAvailable) {
+      return;
+    }
+    void appWindow?.minimize();
   }, []);
 
   const handleWindowToggleMaximize = useCallback(() => {
+    if (!tauriAvailable) {
+      return;
+    }
+    if (!appWindow) {
+      return;
+    }
+
     void appWindow
       .toggleMaximize()
       .then(async () => {
@@ -340,12 +418,23 @@ export function App() {
   }, []);
 
   const handleWindowClose = useCallback(() => {
-    void appWindow.close();
+    if (!tauriAvailable) {
+      return;
+    }
+    void appWindow?.close();
   }, []);
 
   const handleTitleBarDoubleClick = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!tauriAvailable) {
+      return;
+    }
+
     const target = event.target as HTMLElement;
     if (target.closest('.no-drag-region')) {
+      return;
+    }
+
+    if (!appWindow) {
       return;
     }
 
@@ -358,7 +447,7 @@ export function App() {
   }, []);
 
   const handleTitleBarMouseDown = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
-    if (!isWindows || event.button !== 0) {
+    if (!tauriAvailable || !isWindows || event.button !== 0) {
       return;
     }
 
@@ -367,7 +456,7 @@ export function App() {
       return;
     }
 
-    void appWindow.startDragging().catch(() => {});
+    void appWindow?.startDragging().catch(() => {});
   }, []);
 
   return (

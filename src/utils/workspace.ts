@@ -29,19 +29,11 @@ export function createWorkspaceRoot(path: string, id: string, role: WorkspaceRoo
 }
 
 export function ensureSinglePrimaryRoot(roots: WorkspaceRootConfig[]) {
-  let primarySeen = false;
-  return roots.map((root, index) => {
-    const shouldBePrimary = root.role === 'primary' && !primarySeen;
-    if (shouldBePrimary) {
-      primarySeen = true;
-      return root;
-    }
-    if (!primarySeen && index === 0) {
-      primarySeen = true;
-      return { ...root, role: 'primary' };
-    }
-    return { ...root, role: 'member' };
-  });
+  const primaryRootId = roots.find((root) => root.role === 'primary')?.id ?? roots[0]?.id;
+  return roots.map<WorkspaceRootConfig>((root) => ({
+    ...root,
+    role: root.id === primaryRootId ? 'primary' : 'member',
+  }));
 }
 
 export function getWorkspacePrimaryRoot(workspace: WorkspaceConfig | undefined | null) {
@@ -69,6 +61,22 @@ export function getWorkspaceDisplayName(paths: string[], explicitName?: string) 
   }
 
   return `${getPathBaseName(paths[0])} +${paths.length - 1}`;
+}
+
+export function getWorkspaceCopyName(existingNames: string[], baseName: string) {
+  const normalizedNames = new Set(existingNames.map((name) => name.trim()).filter(Boolean));
+  const trimmedBaseName = baseName.trim() || 'Workspace';
+  const firstCandidate = `${trimmedBaseName} Copy`;
+  if (!normalizedNames.has(firstCandidate)) {
+    return firstCandidate;
+  }
+
+  let index = 2;
+  while (normalizedNames.has(`${trimmedBaseName} Copy ${index}`)) {
+    index += 1;
+  }
+
+  return `${trimmedBaseName} Copy ${index}`;
 }
 
 export function createWorkspaceConfig(args: {

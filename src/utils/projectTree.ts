@@ -198,7 +198,8 @@ export type OrderedItem =
 
 /** 递归展平树为带 depth 和 parentGroupId 的有序列表 */
 export function getOrderedTree(config: AppConfig): OrderedItem[] {
-  const projectMap = new Map(config.projects.map((p) => [p.id, p]));
+  const projects = config.projects ?? [];
+  const projectMap = new Map(projects.map((p) => [p.id, p]));
   const result: OrderedItem[] = [];
 
   function walk(items: ProjectTreeItem[], depth: number, parentGroupId: string | null) {
@@ -232,7 +233,7 @@ export function getOrderedTree(config: AppConfig): OrderedItem[] {
     }
   }
   collectIds(tree);
-  for (const p of config.projects) {
+  for (const p of projects) {
     if (!inTree.has(p.id)) {
       result.push({ type: 'project', project: p, depth: 0, parentGroupId: null });
     }
@@ -310,7 +311,8 @@ export function findGroupInTree(tree: ProjectTreeItem[], groupId: string): Proje
 
 /** 从旧配置格式迁移到 projectTree（前端侧，作为 Rust 迁移的备份） */
 export function migrateToTree(config: AppConfig): ProjectTreeItem[] {
-  const { projectGroups, projectOrdering, projects } = config;
+  const { projectGroups, projectOrdering } = config;
+  const projects = config.projects ?? [];
   if (!projectOrdering || projectOrdering.length === 0) {
     return projects.map((p) => p.id);
   }

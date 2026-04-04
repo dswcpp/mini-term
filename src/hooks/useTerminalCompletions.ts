@@ -43,8 +43,7 @@ async function readDirectory(projectPath: string, directoryPath: string) {
     return cached.entries;
   }
 
-  const entries = await invoke<FileEntry[]>('list_directory', {
-    projectRoot: projectPath,
+  const entries = await invoke<FileEntry[]>('complete_path_entries', {
     path: directoryPath,
   });
   directoryCache.set(cacheKey, { expiresAt: now + DIRECTORY_CACHE_TTL, entries });
@@ -102,31 +101,43 @@ function toTerminalItems(result: CompletionResult): TerminalCompletionItem[] {
   }));
 }
 
-export function useTerminalCompletions(ptyId: number, projectPath: string, enabled = true) {
-  const session = useAppStore((state) => (enabled ? state.sessions.get(ptyId) : undefined));
+export function useTerminalCompletions(terminalId: number | string, projectPath: string, enabled = true) {
+  const session = useAppStore((state) => {
+    if (!enabled) {
+      return undefined;
+    }
+
+    return typeof terminalId === 'string'
+      ? state.terminalSessions.get(terminalId)
+      : state.sessions.get(terminalId);
+  });
   const completionUsage = useAppStore((state) => (enabled ? state.config.completionUsage : undefined));
-  const [inputState, setInputState] = useState<TerminalInputState>(() => getTerminalInputState(ptyId));
+  const [inputState, setInputState] = useState<TerminalInputState>(() => getTerminalInputState(terminalId));
   const [items, setItems] = useState<TerminalCompletionItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [commonPrefixEdit, setCommonPrefixEdit] = useState<CompletionEdit | undefined>(undefined);
   const requestIdRef = useRef(0);
   const selectedIdRef = useRef<string | undefined>(undefined);
+  const trustedPrompt =
+    enabled
+    && Boolean(session)
+    && (session?.phase === 'ready' || session?.phase === 'waiting-input');
 
   useEffect(() => {
     if (!enabled) {
-      setInputState(getTerminalInputState(ptyId));
+      setInputState(getTerminalInputState(terminalId));
       return;
     }
 
-    return subscribeTerminalInputState(ptyId, setInputState);
-  }, [enabled, ptyId]);
+    return subscribeTerminalInputState(terminalId, setInputState);
+  }, [enabled, terminalId]);
 
   useEffect(() => {
     setMenuOpen(false);
     setSelectedIndex(0);
     selectedIdRef.current = undefined;
-  }, [enabled, inputState.version, ptyId]);
+  }, [enabled, inputState.version, session?.phase, terminalId]);
 
   const runtime = useMemo(
     () => ({
@@ -149,7 +160,7 @@ export function useTerminalCompletions(ptyId: number, projectPath: string, enabl
 
     const timer = window.setTimeout(() => {
       void (async () => {
-        if (!enabled) {
+        if (!trustedPrompt) {
           if (!disposed) {
             setItems([]);
             setCommonPrefixEdit(undefined);
@@ -167,50 +178,58 @@ export function useTerminalCompletions(ptyId: number, projectPath: string, enabl
           return;
         }
 
-        const currentText = inputState.text;
-        const currentCursor = inputState.cursor;
-        if (!currentText.trim()) {
-          if (!disposed) {
+        try {
+          const currentText = inputState.text;
+          const currentCursor = inputState.cursor;
+          if (!currentText.trim()) {
+            if (!disposed) {
+              setItems([]);
+              setCommonPrefixEdit(undefined);
+              setSelectedIndex(0);
+            }
+            return;
+          }
+
+          const context = createCompletionContext({
+            inputText: currentText,
+            cursor: currentCursor,
+            shellKind: session?.shellKind ?? 'unknown',
+            cwd: session?.cwd ?? projectPath,
+            unsafe: inputState.unsafe,
+          });
+
+          if (context.mode === 'unknown') {
+            if (!disposed) {
+              setItems([]);
+              setCommonPrefixEdit(undefined);
+              setSelectedIndex(0);
+            }
+            return;
+          }
+
+          const candidates = await collectCompletionCandidates(context, runtime);
+          const result = buildCompletionResult(context, candidates);
+
+          if (disposed || requestIdRef.current !== requestId) {
+            return;
+          }
+
+          const nextItems = toTerminalItems(result);
+          setCommonPrefixEdit(result.commonPrefixEdit);
+          setItems(nextItems);
+          setSelectedIndex((current) => {
+            const currentId = selectedIdRef.current;
+            if (!currentId) return 0;
+            const existingIndex = nextItems.findIndex((item) => item.id === currentId);
+            return existingIndex >= 0 ? existingIndex : Math.min(current, Math.max(nextItems.length - 1, 0));
+          });
+        } catch {
+          if (!disposed && requestIdRef.current === requestId) {
             setItems([]);
             setCommonPrefixEdit(undefined);
             setSelectedIndex(0);
           }
-          return;
         }
-
-        const context = createCompletionContext({
-          inputText: currentText,
-          cursor: currentCursor,
-          shellKind: session?.shellKind ?? 'unknown',
-          cwd: session?.cwd ?? projectPath,
-          unsafe: inputState.unsafe,
-        });
-
-        if (context.mode === 'unknown') {
-          if (!disposed) {
-            setItems([]);
-            setCommonPrefixEdit(undefined);
-            setSelectedIndex(0);
-          }
-          return;
-        }
-
-        const candidates = await collectCompletionCandidates(context, runtime);
-        const result = buildCompletionResult(context, candidates);
-
-        if (disposed || requestIdRef.current !== requestId) {
-          return;
-        }
-
-        const nextItems = toTerminalItems(result);
-        setCommonPrefixEdit(result.commonPrefixEdit);
-        setItems(nextItems);
-        setSelectedIndex((current) => {
-          const currentId = selectedIdRef.current;
-          if (!currentId) return 0;
-          const existingIndex = nextItems.findIndex((item) => item.id === currentId);
-          return existingIndex >= 0 ? existingIndex : Math.min(current, Math.max(nextItems.length - 1, 0));
-        });
       })();
     }, 80);
 
@@ -218,19 +237,19 @@ export function useTerminalCompletions(ptyId: number, projectPath: string, enabl
       disposed = true;
       window.clearTimeout(timer);
     };
-  }, [enabled, inputState, projectPath, runtime, session?.cwd, session?.shellKind]);
+  }, [inputState, projectPath, runtime, session?.cwd, session?.shellKind, trustedPrompt]);
 
-  const visibleItems = enabled ? items : [];
+  const visibleItems = trustedPrompt ? items : [];
   const selectedItem = visibleItems[selectedIndex] ?? visibleItems[0];
 
   const acceptEdit = useCallback(
     async (edit?: CompletionEdit) => {
       if (!edit) return false;
-      if (isSameCompletionEdit(getTerminalInputState(ptyId), edit)) {
+      if (isSameCompletionEdit(getTerminalInputState(terminalId), edit)) {
         setMenuOpen(false);
         return true;
       }
-      const handled = await applyCompletionEdit(ptyId, edit);
+      const handled = await applyCompletionEdit(terminalId, edit);
       if (handled) {
         setMenuOpen(false);
         setSelectedIndex(0);
@@ -238,7 +257,7 @@ export function useTerminalCompletions(ptyId: number, projectPath: string, enabl
       }
       return handled;
     },
-    [ptyId],
+    [terminalId],
   );
 
   const acceptItem = useCallback(
@@ -272,8 +291,26 @@ export function useTerminalCompletions(ptyId: number, projectPath: string, enabl
   const closeMenu = useCallback(() => {
     if (!menuOpen) return false;
     setMenuOpen(false);
+    selectedIdRef.current = undefined;
     return true;
   }, [menuOpen]);
+
+  const acceptSelected = useCallback(async () => acceptItem(selectedItem), [acceptItem, selectedItem]);
+
+  const canHandleTab = useCallback(
+    (shiftKey: boolean) => {
+      if (!trustedPrompt || visibleItems.length === 0) {
+        return false;
+      }
+
+      if (shiftKey) {
+        return menuOpen && visibleItems.length > 1;
+      }
+
+      return true;
+    },
+    [menuOpen, trustedPrompt, visibleItems.length],
+  );
 
   const handleTab = useCallback(
     async (shiftKey: boolean) => {
@@ -295,13 +332,18 @@ export function useTerminalCompletions(ptyId: number, projectPath: string, enabl
 
       if (!menuOpen) {
         setMenuOpen(true);
+        setSelectedIndex(0);
         selectedIdRef.current = selectedItem?.id;
         return true;
       }
 
-      return acceptItem(selectedItem);
+      if (visibleItems.length === 1) {
+        return acceptItem(visibleItems[0]);
+      }
+
+      return selectNext();
     },
-    [acceptEdit, acceptItem, commonPrefixEdit, menuOpen, selectPrevious, selectedItem, visibleItems],
+    [acceptEdit, acceptItem, commonPrefixEdit, menuOpen, selectNext, selectPrevious, selectedItem, visibleItems],
   );
 
   const ghostText = selectedItem?.label ?? '';
@@ -313,7 +355,9 @@ export function useTerminalCompletions(ptyId: number, projectPath: string, enabl
     menuOpen,
     ghostText,
     acceptItem,
+    acceptSelected,
     handleTab,
+    canHandleTab,
     selectNext,
     selectPrevious,
     closeMenu,

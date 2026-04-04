@@ -8,13 +8,17 @@ import {
   type DragEvent,
   type MouseEvent,
 } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { useAppStore, selectPaneRuntimeByPty, selectSessionByPty } from '../../store';
+import {
+  runManagedTerminalCommand,
+  writeManagedTerminalInput,
+} from '../../runtime/terminalOrchestrator';
+import { isTauriRuntime } from '../../runtime/tauriRuntime';
+import { useAppStore, selectPaneRuntimeBySessionId, selectSessionById } from '../../store';
 import { useTerminalCompletions } from '../../hooks/useTerminalCompletions';
 import { resolveTheme } from '../../theme';
-import type { PaneStatus } from '../../types';
+import type { PaneStatus, RunProfile } from '../../types';
 import { getDraggingTabId } from '../../utils/dragState';
 import { showContextMenu } from '../../utils/contextMenu';
 import { showPrompt } from '../../utils/prompt';
@@ -26,9 +30,10 @@ import {
 } from '../../utils/terminalCache';
 import { buildTerminalContextMenu } from './terminalContextMenu';
 import { TerminalChrome, type TerminalDragKind, type TerminalDropZone } from './TerminalChrome';
+import { RunProfileInspector } from './RunProfileInspector';
 import { TerminalViewport } from './TerminalViewport';
 
-const appWindow = getCurrentWindow();
+const appWindow = isTauriRuntime() ? getCurrentWindow() : null;
 
 function getDropZone(rect: DOMRect, clientX: number, clientY: number): TerminalDropZone {
   const x = (clientX - rect.left) / rect.width;
@@ -42,12 +47,15 @@ function getDropZone(rect: DOMRect, clientX: number, clientY: number): TerminalD
 }
 
 interface TerminalControllerProps {
+  workspaceId: string;
   tabId: string;
   projectPath: string;
+  sessionId: string;
   ptyId: number;
   paneId?: string;
   shellName?: string;
   runCommand?: string;
+  runProfile?: RunProfile;
   status?: PaneStatus;
   isActive: boolean;
   isVisible: boolean;
@@ -68,12 +76,15 @@ interface TerminalControllerProps {
 }
 
 export const TerminalController = memo(function TerminalController({
+  workspaceId,
   tabId,
   projectPath,
+  sessionId,
   ptyId,
   paneId,
   shellName,
   runCommand,
+  runProfile,
   status,
   isActive,
   isVisible,
@@ -93,21 +104,24 @@ export const TerminalController = memo(function TerminalController({
   const [notifyOnCompletion, setNotifyOnCompletion] = useState(false);
   const completionEnabled = isActive && isVisible;
   const setPaneRunCommand = useAppStore((state) => state.setPaneRunCommand);
-  const session = useAppStore(selectSessionByPty(ptyId, isVisible));
-  const paneRuntime = useAppStore(selectPaneRuntimeByPty(ptyId, isVisible));
+  const openRunProfileInspector = useAppStore((state) => state.openRunProfileInspector);
+  const closeRunProfileInspector = useAppStore((state) => state.closeRunProfileInspector);
+  const runProfileInspectorPaneId = useAppStore((state) => state.terminalUi.runProfileInspectorPaneId);
+  const session = useAppStore(selectSessionById(sessionId, isVisible));
+  const paneRuntime = useAppStore(selectPaneRuntimeBySessionId(sessionId, isVisible));
   const terminalFontSize = useAppStore((state) => state.config.terminalFontSize);
   const themePreset = useAppStore((state) => state.config.theme.preset);
   const themeWindowEffect = useAppStore((state) => state.config.theme.windowEffect);
-  const completions = useTerminalCompletions(ptyId, projectPath, completionEnabled);
+  const completions = useTerminalCompletions(sessionId, projectPath, completionEnabled);
   const {
     items: completionItems,
     selectedIndex: completionIndex,
     menuOpen,
     ghostText,
     acceptItem,
+    acceptSelected,
     handleTab,
-    selectNext,
-    selectPrevious,
+    canHandleTab,
     closeMenu,
     setSelectedIndex,
   } = completions;
@@ -116,13 +130,24 @@ export const TerminalController = memo(function TerminalController({
     [themePreset, themeWindowEffect],
   );
   const paneStatus = paneRuntime?.status ?? status;
+  const effectiveRunProfile = useMemo(
+    () => ({
+      ...session?.runProfile,
+      ...runProfile,
+      savedCommand: runProfile?.savedCommand ?? session?.runProfile?.savedCommand ?? runCommand?.trim(),
+    }),
+    [runCommand, runProfile, session?.runProfile],
+  );
+  const savedRunCommand = effectiveRunProfile.savedCommand;
+  const isRunProfileInspectorOpen = Boolean(paneId && runProfileInspectorPaneId === paneId);
 
   const focusTerminal = useCallback(() => {
-    getCachedTerminal(ptyId)?.term.focus();
-  }, [ptyId]);
+    getCachedTerminal(sessionId)?.term.focus();
+  }, [sessionId]);
 
   useEffect(() => {
     if (
+      appWindow &&
       notifyOnCompletion &&
       previousStatusRef.current === 'ai-working' &&
       status &&
@@ -182,39 +207,39 @@ export const TerminalController = memo(function TerminalController({
 
       const filePath = event.dataTransfer.getData('text/plain').trim();
       if (filePath) {
-        mirrorTerminalInput(ptyId, filePath);
-        void invoke('write_pty', { ptyId, data: filePath });
+        mirrorTerminalInput(sessionId, filePath);
+        void writeManagedTerminalInput(sessionId, filePath);
         focusTerminal();
       }
     },
-    [clearDragState, dragKind, focusTerminal, onTabDrop, paneId, ptyId],
+    [clearDragState, dragKind, focusTerminal, onTabDrop, paneId, sessionId],
   );
 
   const handleCopy = useCallback(() => {
-    const selection = getCachedTerminal(ptyId)?.term.getSelection();
+    const selection = getCachedTerminal(sessionId)?.term.getSelection();
     if (selection) {
       void writeText(selection);
     }
     focusTerminal();
-  }, [focusTerminal, ptyId]);
+  }, [focusTerminal, sessionId]);
 
   const handlePaste = useCallback(() => {
     void readText().then((text) => {
       if (text) {
-        mirrorTerminalInput(ptyId, text);
-        void invoke('write_pty', { ptyId, data: text });
+        mirrorTerminalInput(sessionId, text);
+        void writeManagedTerminalInput(sessionId, text);
       }
       focusTerminal();
     });
-  }, [focusTerminal, ptyId]);
+  }, [focusTerminal, sessionId]);
 
   const handleClearScreen = useCallback(() => {
-    getCachedTerminal(ptyId)?.term.clear();
+    getCachedTerminal(sessionId)?.term.clear();
     focusTerminal();
-  }, [focusTerminal, ptyId]);
+  }, [focusTerminal, sessionId]);
 
   const handleRunCommand = useCallback(async () => {
-    const currentCommand = runCommand?.trim();
+    const currentCommand = savedRunCommand?.trim();
     if (!currentCommand) {
       const nextCommand = await showPrompt('设置运行命令', '输入要执行的命令', session?.lastCommand ?? '');
       if (nextCommand === null || !paneId) {
@@ -229,22 +254,23 @@ export const TerminalController = memo(function TerminalController({
       }
 
       setPaneRunCommand(tabId, paneId, updated);
-      const suffix = updated.endsWith('\n') || updated.endsWith('\r') ? '' : '\r';
-      mirrorTerminalInput(ptyId, `${updated}${suffix}`);
-      await invoke('write_pty', { ptyId, data: `${updated}${suffix}` });
+      mirrorTerminalInput(sessionId, updated.endsWith('\n') || updated.endsWith('\r') ? updated : `${updated}\r`);
+      await runManagedTerminalCommand(sessionId, updated);
       focusTerminal();
       return;
     }
 
-    const suffix = currentCommand.endsWith('\n') || currentCommand.endsWith('\r') ? '' : '\r';
-    mirrorTerminalInput(ptyId, `${currentCommand}${suffix}`);
-    await invoke('write_pty', { ptyId, data: `${currentCommand}${suffix}` });
+    mirrorTerminalInput(
+      sessionId,
+      currentCommand.endsWith('\n') || currentCommand.endsWith('\r') ? currentCommand : `${currentCommand}\r`,
+    );
+    await runManagedTerminalCommand(sessionId, currentCommand);
     focusTerminal();
-  }, [focusTerminal, paneId, ptyId, runCommand, session?.lastCommand, setPaneRunCommand, tabId]);
+  }, [focusTerminal, paneId, savedRunCommand, session?.lastCommand, sessionId, setPaneRunCommand, tabId]);
 
   const handleEditRunCommand = useCallback(async () => {
     if (!paneId) return;
-    const nextCommand = await showPrompt('编辑运行命令', '输入要执行的命令', runCommand ?? '');
+    const nextCommand = await showPrompt('编辑运行命令', '输入要执行的命令', savedRunCommand ?? '');
     if (nextCommand === null) {
       return;
     }
@@ -256,26 +282,23 @@ export const TerminalController = memo(function TerminalController({
     }
 
     setPaneRunCommand(tabId, paneId, updated);
-  }, [paneId, runCommand, setPaneRunCommand, tabId]);
+  }, [paneId, savedRunCommand, setPaneRunCommand, tabId]);
 
   const handleViewRunCommand = useCallback(async () => {
-    if (!runCommand) return;
-    await showPrompt('查看运行命令', '仅查看，不会自动执行', runCommand, {
-      hint: '这是只读内容，不会自动执行。',
-      confirmLabel: '关闭',
-      readOnly: true,
-    });
-  }, [runCommand]);
+    if (!savedRunCommand || !paneId) return;
+    openRunProfileInspector(paneId);
+  }, [openRunProfileInspector, paneId, savedRunCommand]);
 
   const handleDeleteRunCommand = useCallback(() => {
     if (!paneId) return;
     setPaneRunCommand(tabId, paneId, undefined);
-  }, [paneId, setPaneRunCommand, tabId]);
+    closeRunProfileInspector();
+  }, [closeRunProfileInspector, paneId, setPaneRunCommand, tabId]);
 
   const openTerminalContextMenu = useCallback(
     async (clientX: number, clientY: number) => {
-      const isWindowMaximized = await appWindow.isMaximized().catch(() => false);
-      const hasSelection = Boolean(getCachedTerminal(ptyId)?.term.getSelection());
+      const isWindowMaximized = appWindow ? await appWindow.isMaximized().catch(() => false) : false;
+      const hasSelection = Boolean(getCachedTerminal(sessionId)?.term.getSelection());
       const canNotifyOnCompletion = status === 'ai-working';
 
       showContextMenu(
@@ -312,13 +335,19 @@ export const TerminalController = memo(function TerminalController({
           onRenameTab: () => onRenameTab?.(),
           onCloseTab: () => onCloseTab?.(),
           onWindowMinimize: () => {
-            void appWindow.minimize();
+            if (appWindow) {
+              void appWindow.minimize();
+            }
           },
           onWindowToggleMaximize: () => {
-            void appWindow.toggleMaximize();
+            if (appWindow) {
+              void appWindow.toggleMaximize();
+            }
           },
           onWindowClose: () => {
-            void appWindow.close();
+            if (appWindow) {
+              void appWindow.close();
+            }
           },
           onOpenSettings: () => onOpenSettings?.(),
         }),
@@ -338,7 +367,7 @@ export const TerminalController = memo(function TerminalController({
       onRestart,
       onSplit,
       paneId,
-      ptyId,
+      sessionId,
       status,
     ],
   );
@@ -357,7 +386,7 @@ export const TerminalController = memo(function TerminalController({
       return;
     }
 
-    const unregister = registerTerminalKeyHandler(ptyId, (event) => {
+    const unregister = registerTerminalKeyHandler(sessionId, (event) => {
       if (event.ctrlKey || event.metaKey || event.altKey) {
         return true;
       }
@@ -368,26 +397,20 @@ export const TerminalController = memo(function TerminalController({
         return false;
       }
 
+      if (event.key === 'Enter' && menuOpen) {
+        event.preventDefault();
+        void acceptSelected();
+        return false;
+      }
+
       if (event.key === 'Tab') {
-        event.preventDefault();
-        void handleTab(event.shiftKey).then((handled) => {
-          if (!handled) {
-            markTerminalInputUnsafe(ptyId);
-            void invoke('write_pty', { ptyId, data: '\t' });
-          }
-        });
-        return false;
-      }
+        if (!canHandleTab(event.shiftKey)) {
+          markTerminalInputUnsafe(sessionId);
+          return true;
+        }
 
-      if (event.key === 'ArrowDown' && menuOpen && completionItems.length > 1) {
         event.preventDefault();
-        selectNext();
-        return false;
-      }
-
-      if (event.key === 'ArrowUp' && menuOpen && completionItems.length > 1) {
-        event.preventDefault();
-        selectPrevious();
+        void handleTab(event.shiftKey);
         return false;
       }
 
@@ -395,7 +418,7 @@ export const TerminalController = memo(function TerminalController({
     });
 
     return unregister;
-  }, [closeMenu, completionEnabled, completionItems.length, handleTab, menuOpen, ptyId, selectNext, selectPrevious]);
+  }, [acceptSelected, canHandleTab, closeMenu, completionEnabled, handleTab, menuOpen, sessionId]);
 
   const handleContextMenu = useCallback(
     (event: MouseEvent<HTMLDivElement>) => {
@@ -427,7 +450,7 @@ export const TerminalController = memo(function TerminalController({
         },
         {
           label: '查看',
-          disabled: !runCommand,
+          disabled: !savedRunCommand,
           onClick: () => {
             void handleViewRunCommand();
           },
@@ -435,12 +458,12 @@ export const TerminalController = memo(function TerminalController({
         {
           label: '删除',
           danger: true,
-          disabled: !runCommand,
+          disabled: !savedRunCommand,
           onClick: () => handleDeleteRunCommand(),
         },
       ]);
     },
-    [handleDeleteRunCommand, handleEditRunCommand, handleViewRunCommand, paneId, runCommand],
+    [handleDeleteRunCommand, handleEditRunCommand, handleViewRunCommand, paneId, savedRunCommand],
   );
 
   return (
@@ -481,14 +504,27 @@ export const TerminalController = memo(function TerminalController({
       }}
       onDropCapture={handleDrop}
     >
-      <TerminalViewport
-        ptyId={ptyId}
-        fontSize={terminalFontSize}
-        terminalTheme={resolvedTheme.preset.terminal}
-        isActive={isActive}
-        isVisible={isVisible}
-        onContextMenuRequest={handleViewportContextMenuRequest}
-      />
+      <>
+        {isRunProfileInspectorOpen && paneId && (
+          <RunProfileInspector
+            runProfile={effectiveRunProfile}
+            fallbackCommand={savedRunCommand}
+            onClose={closeRunProfileInspector}
+          />
+        )}
+        <TerminalViewport
+          workspaceId={workspaceId}
+          tabId={tabId}
+          sessionId={sessionId}
+          paneId={paneId}
+          ptyId={ptyId}
+          fontSize={terminalFontSize}
+          terminalTheme={resolvedTheme.preset.terminal}
+          isActive={isActive}
+          isVisible={isVisible}
+          onContextMenuRequest={handleViewportContextMenuRequest}
+        />
+      </>
     </TerminalChrome>
   );
 });

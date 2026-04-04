@@ -1,9 +1,13 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
-import { invoke } from '@tauri-apps/api/core';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { subscribePtyOutput } from '../runtime/tauriEventHub';
+import { subscribeSessionOutput } from '../runtime/tauriEventHub';
+import {
+  takeTerminalStartupOutput,
+  writeTerminalInput,
+} from '../runtime/terminalApi';
+import { clearTerminalOutput, queueTerminalOutput } from '../runtime/terminalOutputScheduler';
 import { useAppStore } from '../store';
 import { resolveTheme } from '../theme';
 import {
@@ -13,6 +17,7 @@ import {
   markTerminalInputStateUnsafe,
   type TerminalInputState,
 } from './terminalInputState';
+import { getSessionIdForPty } from './session';
 
 export interface CachedTerminal {
   term: Terminal;
@@ -21,123 +26,180 @@ export interface CachedTerminal {
 }
 
 interface CachedEntry extends CachedTerminal {
+  sessionId: string;
+  currentPtyId: number;
   cleanup: () => void;
+  rebind: (ptyId: number) => void;
 }
 
+type TerminalIdentity = number | string;
 type InputListener = (value: string) => void;
 type InputStateListener = (state: TerminalInputState) => void;
 type KeyHandler = (event: KeyboardEvent) => boolean;
 
-const cache = new Map<number, CachedEntry>();
-const inputStates = new Map<number, TerminalInputState>();
-const inputListeners = new Map<number, Set<InputListener>>();
-const inputStateListeners = new Map<number, Set<InputStateListener>>();
-const keyHandlers = new Map<number, KeyHandler>();
+const cache = new Map<string, CachedEntry>();
+const ptyToSessionKey = new Map<number, string>();
+const inputStates = new Map<string, TerminalInputState>();
+const inputListeners = new Map<string, Set<InputListener>>();
+const inputStateListeners = new Map<string, Set<InputStateListener>>();
+const keyHandlers = new Map<string, KeyHandler>();
 
-function notifyInputListeners(ptyId: number) {
-  const value = inputStates.get(ptyId)?.text ?? '';
-  const listeners = inputListeners.get(ptyId);
-  if (!listeners) return;
+function resolveSessionKey(identity: TerminalIdentity) {
+  if (typeof identity === 'string') {
+    return identity;
+  }
+
+  const state = useAppStore.getState();
+  return (
+    ptyToSessionKey.get(identity)
+    ?? state.sessionIdByPty.get(identity)
+    ?? state.sessions.get(identity)?.sessionId
+    ?? getSessionIdForPty(identity)
+  );
+}
+
+function resolvePtyId(identity: TerminalIdentity, fallbackPtyId?: number) {
+  if (typeof identity === 'number') {
+    return identity;
+  }
+
+  const cached = cache.get(identity);
+  if (cached) {
+    return cached.currentPtyId;
+  }
+
+  const state = useAppStore.getState();
+  return fallbackPtyId
+    ?? state.ptyBySessionId.get(identity)
+    ?? state.terminalSessions.get(identity)?.ptyId
+    ?? -1;
+}
+
+function notifyInputListeners(sessionKey: string) {
+  const value = inputStates.get(sessionKey)?.text ?? '';
+  const listeners = inputListeners.get(sessionKey);
+  if (!listeners) {
+    return;
+  }
 
   listeners.forEach((listener) => listener(value));
 }
 
-function notifyInputStateListeners(ptyId: number) {
-  const state = inputStates.get(ptyId) ?? createTerminalInputState();
-  const listeners = inputStateListeners.get(ptyId);
-  if (!listeners) return;
+function notifyInputStateListeners(sessionKey: string) {
+  const state = inputStates.get(sessionKey) ?? createTerminalInputState();
+  const listeners = inputStateListeners.get(sessionKey);
+  if (!listeners) {
+    return;
+  }
 
   listeners.forEach((listener) => listener(state));
 }
 
-function updateInputState(ptyId: number, nextState: TerminalInputState) {
-  inputStates.set(ptyId, nextState);
-  notifyInputListeners(ptyId);
-  notifyInputStateListeners(ptyId);
+function updateInputState(sessionKey: string, nextState: TerminalInputState) {
+  inputStates.set(sessionKey, nextState);
+  notifyInputListeners(sessionKey);
+  notifyInputStateListeners(sessionKey);
 }
 
-export function mirrorTerminalInput(ptyId: number, data: string): void {
-  updateInputState(ptyId, applyTerminalInputData(inputStates.get(ptyId), data));
+function resetInputState(sessionKey: string) {
+  updateInputState(sessionKey, createTerminalInputState());
 }
 
-export function subscribeTerminalInput(ptyId: number, listener: InputListener): () => void {
-  const listeners = inputListeners.get(ptyId) ?? new Set<InputListener>();
+export function mirrorTerminalInput(identity: TerminalIdentity, data: string): void {
+  const sessionKey = resolveSessionKey(identity);
+  updateInputState(sessionKey, applyTerminalInputData(inputStates.get(sessionKey), data));
+}
+
+export function subscribeTerminalInput(identity: TerminalIdentity, listener: InputListener): () => void {
+  const sessionKey = resolveSessionKey(identity);
+  const listeners = inputListeners.get(sessionKey) ?? new Set<InputListener>();
   listeners.add(listener);
-  inputListeners.set(ptyId, listeners);
-  listener(inputStates.get(ptyId)?.text ?? '');
+  inputListeners.set(sessionKey, listeners);
+  listener(inputStates.get(sessionKey)?.text ?? '');
 
   return () => {
-    const current = inputListeners.get(ptyId);
-    if (!current) return;
+    const current = inputListeners.get(sessionKey);
+    if (!current) {
+      return;
+    }
     current.delete(listener);
     if (current.size === 0) {
-      inputListeners.delete(ptyId);
+      inputListeners.delete(sessionKey);
     }
   };
 }
 
 export function subscribeTerminalInputState(
-  ptyId: number,
+  identity: TerminalIdentity,
   listener: InputStateListener,
 ): () => void {
-  const listeners = inputStateListeners.get(ptyId) ?? new Set<InputStateListener>();
+  const sessionKey = resolveSessionKey(identity);
+  const listeners = inputStateListeners.get(sessionKey) ?? new Set<InputStateListener>();
   listeners.add(listener);
-  inputStateListeners.set(ptyId, listeners);
-  listener(inputStates.get(ptyId) ?? createTerminalInputState());
+  inputStateListeners.set(sessionKey, listeners);
+  listener(inputStates.get(sessionKey) ?? createTerminalInputState());
 
   return () => {
-    const current = inputStateListeners.get(ptyId);
-    if (!current) return;
+    const current = inputStateListeners.get(sessionKey);
+    if (!current) {
+      return;
+    }
     current.delete(listener);
     if (current.size === 0) {
-      inputStateListeners.delete(ptyId);
+      inputStateListeners.delete(sessionKey);
     }
   };
 }
 
-export function getTerminalInputState(ptyId: number): TerminalInputState {
-  return inputStates.get(ptyId) ?? createTerminalInputState();
+export function getTerminalInputState(identity: TerminalIdentity): TerminalInputState {
+  return inputStates.get(resolveSessionKey(identity)) ?? createTerminalInputState();
 }
 
-export function registerTerminalKeyHandler(ptyId: number, handler: KeyHandler): () => void {
-  keyHandlers.set(ptyId, handler);
+export function registerTerminalKeyHandler(identity: TerminalIdentity, handler: KeyHandler): () => void {
+  const sessionKey = resolveSessionKey(identity);
+  keyHandlers.set(sessionKey, handler);
   return () => {
-    if (keyHandlers.get(ptyId) === handler) {
-      keyHandlers.delete(ptyId);
+    if (keyHandlers.get(sessionKey) === handler) {
+      keyHandlers.delete(sessionKey);
     }
   };
 }
 
 export async function applyCompletionEdit(
-  ptyId: number,
+  identity: TerminalIdentity,
   edit: Parameters<typeof buildCompletionSequence>[1],
 ): Promise<boolean> {
-  const currentState = inputStates.get(ptyId) ?? createTerminalInputState();
+  const sessionKey = resolveSessionKey(identity);
+  const currentState = inputStates.get(sessionKey) ?? createTerminalInputState();
   if (currentState.unsafe) {
     return false;
   }
 
   const { data, nextState } = buildCompletionSequence(currentState, edit);
-  updateInputState(ptyId, nextState);
+  updateInputState(sessionKey, nextState);
   try {
-    await invoke('write_pty', { ptyId, data });
+    await writeTerminalInput(sessionKey, data);
     return true;
   } catch (error) {
-    updateInputState(ptyId, currentState);
+    updateInputState(sessionKey, currentState);
     throw error;
   }
 }
 
-export function markTerminalInputUnsafe(ptyId: number) {
-  updateInputState(ptyId, markTerminalInputStateUnsafe(inputStates.get(ptyId)));
+export function markTerminalInputUnsafe(identity: TerminalIdentity) {
+  const sessionKey = resolveSessionKey(identity);
+  updateInputState(sessionKey, markTerminalInputStateUnsafe(inputStates.get(sessionKey)));
 }
 
-export function getOrCreateTerminal(ptyId: number): CachedTerminal {
-  const existing = cache.get(ptyId);
-  if (existing) {
-    return existing;
+function removePtyBindingsForSession(sessionId: string) {
+  for (const [ptyId, mappedSessionId] of ptyToSessionKey.entries()) {
+    if (mappedSessionId === sessionId) {
+      ptyToSessionKey.delete(ptyId);
+    }
   }
+}
 
+function createCachedEntry(ptyId: number, sessionId: string): CachedEntry {
   const wrapper = document.createElement('div');
   wrapper.style.width = '100%';
   wrapper.style.height = '100%';
@@ -175,10 +237,73 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
     // Fall back to canvas when WebGL is unavailable.
   }
 
-  term.attachCustomKeyEventHandler((event) => {
-    if (event.type !== 'keydown') return true;
+  let currentPtyId = ptyId;
+  let cancelled = false;
+  let startupOutputReceived = false;
+  let unlistenOutput: (() => void) | undefined;
+  let bootstrapTimers: number[] = [];
 
-    const customHandler = keyHandlers.get(ptyId);
+  const bindOutput = (nextPtyId: number, resetTerminal = false) => {
+    const previousPtyId = currentPtyId;
+    currentPtyId = nextPtyId;
+    ptyToSessionKey.set(nextPtyId, sessionId);
+    if (previousPtyId !== nextPtyId) {
+      ptyToSessionKey.delete(previousPtyId);
+    }
+
+    if (resetTerminal) {
+      clearTerminalOutput(sessionId);
+      resetInputState(sessionId);
+      term.reset();
+      term.clear();
+    }
+
+    bootstrapTimers.forEach((timer) => window.clearTimeout(timer));
+    bootstrapTimers = [];
+    startupOutputReceived = false;
+    unlistenOutput?.();
+    unlistenOutput = subscribeSessionOutput(sessionId, (payload) => {
+      if (payload.data) {
+        startupOutputReceived = true;
+      }
+      queueTerminalOutput(sessionId, (chunk) => {
+        term.write(chunk);
+      }, payload.data);
+    });
+
+    bootstrapTimers = [
+      window.setTimeout(() => {
+        fitAddon.fit();
+        term.refresh(0, term.rows - 1);
+      }, 60),
+      window.setTimeout(() => {
+        fitAddon.fit();
+        term.refresh(0, term.rows - 1);
+      }, 180),
+    ];
+
+    void takeTerminalStartupOutput(sessionId)
+      .then((initialOutput) => {
+        if (cancelled || !initialOutput || startupOutputReceived) {
+          return;
+        }
+
+        startupOutputReceived = true;
+        queueTerminalOutput(sessionId, (chunk) => {
+          term.write(chunk);
+          term.scrollToBottom();
+          term.refresh(0, term.rows - 1);
+        }, initialOutput);
+      })
+      .catch(console.error);
+  };
+
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') {
+      return true;
+    }
+
+    const customHandler = keyHandlers.get(sessionId);
     if (customHandler && !customHandler(event)) {
       return false;
     }
@@ -196,8 +321,8 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
       event.preventDefault();
       void readText().then((text) => {
         if (text) {
-          mirrorTerminalInput(ptyId, text);
-          void invoke('write_pty', { ptyId, data: text });
+          mirrorTerminalInput(currentPtyId, text);
+          void writeTerminalInput(sessionId, text);
         }
       });
       return false;
@@ -208,85 +333,75 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
 
   const onDataDisposable = term.onData((data) => {
     term.scrollToBottom();
-    mirrorTerminalInput(ptyId, data);
-    void invoke('write_pty', { ptyId, data });
+    mirrorTerminalInput(currentPtyId, data);
+    void writeTerminalInput(sessionId, data);
   });
 
-  const onResizeDisposable = term.onResize(({ cols, rows }) => {
-    void invoke('resize_pty', { ptyId, cols, rows });
-  });
-
-  let cancelled = false;
-  let startupOutputReceived = false;
-  let unlistenOutput: (() => void) | undefined;
-  const bootstrapTimers = [
-    window.setTimeout(() => {
-      fitAddon.fit();
-      term.refresh(0, term.rows - 1);
-    }, 60),
-    window.setTimeout(() => {
-      fitAddon.fit();
-      term.refresh(0, term.rows - 1);
-    }, 180),
-  ];
-
-  void Promise.resolve()
-    .then(() =>
-      subscribePtyOutput(ptyId, (payload) => {
-        if (payload.data) {
-          startupOutputReceived = true;
-        }
-        term.write(payload.data);
-      }),
-    )
-    .then((unlisten) => {
-      if (cancelled) {
-        unlisten();
-        return undefined;
-      }
-
-      unlistenOutput = unlisten;
-      return invoke<string>('take_startup_output', { ptyId });
-    })
-    .then((initialOutput) => {
-      if (cancelled || !initialOutput || startupOutputReceived) {
-        return;
-      }
-
-      startupOutputReceived = true;
-      term.write(initialOutput);
-      term.scrollToBottom();
-      term.refresh(0, term.rows - 1);
-    })
-    .catch(console.error);
+  bindOutput(ptyId);
 
   const cleanup = () => {
     cancelled = true;
     bootstrapTimers.forEach((timer) => window.clearTimeout(timer));
+    clearTerminalOutput(sessionId);
     unlistenOutput?.();
-    inputStates.delete(ptyId);
-    inputListeners.delete(ptyId);
-    inputStateListeners.delete(ptyId);
-    keyHandlers.delete(ptyId);
+    removePtyBindingsForSession(sessionId);
+    inputStates.delete(sessionId);
+    inputListeners.delete(sessionId);
+    inputStateListeners.delete(sessionId);
+    keyHandlers.delete(sessionId);
     onDataDisposable.dispose();
-    onResizeDisposable.dispose();
     term.dispose();
   };
 
-  const entry: CachedEntry = { term, fitAddon, wrapper, cleanup };
-  cache.set(ptyId, entry);
+  return {
+    term,
+    fitAddon,
+    wrapper,
+    sessionId,
+    currentPtyId: ptyId,
+    cleanup,
+    rebind: (nextPtyId: number) => {
+      const shouldReset = nextPtyId !== currentPtyId;
+      bindOutput(nextPtyId, shouldReset);
+    },
+  };
+}
+
+export function getOrCreateTerminal(identity: TerminalIdentity, nextPtyId?: number): CachedTerminal {
+  const sessionId = resolveSessionKey(identity);
+  const existing = cache.get(sessionId);
+  const ptyId = resolvePtyId(identity, nextPtyId);
+  if (existing) {
+    if (ptyId >= 0) {
+      existing.rebind(ptyId);
+    }
+    return existing;
+  }
+
+  if (ptyId < 0) {
+    throw new Error(`Unable to resolve PTY for terminal session ${sessionId}`);
+  }
+
+  const entry = createCachedEntry(ptyId, sessionId);
+  cache.set(sessionId, entry);
   return entry;
 }
 
-export function getCachedTerminal(ptyId: number): CachedTerminal | undefined {
-  return cache.get(ptyId);
+export function getCachedTerminal(identity: TerminalIdentity): CachedTerminal | undefined {
+  return cache.get(resolveSessionKey(identity));
 }
 
-export function disposeTerminal(ptyId: number): void {
-  const entry = cache.get(ptyId);
-  if (!entry) return;
+export function disposeTerminalBySession(sessionId: string): void {
+  const entry = cache.get(sessionId);
+  if (!entry) {
+    return;
+  }
 
   entry.wrapper.remove();
   entry.cleanup();
-  cache.delete(ptyId);
+  cache.delete(sessionId);
+}
+
+export function disposeTerminal(identity: TerminalIdentity): void {
+  disposeTerminalBySession(resolveSessionKey(identity));
 }

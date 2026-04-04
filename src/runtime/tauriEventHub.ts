@@ -28,7 +28,8 @@ type PtyOutputSink = (payload: PtyOutputPayload) => void;
 const genericListeners = new Map<EventName, Set<(payload: unknown) => void>>();
 const ptyOutputGlobalListeners = new Set<PtyOutputSink>();
 const ptyOutputSinks = new Map<number, Set<PtyOutputSink>>();
-const outputQueue = new Map<number, string>();
+const sessionOutputSinks = new Map<string, Set<PtyOutputSink>>();
+const outputQueue = new Map<string, PtyOutputPayload>();
 const unlistenMap = new Map<EventName, UnlistenFn>();
 const listenPromises = new Map<EventName, Promise<void>>();
 
@@ -57,23 +58,31 @@ function dispatchGeneric<K extends EventName>(event: K, payload: EventPayloadMap
 function flushQueuedPtyOutput() {
   outputFlushHandle = null;
 
-  for (const [ptyId, data] of outputQueue) {
-    const payload: PtyOutputPayload = { ptyId, data };
+  for (const payload of outputQueue.values()) {
     ptyOutputGlobalListeners.forEach((listener) => listener(payload));
 
-    const sinks = ptyOutputSinks.get(ptyId);
-    if (!sinks || !data) {
-      continue;
+    const sinks = ptyOutputSinks.get(payload.ptyId);
+    if (sinks && payload.data) {
+      sinks.forEach((sink) => sink(payload));
     }
 
-    sinks.forEach((sink) => sink(payload));
+    const sessionSinks = payload.sessionId ? sessionOutputSinks.get(payload.sessionId) : undefined;
+    if (sessionSinks && payload.data) {
+      sessionSinks.forEach((sink) => sink(payload));
+    }
   }
 
   outputQueue.clear();
 }
 
 function queuePtyOutput(payload: PtyOutputPayload) {
-  outputQueue.set(payload.ptyId, `${outputQueue.get(payload.ptyId) ?? ''}${payload.data}`);
+  const queueKey = payload.sessionId || `pty-${payload.ptyId}`;
+  const existing = outputQueue.get(queueKey);
+  outputQueue.set(queueKey, {
+    sessionId: payload.sessionId,
+    ptyId: payload.ptyId,
+    data: `${existing?.data ?? ''}${payload.data}`,
+  });
   if (outputFlushHandle == null) {
     outputFlushHandle = getRaf()(flushQueuedPtyOutput);
   }
@@ -139,7 +148,26 @@ export function subscribePtyOutput(ptyId: number, sink: PtyOutputSink) {
     current.delete(sink);
     if (current.size === 0) {
       ptyOutputSinks.delete(ptyId);
-      outputQueue.delete(ptyId);
+    }
+  };
+}
+
+export function subscribeSessionOutput(sessionId: string, sink: PtyOutputSink) {
+  const sinks = sessionOutputSinks.get(sessionId) ?? new Set<PtyOutputSink>();
+  sinks.add(sink);
+  sessionOutputSinks.set(sessionId, sinks);
+
+  void ensureEventListener('pty-output');
+
+  return () => {
+    const current = sessionOutputSinks.get(sessionId);
+    if (!current) {
+      return;
+    }
+    current.delete(sink);
+    if (current.size === 0) {
+      sessionOutputSinks.delete(sessionId);
+      outputQueue.delete(sessionId);
     }
   };
 }
@@ -190,6 +218,7 @@ export async function stopTauriEventHubForTests() {
   outputQueue.clear();
   ptyOutputGlobalListeners.clear();
   ptyOutputSinks.clear();
+  sessionOutputSinks.clear();
   genericListeners.clear();
 
   await Promise.all([...listenPromises.values()].map((promise) => promise.catch(() => undefined)));

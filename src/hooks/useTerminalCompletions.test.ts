@@ -375,7 +375,7 @@ describe('useTerminalCompletions', () => {
 
   it('completes a unique directory by appending a separator', async () => {
     invokeMock.mockImplementation(async (command: string, args: { path: string }) => {
-      if (command === 'list_directory') {
+      if (command === 'complete_path_entries') {
         if (args.path === '/workspace/project') {
           return [{ name: 'src', path: '/workspace/project/src', isDir: true }];
         }
@@ -429,7 +429,7 @@ describe('useTerminalCompletions', () => {
     }));
 
     invokeMock.mockImplementation(async (command: string, args: { path: string }) => {
-      if (command === 'list_directory') {
+      if (command === 'complete_path_entries') {
         expect(args.path).toBe('/workspace/project/packages/app/src');
         return [{ name: 'main.tsx', path: '/workspace/project/packages/app/src/main.tsx', isDir: false }];
       }
@@ -463,6 +463,13 @@ describe('useTerminalCompletions', () => {
       await result.current.handleTab(false);
     });
 
+    expect(result.current.selectedIndex).toBe(1);
+    expect(terminalCache.__getAppliedEdits()).toEqual([]);
+
+    await act(async () => {
+      await result.current.acceptSelected();
+    });
+
     expect(terminalCache.__getAppliedEdits()).toHaveLength(1);
   });
 
@@ -471,7 +478,7 @@ describe('useTerminalCompletions', () => {
     let resolveSecond: ((value: unknown) => void) | undefined;
 
     invokeMock.mockImplementation((command: string, args: { path: string }) => {
-      if (command !== 'list_directory') {
+      if (command !== 'complete_path_entries') {
         throw new Error(`Unexpected command: ${command}`);
       }
 
@@ -537,6 +544,39 @@ describe('useTerminalCompletions', () => {
     });
 
     expect(terminalCache.__getAppliedEdits()).toEqual([]);
+  });
+
+  it('falls back to the shell when the session phase is not trusted', async () => {
+    useAppStore.setState((state) => ({
+      ...state,
+      sessions: new Map([
+        [
+          1,
+          {
+            ...(state.sessions.get(1) ?? {
+              sessionId: 'session-1',
+              ptyId: 1,
+              shellKind: 'bash',
+              mode: 'human',
+              title: 'bash',
+              commands: [],
+              createdAt: 0,
+              updatedAt: 0,
+            }),
+            phase: 'running',
+          },
+        ],
+      ]),
+    }));
+
+    const terminalCache = (await import('../utils/terminalCache')) as unknown as TerminalCacheMock;
+    const { result } = renderHook(() => useTerminalCompletions(1, '/workspace/project'));
+
+    await setInput(terminalCache, 1, { text: 'git ' });
+    await flushCompletion();
+
+    expect(result.current.items).toEqual([]);
+    expect(result.current.canHandleTab(false)).toBe(false);
   });
 
   it('replaces the active token when the cursor is in the middle of the line', async () => {

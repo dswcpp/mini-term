@@ -16,6 +16,14 @@ pub struct FileEntry {
     pub ignored: bool,
 }
 
+fn sort_entries(entries: &mut [FileEntry]) {
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir)
+            .then_with(|| a.ignored.cmp(&b.ignored))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
 fn build_gitignore(project_root: &Path) -> Option<Gitignore> {
     let gitignore_path = project_root.join(".gitignore");
     if !gitignore_path.exists() {
@@ -69,11 +77,33 @@ pub fn list_directory(project_root: String, path: String) -> Result<Vec<FileEntr
             })
         })
         .collect();
-    entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir)
-            .then_with(|| a.ignored.cmp(&b.ignored))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    sort_entries(&mut entries);
+    Ok(entries)
+}
+
+#[tauri::command]
+pub fn complete_path_entries(path: String) -> Result<Vec<FileEntry>, String> {
+    let dir = Path::new(&path);
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", path));
+    }
+
+    let mut entries: Vec<FileEntry> = fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().ok()?.is_dir();
+            let full_path = entry.path();
+            Some(FileEntry {
+                name,
+                path: full_path.to_string_lossy().to_string(),
+                is_dir,
+                ignored: false,
+            })
+        })
+        .collect();
+    sort_entries(&mut entries);
     Ok(entries)
 }
 
@@ -197,6 +227,17 @@ pub fn unwatch_directory(state: tauri::State<'_, FsWatcherManager>, path: String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mini-term-fs-{label}-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn should_ignore_node_modules() {
@@ -210,5 +251,36 @@ mod tests {
     fn should_not_ignore_src() {
         let path = Path::new("src");
         assert!(!should_ignore("src", path, true, &None));
+    }
+
+    #[test]
+    fn complete_path_entries_keeps_items_hidden_from_file_tree_filters() {
+        let root = create_temp_dir("completion-hidden");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(root.join(".env"), "demo").unwrap();
+
+        let entries = complete_path_entries(root.to_string_lossy().to_string()).unwrap();
+        let names: Vec<String> = entries.into_iter().map(|entry| entry.name).collect();
+
+        assert!(names.contains(&".git".to_string()));
+        assert!(names.contains(&"node_modules".to_string()));
+        assert!(names.contains(&".env".to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_path_entries_sorts_directories_before_files() {
+        let root = create_temp_dir("completion-sort");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("README.md"), "demo").unwrap();
+
+        let entries = complete_path_entries(root.to_string_lossy().to_string()).unwrap();
+
+        assert_eq!(entries.first().map(|entry| entry.name.as_str()), Some("src"));
+        assert_eq!(entries.first().map(|entry| entry.is_dir), Some(true));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +33,13 @@ pub struct OldProjectGroup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceConfig>,
+    #[serde(default)]
+    pub recent_workspaces: Vec<RecentWorkspaceEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_workspace_id: Option<String>,
+    #[serde(default)]
     pub projects: Vec<ProjectConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_tree: Option<Vec<ProjectTreeItem>>,
@@ -53,6 +61,54 @@ pub struct AppConfig {
     pub middle_column_sizes: Option<Vec<f64>>,
     #[serde(default)]
     pub completion_usage: CompletionUsageConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRootConfig {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default = "default_workspace_root_role")]
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub roots: Vec<WorkspaceRootConfig>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_layout: Option<SavedProjectLayout>,
+    #[serde(default)]
+    pub expanded_dirs_by_root: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub last_opened_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentWorkspaceEntry {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub root_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+    #[serde(default)]
+    pub last_opened_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_layout: Option<SavedProjectLayout>,
+    #[serde(default)]
+    pub expanded_dirs_by_root: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -126,10 +182,25 @@ impl<'de> Deserialize<'de> for ThemeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RunProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SavedPane {
     pub shell_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_profile: Option<RunProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +257,17 @@ fn default_terminal_font_size() -> f64 {
     14.0
 }
 
+fn default_workspace_root_role() -> String {
+    "member".into()
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn powershell_completion_bootstrap() -> String {
     [
         "Import-Module PSReadLine -ErrorAction SilentlyContinue",
@@ -225,6 +307,9 @@ impl Default for ThemeConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            workspaces: vec![],
+            recent_workspaces: vec![],
+            last_workspace_id: None,
             projects: vec![],
             project_tree: None,
             project_groups: None,
@@ -334,6 +419,128 @@ fn config_path(app: &AppHandle) -> PathBuf {
     dir.join("config.json")
 }
 
+fn get_path_base_name(path: &str) -> String {
+    path.rsplit(['\\', '/'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn ensure_single_primary_root(roots: &mut [WorkspaceRootConfig]) {
+    let primary_root_id = roots
+        .iter()
+        .find(|root| root.role == "primary")
+        .map(|root| root.id.clone())
+        .or_else(|| roots.first().map(|root| root.id.clone()));
+
+    for root in roots.iter_mut() {
+        if root.name.trim().is_empty() {
+            root.name = get_path_base_name(&root.path);
+        }
+
+        if primary_root_id.as_deref() == Some(root.id.as_str()) {
+            root.role = "primary".into();
+        } else {
+            root.role = "member".into();
+        }
+    }
+}
+
+fn legacy_project_root_id(project_id: &str) -> String {
+    format!("{project_id}-root-1")
+}
+
+fn project_to_workspace(project: &ProjectConfig) -> WorkspaceConfig {
+    let timestamp = current_timestamp_ms();
+    let root_id = legacy_project_root_id(&project.id);
+    WorkspaceConfig {
+        id: project.id.clone(),
+        name: project.name.clone(),
+        roots: vec![WorkspaceRootConfig {
+            id: root_id.clone(),
+            name: get_path_base_name(&project.path),
+            path: project.path.clone(),
+            role: "primary".into(),
+        }],
+        pinned: false,
+        accent: None,
+        saved_layout: project.saved_layout.clone(),
+        expanded_dirs_by_root: BTreeMap::from([(root_id, project.expanded_dirs.clone())]),
+        created_at: timestamp,
+        last_opened_at: timestamp,
+    }
+}
+
+fn workspace_to_project(workspace: &WorkspaceConfig) -> ProjectConfig {
+    let primary_root = workspace
+        .roots
+        .iter()
+        .find(|root| root.role == "primary")
+        .or_else(|| workspace.roots.first());
+
+    let expanded_dirs = primary_root
+        .and_then(|root| workspace.expanded_dirs_by_root.get(&root.id))
+        .cloned()
+        .unwrap_or_default();
+
+    ProjectConfig {
+        id: workspace.id.clone(),
+        name: workspace.name.clone(),
+        path: primary_root.map(|root| root.path.clone()).unwrap_or_default(),
+        saved_layout: workspace.saved_layout.clone(),
+        expanded_dirs,
+    }
+}
+
+fn normalize_workspace(mut workspace: WorkspaceConfig) -> WorkspaceConfig {
+    workspace.roots.retain(|root| !root.path.trim().is_empty());
+    ensure_single_primary_root(&mut workspace.roots);
+
+    if workspace.name.trim().is_empty() {
+        workspace.name = workspace
+            .roots
+            .first()
+            .map(|root| get_path_base_name(&root.path))
+            .unwrap_or_else(|| "Workspace".into());
+    }
+
+    let now = current_timestamp_ms();
+    if workspace.created_at == 0 {
+        workspace.created_at = now;
+    }
+    if workspace.last_opened_at == 0 {
+        workspace.last_opened_at = workspace.created_at;
+    }
+
+    workspace
+        .expanded_dirs_by_root
+        .retain(|root_id, _| workspace.roots.iter().any(|root| root.id == *root_id));
+
+    for root in &workspace.roots {
+        workspace
+            .expanded_dirs_by_root
+            .entry(root.id.clone())
+            .or_default();
+    }
+
+    workspace
+}
+
+fn normalize_recent_workspace(mut workspace: RecentWorkspaceEntry) -> RecentWorkspaceEntry {
+    workspace.root_paths.retain(|path| !path.trim().is_empty());
+    if workspace.name.trim().is_empty() {
+        workspace.name = workspace
+            .root_paths
+            .first()
+            .map(|path| get_path_base_name(path))
+            .unwrap_or_else(|| "Workspace".into());
+    }
+    if workspace.last_opened_at == 0 {
+        workspace.last_opened_at = current_timestamp_ms();
+    }
+    workspace
+}
+
 fn migrate_config(mut config: AppConfig) -> AppConfig {
     if config.project_tree.is_some() {
         config.project_groups = None;
@@ -371,6 +578,28 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
 }
 
 fn normalize_config(mut config: AppConfig) -> AppConfig {
+    if config.workspaces.is_empty() && !config.projects.is_empty() {
+        config.workspaces = config.projects.iter().map(project_to_workspace).collect();
+    }
+
+    config.workspaces = config
+        .workspaces
+        .into_iter()
+        .map(normalize_workspace)
+        .collect();
+
+    config.recent_workspaces = config
+        .recent_workspaces
+        .into_iter()
+        .map(normalize_recent_workspace)
+        .collect();
+
+    if config.last_workspace_id.is_none() {
+        config.last_workspace_id = config.workspaces.first().map(|workspace| workspace.id.clone());
+    }
+
+    config.projects = config.workspaces.iter().map(workspace_to_project).collect();
+
     if config.available_shells.is_empty() {
         config.available_shells = default_shells();
     }
@@ -437,6 +666,7 @@ pub fn load_config(app: AppHandle) -> AppConfig {
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let path = config_path(&app);
+    let config = normalize_config(migrate_config(config));
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())
 }
@@ -523,8 +753,8 @@ mod tests {
                 split_layout: SavedSplitNode::Split {
                     direction: "horizontal".into(),
                     children: vec![
-                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "cmd".into(), run_command: None } },
-                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "powershell".into(), run_command: None } },
+                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "cmd".into(), run_command: None, run_profile: None } },
+                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "powershell".into(), run_command: None, run_profile: None } },
                     ],
                     sizes: vec![50.0, 50.0],
                 },
@@ -582,5 +812,73 @@ mod tests {
         let json = serde_json::to_string(&tree).unwrap();
         let parsed: Vec<ProjectTreeItem> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn normalize_config_migrates_legacy_projects_to_workspaces() {
+        let config = normalize_config(AppConfig {
+            projects: vec![ProjectConfig {
+                id: "workspace-1".into(),
+                name: "mini-term".into(),
+                path: "/tmp/mini-term".into(),
+                saved_layout: None,
+                expanded_dirs: vec!["/tmp/mini-term/src".into()],
+            }],
+            ..AppConfig::default()
+        });
+
+        assert_eq!(config.workspaces.len(), 1);
+        assert_eq!(config.workspaces[0].id, "workspace-1");
+        assert_eq!(config.workspaces[0].roots.len(), 1);
+        assert_eq!(config.workspaces[0].roots[0].role, "primary");
+        assert_eq!(
+            config.workspaces[0]
+                .expanded_dirs_by_root
+                .get("workspace-1-root-1")
+                .cloned()
+                .unwrap_or_default(),
+            vec!["/tmp/mini-term/src".to_string()]
+        );
+        assert_eq!(config.last_workspace_id.as_deref(), Some("workspace-1"));
+    }
+
+    #[test]
+    fn workspaces_round_trip_with_recent_entries() {
+        let json = r##"{
+            "workspaces": [{
+                "id": "workspace-1",
+                "name": "mini-term",
+                "roots": [
+                    {"id": "root-a", "name": "mini-term", "path": "/tmp/mini-term", "role": "member"},
+                    {"id": "root-b", "name": "shared", "path": "/tmp/shared", "role": "primary"}
+                ],
+                "pinned": true,
+                "accent": "#ff6600",
+                "expandedDirsByRoot": {
+                    "root-a": ["/tmp/mini-term/src"]
+                },
+                "createdAt": 100,
+                "lastOpenedAt": 200
+            }],
+            "recentWorkspaces": [{
+                "id": "recent-1",
+                "name": "recent workspace",
+                "rootPaths": ["/tmp/recent"],
+                "lastOpenedAt": 300
+            }],
+            "lastWorkspaceId": "workspace-1",
+            "defaultShell": "cmd",
+            "availableShells": [{"name": "cmd", "command": "cmd"}]
+        }"##;
+
+        let config = normalize_config(serde_json::from_str(json).unwrap());
+
+        assert_eq!(config.workspaces.len(), 1);
+        assert_eq!(config.workspaces[0].roots[0].role, "member");
+        assert_eq!(config.workspaces[0].roots[1].role, "primary");
+        assert_eq!(config.recent_workspaces.len(), 1);
+        assert_eq!(config.recent_workspaces[0].root_paths, vec!["/tmp/recent".to_string()]);
+        assert_eq!(config.projects.len(), 1);
+        assert_eq!(config.projects[0].path, "/tmp/shared");
     }
 }
