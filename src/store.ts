@@ -23,6 +23,7 @@ import type {
   AppConfig,
   CommandBlock,
   CommitFileInfo,
+  FileViewerOpenOptions,
   GitFileStatus,
   LegacyProjectConfig,
   PaneRuntimeState,
@@ -935,7 +936,7 @@ interface AppStore {
   openSettings: (page?: SettingsPage) => void;
   openRunProfileInspector: (paneId: string) => void;
   closeRunProfileInspector: () => void;
-  openFileViewer: (workspaceId: string, filePath: string, options?: { initialMode?: PreviewMode }) => void;
+  openFileViewer: (workspaceId: string, filePath: string, options?: FileViewerOpenOptions) => void;
   setFileViewerTabMode: (workspaceId: string, tabId: string, mode: PreviewMode) => void;
   openInteractionDialog: (payload: {
     dialogId: string;
@@ -2402,7 +2403,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
           ...workspaceState,
           activeTabId: existing.id,
           tabs: workspaceState.tabs.map((tab) =>
-            tab.id === existing.id && tab.kind === 'file-viewer' ? { ...tab, mode: nextMode } : tab,
+            tab.id === existing.id && tab.kind === 'file-viewer'
+              ? (() => {
+                  const { navigationTarget: _navigationTarget, ...rest } = tab;
+                  return options?.navigationTarget
+                    ? {
+                        ...rest,
+                        mode: nextMode,
+                        navigationTarget: options.navigationTarget,
+                      }
+                    : {
+                        ...rest,
+                        mode: nextMode,
+                      };
+                })()
+              : tab,
           ),
         });
       } else {
@@ -2411,6 +2426,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           id: genId(),
           filePath,
           mode: nextMode,
+          ...(options?.navigationTarget ? { navigationTarget: options.navigationTarget } : {}),
           status: 'idle',
         };
         workspaceStates.set(workspaceId, {

@@ -20,6 +20,7 @@ export function DocumentTabHost({
     <DocumentViewerPanel
       filePath={tab.filePath}
       mode={tab.mode}
+      navigationTarget={tab.navigationTarget}
       active={isActive}
       onModeChange={onModeChange}
       onClose={onClose}

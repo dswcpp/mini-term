@@ -1,6 +1,7 @@
 ﻿import type { ContextMenuEntry } from '../../utils/contextMenu';
 
 export interface TerminalContextMenuOptions {
+  canOpenLink: boolean;
   hasSelection: boolean;
   canSplit: boolean;
   canClosePane: boolean;
@@ -9,6 +10,7 @@ export interface TerminalContextMenuOptions {
   notifyOnCompletion: boolean;
   isWindowMaximized: boolean;
   onCopy: () => void;
+  onOpenLink: () => void;
   onPaste: () => void;
   onToggleNotifyOnCompletion: () => void;
   onClearScreen: () => void;
@@ -29,7 +31,18 @@ export interface TerminalContextMenuOptions {
 export function buildTerminalContextMenu(
   options: TerminalContextMenuOptions,
 ): ContextMenuEntry[] {
+  const leadingEntries: ContextMenuEntry[] = options.canOpenLink
+    ? [
+        {
+          label: '打开链接',
+          onClick: options.onOpenLink,
+        },
+        { separator: true },
+      ]
+    : [];
+
   return [
+    ...leadingEntries,
     {
       label: '复制',
       shortcut: 'Ctrl+Insert',

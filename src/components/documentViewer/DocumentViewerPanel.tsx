@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
-import type { PreviewMode } from '../../types';
+import type { FileNavigationTarget, PreviewMode } from '../../types';
 import { isMarkdownFilePath } from '../../utils/markdownPreview';
 import { resolveDocumentLanguage } from './language';
 import {
@@ -15,9 +15,49 @@ import type { PreviewRenderContext, ViewerLayoutMode } from './types';
 import { useDocumentContent } from './useDocumentContent';
 import { resolveViewerSkin, toViewerCssVars } from './viewerSkin';
 
+const SOURCE_ACTIVE_LINE_SELECTOR = '[data-source-active-line="true"]';
+const SOURCE_NAVIGATION_CSS = `
+[data-source-navigation-host] [data-source-line] {
+  scroll-margin-block: 96px;
+}
+
+[data-source-navigation-host] [data-source-active-line="true"] {
+  background: var(--viewer-accent-subtle) !important;
+  box-shadow: inset 2px 0 0 var(--viewer-accent);
+}
+
+[data-source-navigation-host] [data-source-active-line="true"] [data-source-gutter="true"],
+[data-source-navigation-host] [data-source-active-line="true"]::before {
+  background: var(--viewer-accent-subtle) !important;
+  color: var(--viewer-accent) !important;
+}
+`;
+
+function clearActiveSourceLine(host: ParentNode | null) {
+  host?.querySelectorAll<HTMLElement>(SOURCE_ACTIVE_LINE_SELECTOR).forEach((element) => {
+    element.removeAttribute('data-source-active-line');
+  });
+}
+
+function applySourceNavigation(host: HTMLElement, navigationTarget: FileNavigationTarget) {
+  clearActiveSourceLine(host);
+  const lineElement = host.querySelector<HTMLElement>(`[data-source-line="${navigationTarget.line}"]`);
+  if (!lineElement) {
+    return false;
+  }
+
+  lineElement.setAttribute('data-source-active-line', 'true');
+  lineElement.scrollIntoView({
+    block: 'center',
+    inline: 'nearest',
+  });
+  return true;
+}
+
 interface DocumentViewerPanelProps {
   filePath: string;
   mode?: PreviewMode;
+  navigationTarget?: FileNavigationTarget;
   active?: boolean;
   onModeChange?: (mode: PreviewMode) => void;
   onClose: () => void;
@@ -27,6 +67,7 @@ interface DocumentViewerPanelProps {
 export function DocumentViewerPanel({
   filePath,
   mode,
+  navigationTarget,
   active = true,
   onModeChange,
   onClose,
@@ -36,6 +77,7 @@ export function DocumentViewerPanel({
   const [internalMode, setInternalMode] = useState<PreviewMode>(mode === 'preview' ? 'preview' : 'source');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const fullscreenHostRef = useRef<HTMLDivElement | null>(null);
+  const navigationHostRef = useRef<HTMLDivElement | null>(null);
 
   const { result, loading, error } = useDocumentContent(filePath, active);
   const fileName = useMemo(
@@ -72,6 +114,41 @@ export function DocumentViewerPanel({
       }
     };
   }, []);
+
+  useEffect(() => {
+    const host = navigationHostRef.current;
+    if (!host) {
+      return;
+    }
+
+    clearActiveSourceLine(host);
+
+    if (!active || previewMode !== 'source' || !navigationTarget) {
+      return;
+    }
+
+    applySourceNavigation(host, navigationTarget);
+
+    const observer = new MutationObserver(() => {
+      applySourceNavigation(host, navigationTarget);
+    });
+    observer.observe(host, {
+      childList: true,
+      subtree: true,
+    });
+
+    return () => {
+      observer.disconnect();
+      clearActiveSourceLine(host);
+    };
+  }, [
+    active,
+    filePath,
+    navigationTarget?.column,
+    navigationTarget?.line,
+    navigationTarget?.requestId,
+    previewMode,
+  ]);
 
   const handleTogglePreview = () => {
     if (!previewReady) return;
@@ -160,6 +237,7 @@ export function DocumentViewerPanel({
             : 'h-full bg-[var(--viewer-shell-bg)]'
       }`}
     >
+      <style>{SOURCE_NAVIGATION_CSS}</style>
       <div
         className="flex flex-shrink-0 items-center justify-between border-b px-1 py-[3px]"
         style={{
@@ -217,7 +295,12 @@ export function DocumentViewerPanel({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto" style={{ backgroundColor: 'var(--viewer-panel)' }}>
+      <div
+        ref={navigationHostRef}
+        data-source-navigation-host="true"
+        className="flex-1 overflow-auto"
+        style={{ backgroundColor: 'var(--viewer-panel)' }}
+      >
         {renderContent()}
       </div>
     </div>

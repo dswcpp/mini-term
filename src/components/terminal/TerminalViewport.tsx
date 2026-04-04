@@ -1,10 +1,57 @@
-import { memo, useEffect, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type { TerminalThemeDefinition } from '../../theme';
 import { resizeTerminalSession } from '../../runtime/terminalApi';
 import { clearTerminalResize, scheduleTerminalResize } from '../../runtime/terminalResizeScheduler';
-import { useAppStore } from '../../store';
+import {
+  selectSessionById,
+  useAppStore,
+} from '../../store';
 import { getOrCreateTerminal } from '../../utils/terminalCache';
+import {
+  collectWrappedBufferText,
+  createBufferRangeFromOffsets,
+  doesBufferRangeIntersectLine,
+  extractTerminalFileLinks,
+  resolveTerminalFileLink,
+  shouldActivateTerminalFileLink,
+  type TerminalFileLinkMatch,
+} from '../../utils/terminalFileLinks';
+import type { WorkspaceRootConfig } from '../../types';
 import '@xterm/xterm/css/xterm.css';
+
+let terminalFileNavigationRequestId = 0;
+const EMPTY_WORKSPACE_ROOTS: WorkspaceRootConfig[] = [];
+
+const isMacPlatform = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+
+async function probeTerminalFilePath(path: string) {
+  try {
+    await invoke('read_file_content', { path });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSameTerminalFileLinkMatch(
+  left: TerminalFileLinkMatch | null,
+  right: TerminalFileLinkMatch,
+) {
+  return Boolean(
+    left
+    && left.startIndex === right.startIndex
+    && left.endIndex === right.endIndex
+    && left.path === right.path
+    && left.line === right.line
+    && left.column === right.column,
+  );
+}
+
+export interface TerminalViewportContextLink {
+  text: string;
+  open: () => void;
+}
 
 export interface TerminalViewportProps {
   workspaceId: string;
@@ -16,7 +63,7 @@ export interface TerminalViewportProps {
   terminalTheme: TerminalThemeDefinition;
   isActive: boolean;
   isVisible: boolean;
-  onContextMenuRequest: (clientX: number, clientY: number) => void;
+  onContextMenuRequest: (clientX: number, clientY: number, link?: TerminalViewportContextLink) => void;
 }
 
 export const TerminalViewport = memo(function TerminalViewport({
@@ -35,10 +82,67 @@ export const TerminalViewport = memo(function TerminalViewport({
   const termRef = useRef<ReturnType<typeof getOrCreateTerminal>['term'] | null>(null);
   const fitAddonRef = useRef<ReturnType<typeof getOrCreateTerminal>['fitAddon'] | null>(null);
   const contextMenuRequestRef = useRef(onContextMenuRequest);
+  const hoveredLinkRef = useRef<TerminalFileLinkMatch | null>(null);
+  const session = useAppStore(selectSessionById(sessionId));
+  const workspaces = useAppStore((state) => state.config.workspaces);
+  const recentWorkspaces = useAppStore((state) => state.config.recentWorkspaces);
+  const workspaceRoots = useAppStore((state) => state.workspaceById.get(workspaceId)?.roots ?? EMPTY_WORKSPACE_ROOTS);
+  const workspaceRootPaths = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...workspaceRoots.map((root) => root.path),
+          ...workspaces.flatMap((workspace) => workspace.roots.map((root) => root.path)),
+          ...recentWorkspaces.flatMap((workspace) => workspace.rootPaths),
+        ]),
+      ),
+    [recentWorkspaces, workspaceRoots, workspaces],
+  );
+  const linkContextRef = useRef({
+    workspaceId,
+    cwd: session?.cwd,
+    workspaceRootPaths,
+  });
 
   useEffect(() => {
     contextMenuRequestRef.current = onContextMenuRequest;
   }, [onContextMenuRequest]);
+
+  const openTerminalFileLink = (match: TerminalFileLinkMatch) => {
+    const { cwd, workspaceId: currentWorkspaceId, workspaceRootPaths: currentWorkspaceRootPaths } = linkContextRef.current;
+
+    void resolveTerminalFileLink(match, {
+      cwd,
+      workspaceRootPaths: currentWorkspaceRootPaths,
+      probeFile: probeTerminalFilePath,
+    }).then((resolved) => {
+      if (!resolved) {
+        return;
+      }
+
+      const nextRequestId = ++terminalFileNavigationRequestId;
+      useAppStore.getState().openFileViewer(currentWorkspaceId, resolved.path, {
+        initialMode: 'source',
+        ...(resolved.line
+          ? {
+              navigationTarget: {
+                line: resolved.line,
+                ...(resolved.column ? { column: resolved.column } : {}),
+                requestId: nextRequestId,
+              },
+            }
+          : {}),
+      });
+    });
+  };
+
+  useEffect(() => {
+    linkContextRef.current = {
+      workspaceId,
+      cwd: session?.cwd,
+      workspaceRootPaths,
+    };
+  }, [session?.cwd, workspaceId, workspaceRootPaths]);
 
   useEffect(() => {
     if (!paneId) {
@@ -92,7 +196,17 @@ export const TerminalViewport = memo(function TerminalViewport({
       const mouseEvent = event as globalThis.MouseEvent;
       mouseEvent.preventDefault();
       mouseEvent.stopPropagation();
-      contextMenuRequestRef.current(mouseEvent.clientX, mouseEvent.clientY);
+      const hoveredLink = hoveredLinkRef.current;
+      contextMenuRequestRef.current(
+        mouseEvent.clientX,
+        mouseEvent.clientY,
+        hoveredLink
+          ? {
+              text: hoveredLink.text,
+              open: () => openTerminalFileLink(hoveredLink),
+            }
+          : undefined,
+      );
     };
 
     container.addEventListener('contextmenu', handleNativeContextMenu, true);
@@ -152,6 +266,71 @@ export const TerminalViewport = memo(function TerminalViewport({
       cancelAnimationFrame(rafId);
     };
   }, [isActive, isVisible, sessionId]);
+
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || typeof term.registerLinkProvider !== 'function') {
+      return;
+    }
+
+    const linkProviderDisposable = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const wrappedText = collectWrappedBufferText(term.buffer.active, bufferLineNumber);
+        if (!wrappedText) {
+          callback(undefined);
+          return;
+        }
+
+        const links = extractTerminalFileLinks(wrappedText.text)
+          .map((match) => {
+            const range = createBufferRangeFromOffsets(wrappedText, match.startIndex, match.endIndex);
+            if (!range || !doesBufferRangeIntersectLine(range, bufferLineNumber)) {
+              return null;
+            }
+
+            return {
+              range,
+              text: match.text,
+              decorations: {
+                pointerCursor: true,
+                underline: true,
+              },
+              activate(event: MouseEvent) {
+                if (
+                  !shouldActivateTerminalFileLink({
+                    ctrlKey: event.ctrlKey,
+                    metaKey: event.metaKey,
+                    isMac: isMacPlatform,
+                  })
+                ) {
+                  return;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+                openTerminalFileLink(match);
+              },
+              hover() {
+                hoveredLinkRef.current = match;
+              },
+              leave() {
+                if (isSameTerminalFileLinkMatch(hoveredLinkRef.current, match)) {
+                  hoveredLinkRef.current = null;
+                }
+              },
+            };
+          })
+          .filter((link): link is NonNullable<typeof link> => link != null);
+
+        callback(links.length > 0 ? links : undefined);
+      },
+    });
+
+    return () => {
+      hoveredLinkRef.current = null;
+      linkProviderDisposable.dispose();
+    };
+  }, [ptyId, sessionId, workspaceId]);
 
   useEffect(() => {
     const container = containerRef.current;

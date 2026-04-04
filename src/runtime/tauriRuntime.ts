@@ -37,6 +37,7 @@ export function createFallbackAppConfig(): AppConfig {
     terminalFontSize: 14,
     layoutSizes: [200, 280, 1000],
     middleColumnSizes: [300, 200],
+    workspaceSidebarSizes: [68, 32],
     theme: getDefaultThemeConfig(),
     completionUsage: {
       commands: {},

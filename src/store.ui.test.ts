@@ -85,6 +85,81 @@ describe('ui dialog store', () => {
     expect(useAppStore.getState().projectStates.get('project-1')?.activeTabId).toBe(firstTabId);
   });
 
+  it('stores terminal navigation targets on file viewer tabs', () => {
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/src/App.tsx', {
+      initialMode: 'source',
+      navigationTarget: {
+        line: 12,
+        column: 3,
+        requestId: 1,
+      },
+    });
+
+    expect(useAppStore.getState().projectStates.get('project-1')?.tabs[0]).toEqual({
+      kind: 'file-viewer',
+      id: expect.any(String),
+      filePath: 'D:/code/JavaScript/mini-term/src/App.tsx',
+      mode: 'source',
+      navigationTarget: {
+        line: 12,
+        column: 3,
+        requestId: 1,
+      },
+      status: 'idle',
+    });
+  });
+
+  it('reuses the same file viewer tab and updates navigation request ids', () => {
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/src/App.tsx', {
+      navigationTarget: {
+        line: 18,
+        requestId: 1,
+      },
+    });
+    const firstTabId = useAppStore.getState().projectStates.get('project-1')?.tabs[0]?.id;
+
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/src/App.tsx', {
+      navigationTarget: {
+        line: 18,
+        requestId: 2,
+      },
+    });
+
+    expect(useAppStore.getState().projectStates.get('project-1')?.tabs[0]).toEqual({
+      kind: 'file-viewer',
+      id: firstTabId,
+      filePath: 'D:/code/JavaScript/mini-term/src/App.tsx',
+      mode: 'source',
+      navigationTarget: {
+        line: 18,
+        requestId: 2,
+      },
+      status: 'idle',
+    });
+  });
+
+  it('clears a prior navigation target when reopening without navigation', () => {
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/src/App.tsx', {
+      navigationTarget: {
+        line: 24,
+        requestId: 1,
+      },
+    });
+    const firstTabId = useAppStore.getState().projectStates.get('project-1')?.tabs[0]?.id;
+
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/src/App.tsx', {
+      initialMode: 'source',
+    });
+
+    expect(useAppStore.getState().projectStates.get('project-1')?.tabs[0]).toEqual({
+      kind: 'file-viewer',
+      id: firstTabId,
+      filePath: 'D:/code/JavaScript/mini-term/src/App.tsx',
+      mode: 'source',
+      status: 'idle',
+    });
+  });
+
   it('updates file viewer tab mode in place', () => {
     useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/README.md');
     const tabId = useAppStore.getState().projectStates.get('project-1')?.tabs[0]?.id;

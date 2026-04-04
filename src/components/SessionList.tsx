@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, selectWorkspaceConfig } from '../store';
 import { showContextMenu } from '../utils/contextMenu';
@@ -7,7 +7,7 @@ import type { AiSession } from '../types';
 function formatTime(iso: string): string {
   if (!iso) return '';
   const date = new Date(iso);
-  if (isNaN(date.getTime())) return '';
+  if (Number.isNaN(date.getTime())) return '';
 
   const now = Date.now();
   const diff = now - date.getTime();
@@ -29,15 +29,33 @@ function formatTime(iso: string): string {
   return year === currentYear ? `${month}/${day}` : `${year}/${month}/${day}`;
 }
 
-const TYPE_BADGE: Record<string, { label: string; color: string }> = {
+const SESSION_GROUPS: Array<{
+  type: AiSession['sessionType'];
+  label: string;
+  emptyLabel: string;
+}> = [
+  { type: 'codex', label: 'Codex', emptyLabel: 'No Codex sessions' },
+  { type: 'claude', label: 'Claude', emptyLabel: 'No Claude sessions' },
+];
+
+const TYPE_BADGE: Record<AiSession['sessionType'], { label: string; color: string }> = {
   claude: { label: 'C', color: 'var(--color-ai)' },
   codex: { label: 'X', color: 'var(--color-success)' },
 };
 
+function getResumeCommand(session: AiSession) {
+  return session.sessionType === 'claude'
+    ? `claude --resume ${session.id}`
+    : `codex resume ${session.id}`;
+}
+
 export function SessionList() {
   const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
   const activeWorkspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
-  const rootNameByPath = new Map(activeWorkspace?.roots.map((root) => [root.path, root.name]) ?? []);
+  const rootNameByPath = useMemo(
+    () => new Map(activeWorkspace?.roots.map((root) => [root.path, root.name]) ?? []),
+    [activeWorkspace],
+  );
 
   const [sessions, setSessions] = useState<AiSession[]>([]);
   const [loading, setLoading] = useState(false);
@@ -62,6 +80,14 @@ export function SessionList() {
     }
   }, [activeWorkspace, fetchSessions]);
 
+  const sessionsByType = useMemo(
+    () => ({
+      codex: sessions.filter((session) => session.sessionType === 'codex'),
+      claude: sessions.filter((session) => session.sessionType === 'claude'),
+    }),
+    [sessions],
+  );
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-[var(--bg-surface)]">
       <div className="flex items-center justify-between px-3 pt-2.5 pb-1.5 text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
@@ -77,9 +103,9 @@ export function SessionList() {
         ) : null}
       </div>
 
-      <div className="flex-1 overflow-y-auto px-1.5">
+      <div className="flex-1 overflow-y-auto px-1.5 pb-2">
         {loading && sessions.length === 0 ? (
-          <div className="px-2.5 py-3 text-center text-xs text-[var(--text-muted)]">Loading…</div>
+          <div className="px-2.5 py-3 text-center text-xs text-[var(--text-muted)]">Loading...</div>
         ) : null}
 
         {!loading && sessions.length === 0 ? (
@@ -88,53 +114,71 @@ export function SessionList() {
           </div>
         ) : null}
 
-        {sessions.map((session) => {
-          const badge = TYPE_BADGE[session.sessionType] ?? TYPE_BADGE.claude;
-          const rootLabel = session.projectPath ? rootNameByPath.get(session.projectPath) ?? session.projectPath : undefined;
+        {sessions.length > 0
+          ? SESSION_GROUPS.map((group) => {
+              const groupSessions = sessionsByType[group.type];
 
-          return (
-            <div
-              key={`${session.sessionType}-${session.id}`}
-              className="group flex cursor-default items-start gap-2 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-xs transition-colors hover:bg-[var(--border-subtle)]"
-              title={`${session.sessionType.toUpperCase()} · ${session.timestamp}`}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                const cmd = session.sessionType === 'claude'
-                  ? `claude --resume ${session.id}`
-                  : `codex resume ${session.id}`;
-                showContextMenu(event.clientX, event.clientY, [
-                  {
-                    label: 'Copy Resume Command',
-                    onClick: () => navigator.clipboard.writeText(cmd),
-                  },
-                ]);
-              }}
-            >
-              <span
-                className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-[10px] font-bold"
-                style={{ backgroundColor: `${badge.color}22`, color: badge.color }}
-              >
-                {badge.label}
-              </span>
+              return (
+                <div key={group.type} className="mb-2 last:mb-0">
+                  <div className="flex items-center justify-between px-2.5 pt-1.5 pb-1 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                    <span>{group.label}</span>
+                    <span>{groupSessions.length}</span>
+                  </div>
 
-              <div className="min-w-0 flex-1">
-                <div className="truncate leading-snug text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]">
-                  {session.title}
+                  {groupSessions.length === 0 ? (
+                    <div className="px-2.5 py-2 text-xs text-[var(--text-muted)]">{group.emptyLabel}</div>
+                  ) : (
+                    groupSessions.map((session) => {
+                      const badge = TYPE_BADGE[session.sessionType] ?? TYPE_BADGE.claude;
+                      const rootLabel = session.projectPath
+                        ? rootNameByPath.get(session.projectPath) ?? session.projectPath
+                        : undefined;
+
+                      return (
+                        <div
+                          key={`${session.sessionType}-${session.id}`}
+                          className="group flex cursor-default items-start gap-2 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-xs transition-colors hover:bg-[var(--border-subtle)]"
+                          title={`${session.sessionType.toUpperCase()} · ${session.timestamp}`}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            showContextMenu(event.clientX, event.clientY, [
+                              {
+                                label: 'Copy Resume Command',
+                                onClick: () => navigator.clipboard.writeText(getResumeCommand(session)),
+                              },
+                            ]);
+                          }}
+                        >
+                          <span
+                            className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-[10px] font-bold"
+                            style={{ backgroundColor: `${badge.color}22`, color: badge.color }}
+                          >
+                            {badge.label}
+                          </span>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate leading-snug text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]">
+                              {session.title}
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[var(--text-muted)]">
+                              <span>{formatTime(session.timestamp)}</span>
+                              {rootLabel ? (
+                                <>
+                                  <span>·</span>
+                                  <span className="truncate">{rootLabel}</span>
+                                </>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
-                <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[var(--text-muted)]">
-                  <span>{formatTime(session.timestamp)}</span>
-                  {rootLabel ? (
-                    <>
-                      <span>·</span>
-                      <span className="truncate">{rootLabel}</span>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+              );
+            })
+          : null}
       </div>
     </div>
   );

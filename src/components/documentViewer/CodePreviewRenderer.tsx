@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
 import type { ThemePresetId } from '../../types';
 import { highlightCodeToHtml } from './shiki';
@@ -14,6 +14,7 @@ export default function CodePreviewRenderer(context: PreviewRenderContext) {
   const themePreset = useAppStore((state) => state.config.theme.preset);
   const [highlightedHtml, setHighlightedHtml] = useState('');
   const [highlightError, setHighlightError] = useState('');
+  const highlightedHostRef = useRef<HTMLDivElement | null>(null);
   const canHighlight = language.highlighterKey !== 'text';
 
   const shikiTheme = getShikiTheme(themePreset);
@@ -54,6 +55,16 @@ export default function CodePreviewRenderer(context: PreviewRenderContext) {
       cancelled = true;
     };
   }, [active, canHighlight, language.highlighterKey, result.content, shikiTheme]);
+
+  useEffect(() => {
+    if (!highlightedHtml || !highlightedHostRef.current) {
+      return;
+    }
+
+    highlightedHostRef.current.querySelectorAll('.line').forEach((line, index) => {
+      line.setAttribute('data-source-line', String(index + 1));
+    });
+  }, [highlightedHtml, viewerScopeId]);
 
   const scopedCss = `
 [data-shiki-viewer="${viewerScopeId}"] .shiki {
@@ -118,7 +129,11 @@ export default function CodePreviewRenderer(context: PreviewRenderContext) {
           }}
         >
           <style>{scopedCss}</style>
-          <div data-shiki-viewer={viewerScopeId} dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+          <div
+            ref={highlightedHostRef}
+            data-shiki-viewer={viewerScopeId}
+            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          />
         </div>
       ) : (
         <TextPreviewRenderer {...context} testId="code-preview-fallback" />

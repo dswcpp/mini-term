@@ -23,12 +23,14 @@ export function TextPreviewRenderer({ result, testId }: TextPreviewRendererProps
         {result.content.split('\n').map((line, index) => (
           <div
             key={index}
+            data-source-line={index + 1}
             className="flex"
             style={{
               backgroundColor: 'transparent',
             }}
           >
             <span
+              data-source-gutter="true"
               className="w-6 flex-shrink-0 select-none pr-0.5 text-right opacity-75"
               style={{
                 color: 'var(--viewer-gutter-text)',

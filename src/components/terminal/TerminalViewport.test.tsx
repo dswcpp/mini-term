@@ -24,6 +24,14 @@ class IntersectionObserverMock {
   disconnect() {}
 }
 
+function createBufferLine(text: string, isWrapped = false) {
+  return {
+    isWrapped,
+    length: text.length,
+    translateToString: () => text,
+  };
+}
+
 describe('TerminalViewport', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -34,12 +42,20 @@ describe('TerminalViewport', () => {
 
     getOrCreateTerminalMock.mockImplementation(() => {
       const wrapper = document.createElement('div');
+      const registerLinkProvider = vi.fn(() => ({ dispose: vi.fn() }));
       const term = {
         options: {},
         rows: 24,
         cols: 80,
+        buffer: {
+          active: {
+            length: 1,
+            getLine: (line: number) => (line === 0 ? createBufferLine('src/App.tsx:12') : undefined),
+          },
+        },
         refresh: vi.fn(),
         focus: vi.fn(),
+        registerLinkProvider,
       };
       const fitAddon = {
         fit: vi.fn(),
@@ -97,7 +113,7 @@ describe('TerminalViewport', () => {
     fireEvent.contextMenu(wrapper, { clientX: 12, clientY: 16 });
 
     expect(firstContextMenu).not.toHaveBeenCalled();
-    expect(secondContextMenu).toHaveBeenCalledWith(12, 16);
+    expect(secondContextMenu).toHaveBeenCalledWith(12, 16, undefined);
   });
 
   it('focuses the terminal when the pane becomes active and visible', async () => {
@@ -122,5 +138,51 @@ describe('TerminalViewport', () => {
     await waitFor(() => {
       expect(term.focus).toHaveBeenCalled();
     });
+  });
+
+  it('passes an open-link action to the context menu when a terminal link is hovered', () => {
+    const onContextMenuRequest = vi.fn();
+    const terminalTheme = { background: '#000000' } as TerminalThemeDefinition;
+
+    render(
+      <TerminalViewport
+        workspaceId="workspace-5"
+        tabId="tab-5"
+        sessionId="session-5"
+        paneId="pane-5"
+        ptyId={5}
+        fontSize={14}
+        terminalTheme={terminalTheme}
+        isActive
+        isVisible
+        onContextMenuRequest={onContextMenuRequest}
+      />,
+    );
+
+    const result = getOrCreateTerminalMock.mock.results[0]?.value;
+    const wrapper = result.wrapper as HTMLDivElement;
+    const registerLinkProvider = result.term.registerLinkProvider as ReturnType<typeof vi.fn>;
+    const provider = registerLinkProvider.mock.calls[0]?.[0] as {
+      provideLinks: (
+        line: number,
+        callback: (links?: Array<{ text: string; hover?: () => void }>) => void,
+      ) => void;
+    };
+
+    let links: Array<{ text: string; hover?: () => void }> | undefined;
+    provider.provideLinks(1, (resolved) => {
+      links = resolved;
+    });
+
+    links?.[0]?.hover?.();
+    fireEvent.contextMenu(wrapper, { clientX: 24, clientY: 32 });
+
+    expect(onContextMenuRequest).toHaveBeenCalledTimes(1);
+    expect(onContextMenuRequest.mock.calls[0]?.[0]).toBe(24);
+    expect(onContextMenuRequest.mock.calls[0]?.[1]).toBe(32);
+    expect(onContextMenuRequest.mock.calls[0]?.[2]).toMatchObject({
+      text: 'src/App.tsx:12',
+    });
+    expect(typeof onContextMenuRequest.mock.calls[0]?.[2]?.open).toBe('function');
   });
 });

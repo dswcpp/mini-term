@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Allotment } from 'allotment';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
@@ -22,6 +23,16 @@ import { SessionList } from './SessionList';
 import { StatusDot } from './StatusDot';
 
 const MAX_ROOT_BADGES = 3;
+const DEFAULT_SIDEBAR_PANEL_SIZES = [68, 32];
+const SIDEBAR_PANEL_SIZE_TOLERANCE = 0.5;
+
+function areSidebarPanelSizesEquivalent(left: number[], right: number[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((value, index) => Math.abs(value - right[index]) < SIDEBAR_PANEL_SIZE_TOLERANCE);
+}
 
 function formatRecentLabel(lastOpenedAt: number) {
   const diff = Date.now() - lastOpenedAt;
@@ -161,6 +172,8 @@ function RecentRow({
 export function WorkspaceSidebar() {
   const allWorkspaces = useAppStore((state) => state.config.workspaces);
   const recentWorkspaces = useAppStore((state) => state.config.recentWorkspaces);
+  const workspaceSidebarSizes = useAppStore((state) => state.config.workspaceSidebarSizes);
+  const setConfig = useAppStore((state) => state.setConfig);
 
   const pinned = useMemo(() => allWorkspaces.filter((w) => w.pinned), [allWorkspaces]);
   const openWorkspaces = useMemo(() => allWorkspaces.filter((w) => !w.pinned), [allWorkspaces]);
@@ -190,10 +203,41 @@ export function WorkspaceSidebar() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const sidebarSaveTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const ignoreInitialSplitRef = useRef(true);
+  const initialSidebarSizesRef = useRef<number[]>(
+    workspaceSidebarSizes?.length === 2 ? [...workspaceSidebarSizes] : [...DEFAULT_SIDEBAR_PANEL_SIZES],
+  );
 
   const persistConfig = useCallback(async () => {
     await invoke('save_config', { config: useAppStore.getState().config });
   }, []);
+
+  useEffect(() => () => clearTimeout(sidebarSaveTimerRef.current), []);
+
+  const saveWorkspaceSidebarSizes = useCallback(
+    (sizes: number[]) => {
+      clearTimeout(sidebarSaveTimerRef.current);
+      sidebarSaveTimerRef.current = setTimeout(() => {
+        const currentConfig = useAppStore.getState().config;
+        const currentSizes =
+          currentConfig.workspaceSidebarSizes?.length === 2
+            ? currentConfig.workspaceSidebarSizes
+            : DEFAULT_SIDEBAR_PANEL_SIZES;
+        if (areSidebarPanelSizesEquivalent(currentSizes, sizes)) {
+          return;
+        }
+
+        const nextConfig = {
+          ...currentConfig,
+          workspaceSidebarSizes: sizes,
+        };
+        setConfig(nextConfig);
+        void invoke('save_config', { config: useAppStore.getState().config });
+      }, 240);
+    },
+    [setConfig],
+  );
 
   const getOwnedWorkspacesForPaths = useCallback((paths: string[]) => {
     const ownerIds = Array.from(
@@ -566,101 +610,128 @@ export function WorkspaceSidebar() {
     [forgetRecentWorkspace, persistConfig, reopenRecentWorkspace],
   );
 
+  const handleSidebarSplitChange = useCallback(
+    (sizes: number[]) => {
+      if (ignoreInitialSplitRef.current) {
+        ignoreInitialSplitRef.current = false;
+        return;
+      }
+
+      if (sizes.length !== 2) {
+        return;
+      }
+
+      saveWorkspaceSidebarSizes(sizes);
+    },
+    [saveWorkspaceSidebarSizes],
+  );
+
+  const resolvedSidebarSizes =
+    workspaceSidebarSizes?.length === 2 ? workspaceSidebarSizes : DEFAULT_SIDEBAR_PANEL_SIZES;
+
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-[var(--bg-surface)]">
-      <div className="flex items-center justify-between px-3 pt-3 pb-1.5">
-        <div className="text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">Workspaces</div>
-        <div className="flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
-          <button
-            type="button"
-            className="rounded-[var(--radius-sm)] px-2 py-1 transition-colors hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
-            onClick={() => setSwitcherOpen(true)}
-          >
-            Switch
-          </button>
-          <button
-            type="button"
-            className="rounded-[var(--radius-sm)] px-2 py-1 transition-colors hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
-            onClick={(event) => {
-              showContextMenu(event.clientX, event.clientY, [
-                {
-                  label: 'Open Folder As Workspace',
-                  onClick: () => {
-                    void handleCreateWorkspace(false);
-                  },
-                },
-                {
-                  label: 'Create Multi-root Workspace',
-                  onClick: () => {
-                    void handleCreateWorkspace(true);
-                  },
-                },
-              ]);
-            }}
-          >
-            +
-          </button>
-        </div>
-      </div>
+      <Allotment vertical defaultSizes={initialSidebarSizesRef.current ?? resolvedSidebarSizes} onChange={handleSidebarSplitChange}>
+        <Allotment.Pane minSize={220}>
+          <div className="flex h-full flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-3 pt-3 pb-1.5">
+              <div className="text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">Workspaces</div>
+              <div className="flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+                <button
+                  type="button"
+                  className="rounded-[var(--radius-sm)] px-2 py-1 transition-colors hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
+                  onClick={() => setSwitcherOpen(true)}
+                >
+                  Switch
+                </button>
+                <button
+                  type="button"
+                  className="rounded-[var(--radius-sm)] px-2 py-1 transition-colors hover:bg-[var(--border-subtle)] hover:text-[var(--text-primary)]"
+                  onClick={(event) => {
+                    showContextMenu(event.clientX, event.clientY, [
+                      {
+                        label: 'Open Folder As Workspace',
+                        onClick: () => {
+                          void handleCreateWorkspace(false);
+                        },
+                      },
+                      {
+                        label: 'Create Multi-root Workspace',
+                        onClick: () => {
+                          void handleCreateWorkspace(true);
+                        },
+                      },
+                    ]);
+                  }}
+                >
+                  +
+                </button>
+              </div>
+            </div>
 
-      <div className="flex-1 overflow-y-auto px-1.5 pb-2">
-        <div className="space-y-1.5">
-          {pinned.length > 0 ? (
-            <>
-              <div className="px-2.5 pt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">Pinned</div>
-              {pinned.map((workspace) => (
-                <WorkspaceRow
-                  key={workspace.id}
-                  workspace={workspace}
-                  active={workspace.id === activeWorkspaceId}
-                  section="pinned"
-                  onClick={() => setActiveWorkspace(workspace.id)}
-                  onContextMenu={(event) => handleWorkspaceContextMenu(event, workspace)}
-                />
-              ))}
-            </>
-          ) : null}
+            <div className="flex-1 overflow-y-auto px-1.5 pb-2">
+              <div className="space-y-1.5">
+                {pinned.length > 0 ? (
+                  <>
+                    <div className="px-2.5 pt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">Pinned</div>
+                    {pinned.map((workspace) => (
+                      <WorkspaceRow
+                        key={workspace.id}
+                        workspace={workspace}
+                        active={workspace.id === activeWorkspaceId}
+                        section="pinned"
+                        onClick={() => setActiveWorkspace(workspace.id)}
+                        onContextMenu={(event) => handleWorkspaceContextMenu(event, workspace)}
+                      />
+                    ))}
+                  </>
+                ) : null}
 
-          <div className="px-2.5 pt-2 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">Open</div>
-          {openWorkspaces.length === 0 ? (
-            <div className="px-2.5 py-2 text-xs text-[var(--text-muted)]">No open workspaces</div>
-          ) : (
-            openWorkspaces.map((workspace) => (
-              <WorkspaceRow
-                key={workspace.id}
-                workspace={workspace}
-                active={workspace.id === activeWorkspaceId}
-                section="open"
-                onClick={() => setActiveWorkspace(workspace.id)}
-                onContextMenu={(event) => handleWorkspaceContextMenu(event, workspace)}
-              />
-            ))
-          )}
+                <div className="px-2.5 pt-2 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">Open</div>
+                {openWorkspaces.length === 0 ? (
+                  <div className="px-2.5 py-2 text-xs text-[var(--text-muted)]">No open workspaces</div>
+                ) : (
+                  openWorkspaces.map((workspace) => (
+                    <WorkspaceRow
+                      key={workspace.id}
+                      workspace={workspace}
+                      active={workspace.id === activeWorkspaceId}
+                      section="open"
+                      onClick={() => setActiveWorkspace(workspace.id)}
+                      onContextMenu={(event) => handleWorkspaceContextMenu(event, workspace)}
+                    />
+                  ))
+                )}
 
-          <div className="px-2.5 pt-2 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">Recent</div>
-          {recent.length === 0 ? (
-            <div className="px-2.5 py-2 text-xs text-[var(--text-muted)]">No recent workspaces</div>
-          ) : (
-            recent.map((workspace) => (
-              <RecentRow
-                key={workspace.id}
-                workspace={workspace}
-                onClick={async () => {
-                  const id = reopenRecentWorkspace(workspace.id);
-                  if (id) {
-                    await persistConfig();
-                  }
-                }}
-                onContextMenu={(event) => handleRecentContextMenu(event, workspace)}
-              />
-            ))
-          )}
-        </div>
-      </div>
+                <div className="px-2.5 pt-2 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">Recent</div>
+                {recent.length === 0 ? (
+                  <div className="px-2.5 py-2 text-xs text-[var(--text-muted)]">No recent workspaces</div>
+                ) : (
+                  recent.map((workspace) => (
+                    <RecentRow
+                      key={workspace.id}
+                      workspace={workspace}
+                      onClick={async () => {
+                        const id = reopenRecentWorkspace(workspace.id);
+                        if (id) {
+                          await persistConfig();
+                        }
+                      }}
+                      onContextMenu={(event) => handleRecentContextMenu(event, workspace)}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </Allotment.Pane>
 
-      <div className="min-h-[140px] border-t border-[var(--border-subtle)]">
-        <SessionList />
-      </div>
+        <Allotment.Pane minSize={140}>
+          <div className="h-full border-t border-[var(--border-subtle)]">
+            <SessionList />
+          </div>
+        </Allotment.Pane>
+      </Allotment>
 
       {switcherOpen ? (
         <div className="absolute inset-0 z-20 flex items-start justify-center bg-black/30 px-3 pt-12" onClick={() => setSwitcherOpen(false)}>

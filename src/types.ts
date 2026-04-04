@@ -85,6 +85,7 @@ export interface AppConfig {
   layoutSizes?: number[];
   theme: ThemeConfig;
   middleColumnSizes?: number[];
+  workspaceSidebarSizes?: number[];
   completionUsage?: CompletionUsageStats;
 }
 
@@ -222,11 +223,18 @@ export interface TerminalTab {
   status: PaneStatus;
 }
 
+export interface FileNavigationTarget {
+  line: number;
+  column?: number;
+  requestId: number;
+}
+
 export interface FileViewerTab {
   kind: 'file-viewer';
   id: string;
   filePath: string;
   mode: PreviewMode;
+  navigationTarget?: FileNavigationTarget;
   status: PaneStatus;
 }
 
@@ -368,6 +376,11 @@ export interface FileContentResult {
   content: string;
   isBinary: boolean;
   tooLarge: boolean;
+}
+
+export interface FileViewerOpenOptions {
+  initialMode?: PreviewMode;
+  navigationTarget?: FileNavigationTarget;
 }
 
 export interface GitRepoInfo {

@@ -31,7 +31,7 @@ import {
 import { buildTerminalContextMenu } from './terminalContextMenu';
 import { TerminalChrome, type TerminalDragKind, type TerminalDropZone } from './TerminalChrome';
 import { RunProfileInspector } from './RunProfileInspector';
-import { TerminalViewport } from './TerminalViewport';
+import { TerminalViewport, type TerminalViewportContextLink } from './TerminalViewport';
 
 const appWindow = isTauriRuntime() ? getCurrentWindow() : null;
 
@@ -296,7 +296,7 @@ export const TerminalController = memo(function TerminalController({
   }, [closeRunProfileInspector, paneId, setPaneRunCommand, tabId]);
 
   const openTerminalContextMenu = useCallback(
-    async (clientX: number, clientY: number) => {
+    async (clientX: number, clientY: number, link?: TerminalViewportContextLink) => {
       const isWindowMaximized = appWindow ? await appWindow.isMaximized().catch(() => false) : false;
       const hasSelection = Boolean(getCachedTerminal(sessionId)?.term.getSelection());
       const canNotifyOnCompletion = status === 'ai-working';
@@ -305,6 +305,7 @@ export const TerminalController = memo(function TerminalController({
         clientX,
         clientY,
         buildTerminalContextMenu({
+          canOpenLink: Boolean(link),
           hasSelection,
           canSplit: Boolean(paneId && onSplit),
           canClosePane: Boolean(paneId && onClose),
@@ -313,6 +314,7 @@ export const TerminalController = memo(function TerminalController({
           notifyOnCompletion,
           isWindowMaximized,
           onCopy: handleCopy,
+          onOpenLink: () => link?.open(),
           onPaste: handlePaste,
           onToggleNotifyOnCompletion: () => setNotifyOnCompletion((value) => !value),
           onClearScreen: handleClearScreen,
@@ -377,8 +379,12 @@ export const TerminalController = memo(function TerminalController({
     openTerminalContextMenuRef.current = openTerminalContextMenu;
   }, [openTerminalContextMenu]);
 
-  const handleViewportContextMenuRequest = useCallback((clientX: number, clientY: number) => {
-    void openTerminalContextMenuRef.current(clientX, clientY);
+  const handleViewportContextMenuRequest = useCallback((
+    clientX: number,
+    clientY: number,
+    link?: TerminalViewportContextLink,
+  ) => {
+    void openTerminalContextMenuRef.current(clientX, clientY, link);
   }, []);
 
   useEffect(() => {

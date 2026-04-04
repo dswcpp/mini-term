@@ -60,6 +60,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub middle_column_sizes: Option<Vec<f64>>,
     #[serde(default)]
+    pub workspace_sidebar_sizes: Option<Vec<f64>>,
+    #[serde(default)]
     pub completion_usage: CompletionUsageConfig,
 }
 
@@ -321,6 +323,7 @@ impl Default for AppConfig {
             layout_sizes: None,
             theme: ThemeConfig::default(),
             middle_column_sizes: None,
+            workspace_sidebar_sizes: None,
             completion_usage: CompletionUsageConfig::default(),
         }
     }
