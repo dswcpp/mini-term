@@ -1,4 +1,4 @@
-use git2::{Repository, Status, StatusOptions};
+use git2::{BranchType, Repository, Status, StatusOptions};
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -164,6 +164,17 @@ pub struct GitRepoInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct GitCompletionData {
+    pub repo_root: String,
+    pub current_branch: Option<String>,
+    pub local_branches: Vec<String>,
+    pub remote_branches: Vec<String>,
+    pub remotes: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct GitCommitInfo {
     pub hash: String,
     pub short_hash: String,
@@ -236,6 +247,82 @@ fn find_repos(project_path: &Path) -> Vec<(String, PathBuf, Repository)> {
     scan(project_path, 1, &mut repos);
 
     repos
+}
+
+fn sort_and_dedupe(mut values: Vec<String>) -> Vec<String> {
+    values.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()).then_with(|| left.cmp(right)));
+    values.dedup();
+    values
+}
+
+#[tauri::command]
+pub fn get_git_completion_data(cwd: String) -> Result<Option<GitCompletionData>, String> {
+    let repo = match Repository::discover(Path::new(&cwd)) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(None),
+    };
+
+    let repo_root = repo
+        .workdir()
+        .unwrap_or_else(|| repo.path())
+        .to_string_lossy()
+        .to_string();
+
+    let current_branch = repo
+        .head()
+        .ok()
+        .and_then(|head| head.shorthand().map(|value| value.to_string()))
+        .filter(|name| name != "HEAD");
+
+    let mut local_branches = Vec::new();
+    if let Ok(branches) = repo.branches(Some(BranchType::Local)) {
+        for branch in branches.flatten() {
+            if let Ok(Some(name)) = branch.0.name() {
+                local_branches.push(name.to_string());
+            }
+        }
+    }
+
+    let mut remote_branches = Vec::new();
+    if let Ok(branches) = repo.branches(Some(BranchType::Remote)) {
+        for branch in branches.flatten() {
+            if let Ok(Some(name)) = branch.0.name() {
+                if !name.ends_with("/HEAD") {
+                    remote_branches.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    let remotes = repo
+        .remotes()
+        .map(|remotes| {
+            remotes
+                .iter()
+                .flatten()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let tags = repo
+        .tag_names(None)
+        .map(|tags| {
+            tags.iter()
+                .flatten()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(Some(GitCompletionData {
+        repo_root,
+        current_branch,
+        local_branches: sort_and_dedupe(local_branches),
+        remote_branches: sort_and_dedupe(remote_branches),
+        remotes: sort_and_dedupe(remotes),
+        tags: sort_and_dedupe(tags),
+    }))
 }
 
 #[tauri::command]

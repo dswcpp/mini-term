@@ -1,11 +1,11 @@
-﻿import { useCallback, type MouseEvent as ReactMouseEvent } from 'react';
-import { Allotment } from 'allotment';
+import { useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppStore, genId, collectPtyIds, saveLayoutToConfig } from '../store';
+import { useAppStore, genId, collectPtyIds, saveLayoutToConfig, selectWorkspaceState } from '../store';
 import { createTerminalPane, createTerminalSessionMeta } from '../utils/session';
 import { TabBar } from './TabBar';
-import { SplitLayout } from './SplitLayout';
-import { SessionInspector } from './terminal/SessionInspector';
+import { TerminalTabHost } from './TerminalTabHost';
+import { DocumentTabHost } from './DocumentTabHost';
+import { CommitDiffTabHost, WorktreeDiffTabHost } from './DiffTabHost';
 import {
   collectPaneIds,
   findPane,
@@ -17,15 +17,25 @@ import {
 import { showContextMenu } from '../utils/contextMenu';
 import { showPrompt } from '../utils/prompt';
 import { disposeTerminal } from '../utils/terminalCache';
-import type { PaneState, ShellConfig, SplitNode, TerminalTab } from '../types';
+import type { PaneState, ShellConfig, SplitNode, TerminalTab, WorkspaceTab } from '../types';
 
 interface Props {
-  projectId: string;
-  projectPath: string;
+  workspaceId: string;
+  workspacePath: string;
+  isVisible: boolean;
   onOpenSettings?: () => void;
 }
 
-function getTabTitle(tab: TerminalTab): string {
+function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
+  return tab.kind === 'terminal';
+}
+
+function getTerminalTabById(ps: { tabs: WorkspaceTab[] } | undefined, tabId: string): TerminalTab | null {
+  const tab = ps?.tabs.find((item) => item.id === tabId);
+  return tab && isTerminalTab(tab) ? tab : null;
+}
+
+function getDefaultTerminalTitle(tab: TerminalTab): string {
   if (tab.customTitle) return tab.customTitle;
   if (tab.splitLayout.type === 'leaf') return tab.splitLayout.pane.shellName;
   return '分屏终端';
@@ -36,35 +46,23 @@ function getFirstPane(node: SplitNode): PaneState {
   return getFirstPane(node.children[0]);
 }
 
-export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) {
+export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSettings }: Props) {
   const availableShells = useAppStore((state) => state.config.availableShells);
   const defaultShell = useAppStore((state) => state.config.defaultShell);
   const addTab = useAppStore((state) => state.addTab);
   const updateTabLayout = useAppStore((state) => state.updateTabLayout);
   const removeTab = useAppStore((state) => state.removeTab);
   const removeSession = useAppStore((state) => state.removeSession);
-  const activePaneByTab = useAppStore((state) => state.activePaneByTab);
+  const setFileViewerTabMode = useAppStore((state) => state.setFileViewerTabMode);
   const setActivePaneForTab = useAppStore((state) => state.setActivePaneForTab);
   const clearActivePaneForTab = useAppStore((state) => state.clearActivePaneForTab);
   const upsertSession = useAppStore((state) => state.upsertSession);
   const setTabCustomTitle = useAppStore((state) => state.setTabCustomTitle);
-  const sessions = useAppStore((state) => state.sessions);
-  const ps = useAppStore((state) => state.projectStates.get(projectId));
-
-  const getActivePane = useCallback(
-    (tab: TerminalTab) => {
-      const paneId = activePaneByTab.get(tab.id);
-      return (paneId ? findPane(tab.splitLayout, paneId) : null) ?? getFirstPane(tab.splitLayout);
-    },
-    [activePaneByTab],
-  );
+  const ps = useAppStore(selectWorkspaceState(workspaceId));
 
   const handleCloseTab = useCallback(
     async (tabId: string) => {
-      const tab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const tab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
 
       if (tab) {
         const ptyIds = collectPtyIds(tab.splitLayout);
@@ -76,10 +74,10 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       }
 
       clearActivePaneForTab(tabId);
-      removeTab(projectId, tabId);
-      saveLayoutToConfig(projectId);
+      removeTab(workspaceId, tabId);
+      saveLayoutToConfig(workspaceId);
     },
-    [clearActivePaneForTab, projectId, removeSession, removeTab],
+    [clearActivePaneForTab, removeSession, removeTab, workspaceId],
   );
 
   const handleNewTab = useCallback(
@@ -93,12 +91,13 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       const ptyId = await invoke<number>('create_pty', {
         shell: shell.command,
         args: shell.args ?? [],
-        cwd: projectPath,
+        cwd: workspacePath,
       });
-      upsertSession(createTerminalSessionMeta(shell.name, ptyId, projectPath));
+      upsertSession(createTerminalSessionMeta(shell.name, ptyId, workspacePath));
 
       const pane = createTerminalPane(shell.name, ptyId, genId());
       const tab: TerminalTab = {
+        kind: 'terminal',
         id: genId(),
         status: 'idle',
         splitLayout: {
@@ -107,11 +106,11 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         },
       };
 
-      addTab(projectId, tab);
+      addTab(workspaceId, tab);
       setActivePaneForTab(tab.id, pane.id);
-      saveLayoutToConfig(projectId);
+      saveLayoutToConfig(workspaceId);
     },
-    [addTab, availableShells, defaultShell, projectId, projectPath, setActivePaneForTab, upsertSession],
+    [addTab, availableShells, defaultShell, setActivePaneForTab, upsertSession, workspaceId, workspacePath],
   );
 
   const handleNewTabClick = useCallback(
@@ -140,11 +139,8 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
 
   const handleSplitPane = useCallback(
     async (tabId: string, paneId: string, direction: 'horizontal' | 'vertical') => {
-      const tab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
-      if (!tab) return;
+      const workspaceState = useAppStore.getState().workspaceStates.get(workspaceId);
+      if (!getTerminalTabById(workspaceState, tabId)) return;
 
       const shell =
         availableShells.find((item) => item.name === defaultShell) ??
@@ -154,24 +150,21 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       const ptyId = await invoke<number>('create_pty', {
         shell: shell.command,
         args: shell.args ?? [],
-        cwd: projectPath,
+        cwd: workspacePath,
       });
-      upsertSession(createTerminalSessionMeta(shell.name, ptyId, projectPath));
+      upsertSession(createTerminalSessionMeta(shell.name, ptyId, workspacePath));
 
       const newPane: PaneState = createTerminalPane(shell.name, ptyId, genId());
 
-      const latestTab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const latestTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
       if (!latestTab) return;
 
       const nextLayout = insertSplit(latestTab.splitLayout, paneId, direction, newPane);
-      updateTabLayout(projectId, tabId, nextLayout);
+      updateTabLayout(workspaceId, tabId, nextLayout);
       setActivePaneForTab(tabId, newPane.id);
-      saveLayoutToConfig(projectId);
+      saveLayoutToConfig(workspaceId);
     },
-    [availableShells, defaultShell, projectId, projectPath, setActivePaneForTab, updateTabLayout, upsertSession],
+    [availableShells, defaultShell, setActivePaneForTab, updateTabLayout, upsertSession, workspaceId, workspacePath],
   );
 
   const handleTabDrop = useCallback(
@@ -182,11 +175,11 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       direction: 'horizontal' | 'vertical',
       position: 'before' | 'after',
     ) => {
-      const currentProjectState = useAppStore.getState().projectStates.get(projectId);
-      const targetTab = currentProjectState?.tabs.find((item) => item.id === targetTabId);
-      if (!currentProjectState || !targetTab || sourceTabId === targetTabId) return;
+      const currentWorkspaceState = useAppStore.getState().workspaceStates.get(workspaceId);
+      const targetTab = getTerminalTabById(currentWorkspaceState, targetTabId);
+      if (!currentWorkspaceState || !targetTab || sourceTabId === targetTabId) return;
 
-      const sourceTab = currentProjectState.tabs.find((item) => item.id === sourceTabId);
+      const sourceTab = getTerminalTabById(currentWorkspaceState, sourceTabId);
       if (!sourceTab) return;
 
       const nextLayout = insertSplitNode(
@@ -197,21 +190,18 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         position,
       );
 
-      updateTabLayout(projectId, targetTabId, nextLayout);
+      updateTabLayout(workspaceId, targetTabId, nextLayout);
       setActivePaneForTab(targetTabId, getFirstPane(sourceTab.splitLayout).id);
       clearActivePaneForTab(sourceTabId);
-      removeTab(projectId, sourceTabId);
-      saveLayoutToConfig(projectId);
+      removeTab(workspaceId, sourceTabId);
+      saveLayoutToConfig(workspaceId);
     },
-    [clearActivePaneForTab, projectId, removeTab, setActivePaneForTab, updateTabLayout],
+    [clearActivePaneForTab, removeTab, setActivePaneForTab, updateTabLayout, workspaceId],
   );
 
   const handleClosePane = useCallback(
     async (tabId: string, paneId: string) => {
-      const currentTab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const currentTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
       if (!currentTab) return;
 
       const pane = findPane(currentTab.splitLayout, paneId);
@@ -221,30 +211,24 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       disposeTerminal(pane.ptyId);
       removeSession(pane.ptyId);
 
-      const latestTab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const latestTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
       if (!latestTab) return;
 
       const nextLayout = removePane(latestTab.splitLayout, paneId);
       if (nextLayout) {
-        updateTabLayout(projectId, tabId, nextLayout);
+        updateTabLayout(workspaceId, tabId, nextLayout);
         setActivePaneForTab(tabId, getFirstPane(nextLayout).id);
-        saveLayoutToConfig(projectId);
+        saveLayoutToConfig(workspaceId);
       } else {
         await handleCloseTab(tabId);
       }
     },
-    [handleCloseTab, projectId, removeSession, setActivePaneForTab, updateTabLayout],
+    [handleCloseTab, removeSession, setActivePaneForTab, updateTabLayout, workspaceId],
   );
 
   const handleRestartPane = useCallback(
     async (tabId: string, paneId: string) => {
-      const currentTab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const currentTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
       if (!currentTab) return;
 
       const pane = findPane(currentTab.splitLayout, paneId);
@@ -263,18 +247,15 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
       const ptyId = await invoke<number>('create_pty', {
         shell: shell.command,
         args: shell.args ?? [],
-        cwd: projectPath,
+        cwd: workspacePath,
       });
 
-      const latestTab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const latestTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
       if (!latestTab) return;
 
       const latestPane = findPane(latestTab.splitLayout, paneId);
       if (!latestPane) return;
-      upsertSession(createTerminalSessionMeta(shell.name, ptyId, projectPath, latestPane.mode));
+      upsertSession(createTerminalSessionMeta(shell.name, ptyId, workspacePath, latestPane.mode));
 
       const nextLayout = replacePane(
         latestTab.splitLayout,
@@ -282,40 +263,34 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         createTerminalPane(shell.name, ptyId, latestPane.id, latestPane.mode, latestPane.runCommand),
       );
 
-      updateTabLayout(projectId, tabId, nextLayout);
+      updateTabLayout(workspaceId, tabId, nextLayout);
       setActivePaneForTab(tabId, latestPane.id);
-      saveLayoutToConfig(projectId);
+      saveLayoutToConfig(workspaceId);
     },
-    [availableShells, defaultShell, projectId, projectPath, removeSession, setActivePaneForTab, updateTabLayout, upsertSession],
+    [availableShells, defaultShell, removeSession, setActivePaneForTab, updateTabLayout, upsertSession, workspaceId, workspacePath],
   );
 
   const handleRenameTab = useCallback(
     async (tabId: string) => {
-      const tab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const tab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
       if (!tab) return;
 
       const nextTitle = await showPrompt(
         '重命名标签页',
-        `当前：${getTabTitle(tab)}，留空则恢复默认标题`,
+        `当前：${getDefaultTerminalTitle(tab)}，留空则恢复默认标题`,
         tab.customTitle ?? '',
       );
       if (nextTitle === null) return;
 
-      setTabCustomTitle(projectId, tabId, nextTitle);
-      saveLayoutToConfig(projectId);
+      setTabCustomTitle(workspaceId, tabId, nextTitle);
+      saveLayoutToConfig(workspaceId);
     },
-    [projectId, setTabCustomTitle],
+    [setTabCustomTitle, workspaceId],
   );
 
   const handleLayoutChange = useCallback(
     (tabId: string, updatedNode: SplitNode) => {
-      const currentTab = useAppStore
-        .getState()
-        .projectStates.get(projectId)
-        ?.tabs.find((item) => item.id === tabId);
+      const currentTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
       if (!currentTab) return;
 
       const currentIds = collectPaneIds(currentTab.splitLayout).sort().join(',');
@@ -324,54 +299,81 @@ export function TerminalArea({ projectId, projectPath, onOpenSettings }: Props) 
         return;
       }
 
-      updateTabLayout(projectId, tabId, updatedNode);
-      const currentActivePaneId = activePaneByTab.get(tabId);
+      updateTabLayout(workspaceId, tabId, updatedNode);
+      const currentActivePaneId = useAppStore.getState().activePaneByTab.get(tabId);
       if (!currentActivePaneId || !findPane(updatedNode, currentActivePaneId)) {
         setActivePaneForTab(tabId, getFirstPane(updatedNode).id);
       }
-      saveLayoutToConfig(projectId);
+      saveLayoutToConfig(workspaceId);
     },
-    [activePaneByTab, projectId, setActivePaneForTab, updateTabLayout],
+    [setActivePaneForTab, updateTabLayout, workspaceId],
   );
 
   return (
     <div className="flex h-full flex-col bg-[var(--bg-terminal)]">
-      <TabBar projectId={projectId} onNewTab={handleNewTabClick} onCloseTab={handleCloseTab} />
+      <TabBar workspaceId={workspaceId} onNewTab={handleNewTabClick} onCloseTab={handleCloseTab} />
 
       <div className="relative flex-1 overflow-hidden">
         {ps?.tabs.map((tab) => {
-          const activePane = getActivePane(tab);
-          const session = sessions.get(activePane.ptyId);
+          const tabIsActive = isVisible && tab.id === ps.activeTabId;
 
           return (
             <div
               key={tab.id}
               className="absolute inset-0"
-              style={{ display: tab.id === ps.activeTabId ? 'block' : 'none' }}
+              style={{ display: tabIsActive ? 'block' : 'none' }}
             >
-              <Allotment defaultSizes={[1000, 320]}>
-                <Allotment.Pane minSize={320}>
-                  <SplitLayout
-                    node={tab.splitLayout}
-                    tabId={tab.id}
-                    onActivatePane={(paneId) => setActivePaneForTab(tab.id, paneId)}
-                    onSplit={(paneId, direction) => handleSplitPane(tab.id, paneId, direction)}
-                    onClose={(paneId) => handleClosePane(tab.id, paneId)}
-                    onRestart={(paneId) => handleRestartPane(tab.id, paneId)}
-                    onNewTab={() => handleNewTab()}
-                    onRenameTab={() => handleRenameTab(tab.id)}
-                    onCloseTab={() => handleCloseTab(tab.id)}
-                    onOpenSettings={onOpenSettings}
-                    onTabDrop={(sourceTabId, targetPaneId, direction, position) =>
-                      handleTabDrop(tab.id, sourceTabId, targetPaneId, direction, position)
-                    }
-                    onLayoutChange={(updatedNode) => handleLayoutChange(tab.id, updatedNode)}
-                  />
-                </Allotment.Pane>
-                <Allotment.Pane minSize={260} preferredSize={320} maxSize={420}>
-                  <SessionInspector pane={activePane} session={session} />
-                </Allotment.Pane>
-              </Allotment>
+              {isTerminalTab(tab) ? (
+                <TerminalTabHost
+                  tab={tab}
+                  projectPath={workspacePath}
+                  isActive={tabIsActive}
+                  onActivatePane={(paneId) => setActivePaneForTab(tab.id, paneId)}
+                  onSplit={(paneId, direction) => handleSplitPane(tab.id, paneId, direction)}
+                  onClosePane={(paneId) => handleClosePane(tab.id, paneId)}
+                  onRestartPane={(paneId) => handleRestartPane(tab.id, paneId)}
+                  onNewTab={() => {
+                    void handleNewTab();
+                  }}
+                  onRenameTab={() => {
+                    void handleRenameTab(tab.id);
+                  }}
+                  onCloseTab={() => {
+                    void handleCloseTab(tab.id);
+                  }}
+                  onOpenSettings={onOpenSettings}
+                  onTabDrop={(sourceTabId, targetPaneId, direction, position) =>
+                    handleTabDrop(tab.id, sourceTabId, targetPaneId, direction, position)
+                  }
+                  onLayoutChange={(updatedNode) => handleLayoutChange(tab.id, updatedNode)}
+                />
+              ) : tab.kind === 'file-viewer' ? (
+                <DocumentTabHost
+                  tab={tab}
+                  workspaceId={workspaceId}
+                  isActive={tabIsActive}
+                  onModeChange={(mode) => setFileViewerTabMode(workspaceId, tab.id, mode)}
+                  onClose={() => {
+                    void handleCloseTab(tab.id);
+                  }}
+                />
+              ) : tab.kind === 'worktree-diff' ? (
+                <WorktreeDiffTabHost
+                  tab={tab}
+                  isActive={tabIsActive}
+                  onClose={() => {
+                    void handleCloseTab(tab.id);
+                  }}
+                />
+              ) : (
+                <CommitDiffTabHost
+                  tab={tab}
+                  isActive={tabIsActive}
+                  onClose={() => {
+                    void handleCloseTab(tab.id);
+                  }}
+                />
+              )}
             </div>
           );
         })}

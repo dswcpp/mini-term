@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -50,6 +51,36 @@ pub struct AppConfig {
     pub theme: ThemeConfig,
     #[serde(default)]
     pub middle_column_sizes: Option<Vec<f64>>,
+    #[serde(default)]
+    pub completion_usage: CompletionUsageConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionUsageConfig {
+    #[serde(default)]
+    pub commands: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub subcommands: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub options: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub arguments: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub scopes: BTreeMap<String, CompletionUsageScopeConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionUsageScopeConfig {
+    #[serde(default)]
+    pub commands: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub subcommands: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub options: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub arguments: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -155,6 +186,17 @@ fn default_terminal_font_size() -> f64 {
     14.0
 }
 
+fn powershell_completion_bootstrap() -> String {
+    [
+        "Import-Module PSReadLine -ErrorAction SilentlyContinue",
+        "if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {",
+        "  Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete",
+        "  try { Set-PSReadLineOption -PredictionSource History -PredictionViewStyle ListView } catch {}",
+        "}",
+    ]
+    .join("; ")
+}
+
 fn default_theme_preset() -> String {
     "warm-carbon".into()
 }
@@ -194,13 +236,14 @@ impl Default for AppConfig {
             layout_sizes: None,
             theme: ThemeConfig::default(),
             middle_column_sizes: None,
+            completion_usage: CompletionUsageConfig::default(),
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn default_shell_name() -> String {
-    "cmd".into()
+    "powershell".into()
 }
 
 #[cfg(target_os = "macos")]
@@ -222,13 +265,18 @@ fn default_shell_name() -> String {
 fn default_shells() -> Vec<ShellConfig> {
     vec![
         ShellConfig {
-            name: "cmd".into(),
-            command: "cmd".into(),
-            args: None,
-        },
-        ShellConfig {
             name: "powershell".into(),
             command: "powershell".into(),
+            args: Some(vec![
+                "-NoLogo".into(),
+                "-NoExit".into(),
+                "-Command".into(),
+                powershell_completion_bootstrap(),
+            ]),
+        },
+        ShellConfig {
+            name: "cmd".into(),
+            command: "cmd".into(),
             args: None,
         },
     ]
@@ -327,6 +375,12 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
         config.available_shells = default_shells();
     }
 
+    config.available_shells = config
+        .available_shells
+        .into_iter()
+        .map(normalize_shell)
+        .collect();
+
     let default_shell_exists = config
         .available_shells
         .iter()
@@ -341,6 +395,34 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
     }
 
     config
+}
+
+fn normalize_shell(mut shell: ShellConfig) -> ShellConfig {
+    let command_name = shell
+        .command
+        .rsplit('\\')
+        .next()
+        .unwrap_or(shell.command.as_str())
+        .rsplit('/')
+        .next()
+        .unwrap_or(shell.command.as_str())
+        .to_ascii_lowercase();
+
+    if matches!(shell.args.as_ref(), Some(args) if !args.is_empty()) {
+        return shell;
+    }
+
+    shell.args = match command_name.as_str() {
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => Some(vec![
+            "-NoLogo".into(),
+            "-NoExit".into(),
+            "-Command".into(),
+            powershell_completion_bootstrap(),
+        ]),
+        _ => None,
+    };
+
+    shell
 }
 
 #[tauri::command]
@@ -418,6 +500,19 @@ mod tests {
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.theme.preset, "ghostty-light");
         assert_eq!(config.theme.window_effect, "auto");
+    }
+
+    #[test]
+    fn normalize_shell_adds_powershell_completion_args() {
+        let shell = normalize_shell(ShellConfig {
+            name: "powershell".into(),
+            command: "powershell".into(),
+            args: None,
+        });
+
+        let args = shell.args.expect("powershell args should be added");
+        assert!(args.iter().any(|arg| arg == "-NoExit"));
+        assert!(args.iter().any(|arg| arg.contains("Set-PSReadLineKeyHandler")));
     }
 
     #[test]

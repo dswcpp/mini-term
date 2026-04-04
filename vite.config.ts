@@ -4,6 +4,46 @@ import tailwindcss from "@tailwindcss/vite";
 
 const host = process.env.TAURI_DEV_HOST;
 
+function matchesAny(id: string, patterns: string[]) {
+  return patterns.some((pattern) => id.includes(pattern));
+}
+
+function getManualChunk(id: string) {
+  const normalizedId = id.replace(/\\/g, "/");
+  if (!normalizedId.includes("/node_modules/")) {
+    return undefined;
+  }
+
+  if (
+    matchesAny(normalizedId, [
+      "/node_modules/react/",
+      "/node_modules/react-dom/",
+      "/node_modules/scheduler/",
+    ])
+  ) {
+    return "vendor-react";
+  }
+
+  if (normalizedId.includes("/node_modules/@tauri-apps/")) {
+    return "vendor-tauri";
+  }
+
+  if (
+    matchesAny(normalizedId, [
+      "/node_modules/@xterm/",
+      "/node_modules/xterm/",
+    ])
+  ) {
+    return "vendor-xterm";
+  }
+
+  if (normalizedId.includes("/node_modules/allotment/")) {
+    return "vendor-layout";
+  }
+
+  return undefined;
+}
+
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
@@ -13,5 +53,12 @@ export default defineConfig(async () => ({
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: getManualChunk,
+      },
+    },
   },
 }));

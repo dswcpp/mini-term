@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vite/bin/vite.js",
     "build": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/typescript/bin/tsc; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; node ./node_modules/vite/bin/vite.js build",
+    "test": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vitest/vitest.mjs run",
     "preview": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vite/bin/vite.js preview",
     "tauri": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/@tauri-apps/cli/tauri.js"
   },
@@ -14,22 +15,31 @@
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-opener": "^2",
+    "@types/svg-pan-zoom": "^3.3.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "allotment": "^1.20.5",
+    "mermaid": "^11.14.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.0.2",
+    "svg-pan-zoom": "^3.6.2",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/cli": "^2",
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "jsdom": "^29.0.1",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^4.1.2"
   }
 }

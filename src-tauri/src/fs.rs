@@ -101,6 +101,7 @@ pub fn watch_directory(
     state: tauri::State<'_, FsWatcherManager>,
     path: String,
     project_path: String,
+    recursive: Option<bool>,
 ) -> Result<(), String> {
     let watch_path = PathBuf::from(&path);
     let project_path_clone = project_path.clone();
@@ -118,7 +119,13 @@ pub fn watch_directory(
         }
     }).map_err(|e| e.to_string())?;
 
-    watcher.watch(&watch_path, RecursiveMode::NonRecursive).map_err(|e| e.to_string())?;
+    let recursive_mode = if recursive.unwrap_or(false) {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    };
+
+    watcher.watch(&watch_path, recursive_mode).map_err(|e| e.to_string())?;
 
     let mut watchers = state.watchers.lock().unwrap();
     watchers.insert(path, watcher);
@@ -168,6 +175,16 @@ pub fn create_directory(path: String) -> Result<(), String> {
         return Err(format!("已存在: {}", path));
     }
     fs::create_dir(p).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn write_text_file(path: String, content: String) -> Result<(), String> {
+    fs::write(Path::new(&path), content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn write_binary_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    fs::write(Path::new(&path), bytes).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

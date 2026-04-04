@@ -12,22 +12,27 @@ import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { Effect, getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { ask } from '@tauri-apps/plugin-dialog';
 import {
   useAppStore,
+  buildWorkspaceStatePatch,
   restoreLayout,
   flushLayoutToConfig,
   initExpandedDirs,
   flushExpandedDirsToConfig,
+  flushCompletionUsageToConfig,
+  selectWorkspaces,
+  selectThemeConfig,
 } from './store';
 import { TerminalArea } from './components/TerminalArea';
-import { ProjectList } from './components/ProjectList';
+import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { FileTree } from './components/FileTree';
 import { GitHistory } from './components/GitHistory';
-import { SettingsModal } from './components/SettingsModal';
+import { WorkspaceDialogHost } from './components/WorkspaceDialogHost';
 import { useSessionRuntimeBridge } from './hooks/useSessionRuntimeBridge';
 import { applyDocumentTheme, resolveTheme } from './theme';
+import { showConfirm } from './utils/messageBox';
 import { checkForUpdate, type ReleaseInfo } from './utils/updateChecker';
+import { getWorkspacePrimaryRootPath } from './utils/workspace';
 import type { AppConfig } from './types';
 
 const appWindow = getCurrentWindow();
@@ -62,19 +67,22 @@ function TitleBarButton({
 
 export function App() {
   const [configLoaded, setConfigLoaded] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [isFocused, setIsFocused] = useState(true);
   const [currentVersion, setCurrentVersion] = useState('');
   const [updateInfo, setUpdateInfo] = useState<ReleaseInfo | null>(null);
 
-  const activeProjectId = useAppStore((state) => state.activeProjectId);
-  const config = useAppStore((state) => state.config);
+  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const workspaces = useAppStore(selectWorkspaces);
+  const themeConfig = useAppStore(selectThemeConfig);
+  const layoutSizes = useAppStore((state) => state.config.layoutSizes);
+  const middleColumnSizes = useAppStore((state) => state.config.middleColumnSizes);
   const setConfig = useAppStore((state) => state.setConfig);
+  const openSettings = useAppStore((state) => state.openSettings);
 
-  const activeProjectName =
-    config.projects.find((project) => project.id === activeProjectId)?.name ?? 'Workspace';
-  const resolvedTheme = resolveTheme(config.theme);
+  const activeWorkspaceName =
+    workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? 'Workspace';
+  const resolvedTheme = resolveTheme(themeConfig);
 
   useSessionRuntimeBridge();
 
@@ -86,24 +94,32 @@ export function App() {
         document.documentElement.style.fontSize = `${loadedConfig.uiFontSize}px`;
       }
 
-      const { projectStates } = useAppStore.getState();
-      const nextStates = new Map(projectStates);
-      for (const project of loadedConfig.projects) {
-        if (!nextStates.has(project.id)) {
-          nextStates.set(project.id, { id: project.id, tabs: [], activeTabId: '' });
+      const { workspaceStates } = useAppStore.getState();
+      const nextStates = new Map(workspaceStates);
+      for (const workspace of loadedConfig.workspaces) {
+        if (!nextStates.has(workspace.id)) {
+          nextStates.set(workspace.id, { id: workspace.id, tabs: [], activeTabId: '' });
         }
-        initExpandedDirs(project.id, project.expandedDirs ?? []);
+        for (const root of workspace.roots) {
+          initExpandedDirs(workspace.id, root.id, workspace.expandedDirsByRoot?.[root.id] ?? []);
+        }
       }
 
       useAppStore.setState({
-        projectStates: nextStates,
-        activeProjectId: loadedConfig.projects[0]?.id ?? null,
+        activeWorkspaceId: loadedConfig.lastWorkspaceId ?? loadedConfig.workspaces[0]?.id ?? null,
+        ...buildWorkspaceStatePatch(nextStates),
       });
 
       void Promise.all(
-        loadedConfig.projects
-          .filter((project) => project.savedLayout && project.savedLayout.tabs.length > 0)
-          .map((project) => restoreLayout(project.id, project.savedLayout!, project.path, loadedConfig)),
+        loadedConfig.workspaces
+          .filter((workspace) => workspace.savedLayout && workspace.savedLayout.tabs.length > 0)
+          .map((workspace) => {
+            const primaryRootPath = getWorkspacePrimaryRootPath(workspace);
+            if (!primaryRootPath) {
+              return Promise.resolve();
+            }
+            return restoreLayout(workspace.id, workspace.savedLayout!, primaryRootPath, loadedConfig);
+          }),
       ).catch(console.error);
 
       setConfigLoaded(true);
@@ -126,11 +142,12 @@ export function App() {
 
   useEffect(() => {
     const handleBeforeUnload = () => {
-      const { projectStates } = useAppStore.getState();
-      for (const projectId of projectStates.keys()) {
-        flushLayoutToConfig(projectId);
-        flushExpandedDirsToConfig(projectId);
+      const { workspaceStates } = useAppStore.getState();
+      for (const workspaceId of workspaceStates.keys()) {
+        flushLayoutToConfig(workspaceId);
+        flushExpandedDirsToConfig(workspaceId);
       }
+      flushCompletionUsageToConfig();
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
@@ -141,19 +158,22 @@ export function App() {
     const unlistenPromise = appWindow.onCloseRequested(async (event) => {
       event.preventDefault();
 
-      const confirmed = await ask('确定要关闭 Mini-Term 吗？', {
-        title: '关闭确认',
-        kind: 'warning',
+      const confirmed = await showConfirm('关闭确认', '确定要关闭 Mini-Term 吗？', {
+        detail: '当前布局、目录展开状态和补全习惯会先回填保存。',
+        confirmLabel: '关闭应用',
+        cancelLabel: '取消',
+        tone: 'warning',
       });
       if (!confirmed) {
         return;
       }
 
-      const { projectStates } = useAppStore.getState();
-      for (const projectId of projectStates.keys()) {
-        flushLayoutToConfig(projectId);
-        flushExpandedDirsToConfig(projectId);
+      const { workspaceStates } = useAppStore.getState();
+      for (const workspaceId of workspaceStates.keys()) {
+        flushLayoutToConfig(workspaceId);
+        flushExpandedDirsToConfig(workspaceId);
       }
+      flushCompletionUsageToConfig();
 
       void appWindow.destroy();
     });
@@ -163,14 +183,14 @@ export function App() {
     };
   }, []);
 
-  const prevProjectRef = useRef<string | null>(null);
+  const prevWorkspaceRef = useRef<string | null>(null);
   useEffect(() => {
-    if (prevProjectRef.current && prevProjectRef.current !== activeProjectId) {
-      flushLayoutToConfig(prevProjectRef.current);
-      flushExpandedDirsToConfig(prevProjectRef.current);
+    if (prevWorkspaceRef.current && prevWorkspaceRef.current !== activeWorkspaceId) {
+      flushLayoutToConfig(prevWorkspaceRef.current);
+      flushExpandedDirsToConfig(prevWorkspaceRef.current);
     }
-    prevProjectRef.current = activeProjectId;
-  }, [activeProjectId]);
+    prevWorkspaceRef.current = activeWorkspaceId;
+  }, [activeWorkspaceId]);
 
   const saveLayoutTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const saveLayoutSizes = useCallback(
@@ -259,7 +279,7 @@ export function App() {
 
   useEffect(() => {
     applyDocumentTheme(resolvedTheme);
-  }, [config.theme.preset, config.theme.windowEffect]);
+  }, [themeConfig.preset, themeConfig.windowEffect]);
 
   useEffect(() => {
     if (!isWindows) {
@@ -304,7 +324,7 @@ export function App() {
     };
 
     void applyWindowMaterial();
-  }, [config.theme.preset, config.theme.windowEffect]);
+  }, [themeConfig.preset, themeConfig.windowEffect]);
 
   const handleWindowMinimize = useCallback(() => {
     void appWindow.minimize();
@@ -408,7 +428,7 @@ export function App() {
             data-tauri-drag-region
             style={dragRegionStyle}
           >
-            {activeProjectName}
+            {activeWorkspaceName}
           </span>
         </div>
 
@@ -416,7 +436,7 @@ export function App() {
           <button
             type="button"
             className="cursor-pointer bg-transparent p-0 text-inherit transition-colors duration-150 hover:text-[var(--text-primary)]"
-            onClick={() => setConfigOpen(true)}
+            onClick={() => openSettings()}
             style={noDragRegionStyle}
           >
             设置
@@ -458,43 +478,50 @@ export function App() {
 
       <div className="flex-1 overflow-hidden">
         {configLoaded ? (
-          <Allotment defaultSizes={config.layoutSizes ?? [200, 280, 1000]} onChange={saveLayoutSizes}>
+          <Allotment defaultSizes={layoutSizes ?? [200, 280, 1000]} onChange={saveLayoutSizes}>
             <Allotment.Pane minSize={140} maxSize={350}>
-              <ProjectList />
+              <WorkspaceSidebar />
             </Allotment.Pane>
 
             <Allotment.Pane minSize={180}>
               <Allotment
                 vertical
-                defaultSizes={config.middleColumnSizes ?? [300, 200]}
+                defaultSizes={middleColumnSizes ?? [300, 200]}
                 onChange={saveMiddleColumnSizes}
               >
                 <Allotment.Pane minSize={150}>
-                  <FileTree key={activeProjectId} />
+                  <FileTree key={activeWorkspaceId} />
                 </Allotment.Pane>
                 <Allotment.Pane minSize={36}>
-                  <GitHistory key={activeProjectId} />
+                  <GitHistory key={activeWorkspaceId} />
                 </Allotment.Pane>
               </Allotment>
             </Allotment.Pane>
 
             <Allotment.Pane>
               <div className="relative h-full">
-                {config.projects.map((project) => (
+                {workspaces.map((workspace) => {
+                  const primaryRootPath = getWorkspacePrimaryRootPath(workspace);
+                  if (!primaryRootPath) {
+                    return null;
+                  }
+                  return (
                   <div
-                    key={project.id}
+                    key={workspace.id}
                     className="absolute inset-0"
-                    style={{ display: project.id === activeProjectId ? 'block' : 'none' }}
+                    style={{ display: workspace.id === activeWorkspaceId ? 'block' : 'none' }}
                   >
                     <TerminalArea
-                      projectId={project.id}
-                      projectPath={project.path}
-                      onOpenSettings={() => setConfigOpen(true)}
+                      workspaceId={workspace.id}
+                      workspacePath={primaryRootPath}
+                      isVisible={workspace.id === activeWorkspaceId}
+                      onOpenSettings={() => openSettings()}
                     />
                   </div>
-                ))}
+                  );
+                })}
 
-                {config.projects.length === 0 && (
+                {workspaces.length === 0 && (
                   <div className="flex h-full items-center justify-center bg-[var(--bg-terminal)] text-sm text-[var(--text-muted)]">
                     请先在左侧添加一个项目。
                   </div>
@@ -505,7 +532,7 @@ export function App() {
         ) : null}
       </div>
 
-      <SettingsModal open={configOpen} onClose={() => setConfigOpen(false)} />
+      <WorkspaceDialogHost />
     </div>
   );
 }

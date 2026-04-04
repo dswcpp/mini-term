@@ -1,5 +1,3 @@
-// === ????? ===
-
 export type ProjectTreeItem = string | ProjectGroup;
 
 export interface ProjectGroup {
@@ -9,19 +7,28 @@ export interface ProjectGroup {
   children: ProjectTreeItem[];
 }
 
-export interface AppConfig {
-  projects: ProjectConfig[];
-  projectTree?: ProjectTreeItem[];
-  // ???????????Rust ?????????
-  projectGroups?: { id: string; name: string; collapsed: boolean; projectIds: string[] }[];
-  projectOrdering?: string[];
-  defaultShell: string;
-  availableShells: ShellConfig[];
-  uiFontSize: number;
-  terminalFontSize: number;
-  layoutSizes?: number[];
-  theme: ThemeConfig;
-  middleColumnSizes?: number[];
+export interface LegacyProjectConfig {
+  id: string;
+  name: string;
+  path: string;
+  savedLayout?: SavedProjectLayout;
+  expandedDirs?: string[];
+}
+
+export type SettingsPage = 'terminal' | 'theme' | 'system' | 'shortcuts' | 'about';
+export type PreviewMode = 'source' | 'preview';
+export type InteractionDialogMode = 'alert' | 'confirm' | 'prompt';
+export type InteractionDialogTone = 'neutral' | 'warning' | 'danger';
+
+export interface CompletionUsageBucket {
+  commands: Record<string, number>;
+  subcommands: Record<string, number>;
+  options: Record<string, number>;
+  arguments: Record<string, number>;
+}
+
+export interface CompletionUsageStats extends CompletionUsageBucket {
+  scopes?: Record<string, CompletionUsageBucket>;
 }
 
 export type ThemePresetId = 'warm-carbon' | 'ghostty-dark' | 'ghostty-light';
@@ -32,12 +39,53 @@ export interface ThemeConfig {
   windowEffect: ThemeWindowEffect;
 }
 
-export interface ProjectConfig {
+export type WorkspaceRootRole = 'primary' | 'member';
+
+export interface WorkspaceRootConfig {
   id: string;
   name: string;
   path: string;
+  role: WorkspaceRootRole;
+}
+
+export interface WorkspaceConfig {
+  id: string;
+  name: string;
+  roots: WorkspaceRootConfig[];
+  pinned: boolean;
+  accent?: string;
   savedLayout?: SavedProjectLayout;
-  expandedDirs?: string[];
+  expandedDirsByRoot?: Record<string, string[]>;
+  createdAt: number;
+  lastOpenedAt: number;
+}
+
+export interface RecentWorkspaceEntry {
+  id: string;
+  name: string;
+  rootPaths: string[];
+  accent?: string;
+  lastOpenedAt: number;
+  savedLayout?: SavedProjectLayout;
+  expandedDirsByRoot?: Record<string, string[]>;
+}
+
+export interface AppConfig {
+  workspaces: WorkspaceConfig[];
+  recentWorkspaces: RecentWorkspaceEntry[];
+  lastWorkspaceId?: string;
+  projects?: LegacyProjectConfig[];
+  projectTree?: ProjectTreeItem[];
+  projectGroups?: { id: string; name: string; collapsed: boolean; projectIds: string[] }[];
+  projectOrdering?: string[];
+  defaultShell: string;
+  availableShells: ShellConfig[];
+  uiFontSize: number;
+  terminalFontSize: number;
+  layoutSizes?: number[];
+  theme: ThemeConfig;
+  middleColumnSizes?: number[];
+  completionUsage?: CompletionUsageStats;
 }
 
 export interface ShellConfig {
@@ -45,8 +93,6 @@ export interface ShellConfig {
   command: string;
   args?: string[];
 }
-
-// === ????? ===
 
 export interface SavedPane {
   shellName: string;
@@ -66,8 +112,6 @@ export interface SavedProjectLayout {
   tabs: SavedTab[];
   activeTabIndex: number;
 }
-
-// === ????? ===
 
 export type PaneStatus = 'idle' | 'ai-idle' | 'ai-working' | 'error';
 export type ShellKind = 'powershell' | 'pwsh' | 'cmd' | 'bash' | 'zsh' | 'unknown';
@@ -99,44 +143,88 @@ export interface TerminalSessionMeta {
   updatedAt: number;
 }
 
-export interface ProjectState {
+export interface WorkspaceState {
   id: string;
-  tabs: TerminalTab[];
+  tabs: WorkspaceTab[];
   activeTabId: string;
 }
 
+export interface PaneLayoutState {
+  id: string;
+  sessionId: string;
+  shellName: string;
+  runCommand?: string;
+  mode: SessionMode;
+  ptyId: number;
+}
+
+export interface PaneRuntimeState {
+  ptyId: number;
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  status: PaneStatus;
+  phase: SessionPhase;
+  isFocused: boolean;
+}
+
+export interface WorkspaceExplorerRuntime {
+  dirtyPaths: string[];
+  lastFsChangeAt?: number;
+  lastGitDirtyAt?: number;
+  gitDirtyToken: number;
+}
+
 export interface TerminalTab {
+  kind: 'terminal';
   id: string;
   customTitle?: string;
   splitLayout: SplitNode;
   status: PaneStatus;
 }
 
+export interface FileViewerTab {
+  kind: 'file-viewer';
+  id: string;
+  filePath: string;
+  mode: PreviewMode;
+  status: PaneStatus;
+}
+
+export interface WorktreeDiffTab {
+  kind: 'worktree-diff';
+  id: string;
+  projectPath: string;
+  status: GitFileStatus;
+}
+
+export interface CommitDiffTab {
+  kind: 'commit-diff';
+  id: string;
+  repoPath: string;
+  commitHash: string;
+  commitMessage: string;
+  files: CommitFileInfo[];
+}
+
+export type WorkspaceTab = TerminalTab | FileViewerTab | WorktreeDiffTab | CommitDiffTab;
+
 export type SplitNode =
   | { type: 'leaf'; pane: PaneState }
   | { type: 'split'; direction: 'horizontal' | 'vertical'; children: SplitNode[]; sizes: number[] };
 
-export interface PaneState {
-  id: string;
-  sessionId: string;
-  shellName: string;
-  runCommand?: string;
+export interface PaneState extends PaneLayoutState {
   status: PaneStatus;
-  mode: SessionMode;
   phase: SessionPhase;
-  ptyId: number;
 }
-
-// === AI ?? ===
 
 export interface AiSession {
   id: string;
   sessionType: 'claude' | 'codex';
   title: string;
-  timestamp: string; // ISO 8601
+  timestamp: string;
+  projectPath?: string;
 }
-
-// === ??? ===
 
 export interface FileEntry {
   name: string;
@@ -145,8 +233,6 @@ export interface FileEntry {
   ignored?: boolean;
   children?: FileEntry[];
 }
-
-// === Tauri ?? payload ===
 
 export interface PtyOutputPayload {
   ptyId: number;
@@ -185,6 +271,13 @@ export interface PtySessionPhasePayload {
 export interface PtySessionCommandPayload {
   ptyId: number;
   command: string;
+  usageScope?: string;
+  updatedAt: number;
+}
+
+export interface PtySessionCwdPayload {
+  ptyId: number;
+  cwd: string;
   updatedAt: number;
 }
 
@@ -194,15 +287,13 @@ export interface FsChangePayload {
   kind: string;
 }
 
-// === Git ?? ===
-
 export type GitStatusType = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
 
 export interface GitFileStatus {
   path: string;
   oldPath?: string;
   status: GitStatusType;
-  statusLabel: string; // "M", "A", "D", "R", "?", "C"
+  statusLabel: string;
 }
 
 export interface DiffHunk {
@@ -228,19 +319,24 @@ export interface GitDiffResult {
   tooLarge: boolean;
 }
 
-// === ???? ===
-
 export interface FileContentResult {
   content: string;
   isBinary: boolean;
   tooLarge: boolean;
 }
 
-// === Git ?? ===
-
 export interface GitRepoInfo {
   name: string;
   path: string;
+}
+
+export interface GitCompletionData {
+  repoRoot: string;
+  currentBranch?: string;
+  localBranches: string[];
+  remoteBranches: string[];
+  remotes: string[];
+  tags: string[];
 }
 
 export interface GitCommitInfo {
@@ -256,3 +352,23 @@ export interface CommitFileInfo {
   status: 'added' | 'modified' | 'deleted' | 'renamed';
   oldPath?: string;
 }
+
+export type UiDialog =
+  | { kind: 'settings'; page: SettingsPage }
+  | {
+      kind: 'interaction-dialog';
+      dialogId: string;
+      mode: InteractionDialogMode;
+      title: string;
+      message?: string;
+      detail?: string;
+      placeholder?: string;
+      initialValue?: string;
+      confirmLabel?: string;
+      cancelLabel?: string;
+      tone?: InteractionDialogTone;
+      readOnly?: boolean;
+    };
+
+export type ProjectConfig = LegacyProjectConfig;
+export type ProjectState = WorkspaceState;

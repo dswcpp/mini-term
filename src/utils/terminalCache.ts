@@ -2,11 +2,17 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { subscribePtyOutput } from '../runtime/tauriEventHub';
 import { useAppStore } from '../store';
 import { resolveTheme } from '../theme';
-import type { PtyOutputPayload } from '../types';
+import {
+  applyTerminalInputData,
+  buildCompletionSequence,
+  createTerminalInputState,
+  markTerminalInputStateUnsafe,
+  type TerminalInputState,
+} from './terminalInputState';
 
 export interface CachedTerminal {
   term: Terminal;
@@ -18,7 +24,113 @@ interface CachedEntry extends CachedTerminal {
   cleanup: () => void;
 }
 
+type InputListener = (value: string) => void;
+type InputStateListener = (state: TerminalInputState) => void;
+type KeyHandler = (event: KeyboardEvent) => boolean;
+
 const cache = new Map<number, CachedEntry>();
+const inputStates = new Map<number, TerminalInputState>();
+const inputListeners = new Map<number, Set<InputListener>>();
+const inputStateListeners = new Map<number, Set<InputStateListener>>();
+const keyHandlers = new Map<number, KeyHandler>();
+
+function notifyInputListeners(ptyId: number) {
+  const value = inputStates.get(ptyId)?.text ?? '';
+  const listeners = inputListeners.get(ptyId);
+  if (!listeners) return;
+
+  listeners.forEach((listener) => listener(value));
+}
+
+function notifyInputStateListeners(ptyId: number) {
+  const state = inputStates.get(ptyId) ?? createTerminalInputState();
+  const listeners = inputStateListeners.get(ptyId);
+  if (!listeners) return;
+
+  listeners.forEach((listener) => listener(state));
+}
+
+function updateInputState(ptyId: number, nextState: TerminalInputState) {
+  inputStates.set(ptyId, nextState);
+  notifyInputListeners(ptyId);
+  notifyInputStateListeners(ptyId);
+}
+
+export function mirrorTerminalInput(ptyId: number, data: string): void {
+  updateInputState(ptyId, applyTerminalInputData(inputStates.get(ptyId), data));
+}
+
+export function subscribeTerminalInput(ptyId: number, listener: InputListener): () => void {
+  const listeners = inputListeners.get(ptyId) ?? new Set<InputListener>();
+  listeners.add(listener);
+  inputListeners.set(ptyId, listeners);
+  listener(inputStates.get(ptyId)?.text ?? '');
+
+  return () => {
+    const current = inputListeners.get(ptyId);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) {
+      inputListeners.delete(ptyId);
+    }
+  };
+}
+
+export function subscribeTerminalInputState(
+  ptyId: number,
+  listener: InputStateListener,
+): () => void {
+  const listeners = inputStateListeners.get(ptyId) ?? new Set<InputStateListener>();
+  listeners.add(listener);
+  inputStateListeners.set(ptyId, listeners);
+  listener(inputStates.get(ptyId) ?? createTerminalInputState());
+
+  return () => {
+    const current = inputStateListeners.get(ptyId);
+    if (!current) return;
+    current.delete(listener);
+    if (current.size === 0) {
+      inputStateListeners.delete(ptyId);
+    }
+  };
+}
+
+export function getTerminalInputState(ptyId: number): TerminalInputState {
+  return inputStates.get(ptyId) ?? createTerminalInputState();
+}
+
+export function registerTerminalKeyHandler(ptyId: number, handler: KeyHandler): () => void {
+  keyHandlers.set(ptyId, handler);
+  return () => {
+    if (keyHandlers.get(ptyId) === handler) {
+      keyHandlers.delete(ptyId);
+    }
+  };
+}
+
+export async function applyCompletionEdit(
+  ptyId: number,
+  edit: Parameters<typeof buildCompletionSequence>[1],
+): Promise<boolean> {
+  const currentState = inputStates.get(ptyId) ?? createTerminalInputState();
+  if (currentState.unsafe) {
+    return false;
+  }
+
+  const { data, nextState } = buildCompletionSequence(currentState, edit);
+  updateInputState(ptyId, nextState);
+  try {
+    await invoke('write_pty', { ptyId, data });
+    return true;
+  } catch (error) {
+    updateInputState(ptyId, currentState);
+    throw error;
+  }
+}
+
+export function markTerminalInputUnsafe(ptyId: number) {
+  updateInputState(ptyId, markTerminalInputStateUnsafe(inputStates.get(ptyId)));
+}
 
 export function getOrCreateTerminal(ptyId: number): CachedTerminal {
   const existing = cache.get(ptyId);
@@ -66,6 +178,11 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== 'keydown') return true;
 
+    const customHandler = keyHandlers.get(ptyId);
+    if (customHandler && !customHandler(event)) {
+      return false;
+    }
+
     if (event.ctrlKey && event.shiftKey && event.code === 'KeyC') {
       event.preventDefault();
       const selection = term.getSelection();
@@ -79,6 +196,7 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
       event.preventDefault();
       void readText().then((text) => {
         if (text) {
+          mirrorTerminalInput(ptyId, text);
           void invoke('write_pty', { ptyId, data: text });
         }
       });
@@ -90,6 +208,7 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
 
   const onDataDisposable = term.onData((data) => {
     term.scrollToBottom();
+    mirrorTerminalInput(ptyId, data);
     void invoke('write_pty', { ptyId, data });
   });
 
@@ -111,16 +230,15 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
     }, 180),
   ];
 
-  void listen<PtyOutputPayload>('pty-output', (event) => {
-    if (event.payload.ptyId !== ptyId) {
-      return;
-    }
-
-    if (event.payload.data) {
-      startupOutputReceived = true;
-    }
-    term.write(event.payload.data);
-  })
+  void Promise.resolve()
+    .then(() =>
+      subscribePtyOutput(ptyId, (payload) => {
+        if (payload.data) {
+          startupOutputReceived = true;
+        }
+        term.write(payload.data);
+      }),
+    )
     .then((unlisten) => {
       if (cancelled) {
         unlisten();
@@ -146,6 +264,10 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
     cancelled = true;
     bootstrapTimers.forEach((timer) => window.clearTimeout(timer));
     unlistenOutput?.();
+    inputStates.delete(ptyId);
+    inputListeners.delete(ptyId);
+    inputStateListeners.delete(ptyId);
+    keyHandlers.delete(ptyId);
     onDataDisposable.dispose();
     onResizeDisposable.dispose();
     term.dispose();

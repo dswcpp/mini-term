@@ -6,6 +6,9 @@ import type { SplitNode } from '../types';
 interface Props {
   node: SplitNode;
   tabId: string;
+  projectPath: string;
+  activePaneId?: string;
+  isTabActive?: boolean;
   onActivatePane?: (paneId: string) => void;
   onSplit?: (paneId: string, direction: 'horizontal' | 'vertical') => void;
   onClose?: (paneId: string) => void;
@@ -31,6 +34,9 @@ function getNodeKey(node: SplitNode): string {
 export const SplitLayout = memo(function SplitLayout({
   node,
   tabId,
+  projectPath,
+  activePaneId,
+  isTabActive = false,
   onActivatePane,
   onSplit,
   onClose,
@@ -50,11 +56,14 @@ export const SplitLayout = memo(function SplitLayout({
     return (
       <TerminalInstance
         tabId={tabId}
+        projectPath={projectPath}
         ptyId={node.pane.ptyId}
         paneId={node.pane.id}
         shellName={node.pane.shellName}
         status={node.pane.status}
         runCommand={node.pane.runCommand}
+        isActive={isTabActive && activePaneId === node.pane.id}
+        isVisible={isTabActive}
         onActivatePane={onActivatePane}
         onSplit={onSplit}
         onClose={onClose}
@@ -104,6 +113,9 @@ export const SplitLayout = memo(function SplitLayout({
           <SplitLayout
             node={child}
             tabId={tabId}
+            projectPath={projectPath}
+            activePaneId={activePaneId}
+            isTabActive={isTabActive}
             onActivatePane={onActivatePane}
             onSplit={onSplit}
             onClose={onClose}

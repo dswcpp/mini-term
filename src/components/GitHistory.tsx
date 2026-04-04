@@ -1,12 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { useAppStore } from '../store';
-import { useTauriEvent } from '../hooks/useTauriEvent';
+import { useAppStore, selectWorkspaceConfig } from '../store';
+import { subscribeProjectGitDirty } from '../runtime/workspaceRuntime';
 import { showContextMenu } from '../utils/contextMenu';
 import { formatRelativeTime } from '../utils/timeFormat';
-import { CommitDiffModal } from './CommitDiffModal';
-import type { GitRepoInfo, GitCommitInfo, CommitFileInfo, PtyOutputPayload } from '../types';
+import type { GitRepoInfo, GitCommitInfo, CommitFileInfo, WorkspaceRootConfig } from '../types';
 
 interface RepoState {
   commits: GitCommitInfo[];
@@ -14,87 +13,40 @@ interface RepoState {
   hasMore: boolean;
 }
 
-// === 仓库树结构 ===
-
-interface RepoTreeNode {
-  name: string;
-  key: string;          // 用于展开/折叠状态跟踪的稳定标识
-  repo?: GitRepoInfo;   // 仅叶节点（实际仓库）有值
-  children: RepoTreeNode[];
+interface RootRepoGroup {
+  root: WorkspaceRootConfig;
+  repos: GitRepoInfo[];
 }
-
-function buildRepoTree(repos: GitRepoInfo[], projectPath: string): RepoTreeNode[] {
-  const normalize = (p: string) => p.replace(/[\\/]+/g, '/').replace(/\/$/, '');
-  const root: RepoTreeNode[] = [];
-  const normalizedProject = normalize(projectPath);
-
-  for (const repo of repos) {
-    const normalizedRepo = normalize(repo.path);
-    let relative: string;
-    if (normalizedRepo === normalizedProject) {
-      relative = '.';
-    } else if (normalizedRepo.startsWith(normalizedProject + '/')) {
-      relative = normalizedRepo.slice(normalizedProject.length + 1);
-    } else {
-      relative = repo.name;
-    }
-
-    if (relative === '.' || !relative.includes('/')) {
-      root.push({ name: repo.name, key: repo.path, repo, children: [] });
-    } else {
-      const parts = relative.split('/');
-      let current = root;
-      let pathSoFar = normalizedProject;
-      for (let i = 0; i < parts.length - 1; i++) {
-        pathSoFar += '/' + parts[i];
-        let found = current.find((n) => n.name === parts[i] && !n.repo);
-        if (!found) {
-          found = { name: parts[i], key: 'dir:' + pathSoFar, children: [] };
-          current.push(found);
-        }
-        current = found.children;
-      }
-      current.push({ name: parts[parts.length - 1], key: repo.path, repo, children: [] });
-    }
-  }
-
-  return root;
-}
-
-const GIT_REFRESH_PATTERNS = [
-  /create mode/,
-  /Switched to/,
-  /Already up to date/,
-  /insertions?\(\+\)/,
-  /deletions?\(-\)/,
-];
 
 export function GitHistory() {
-  const activeProjectId = useAppStore((s) => s.activeProjectId);
-  const config = useAppStore((s) => s.config);
-  const project = config.projects.find((p) => p.id === activeProjectId);
+  const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId);
+  const openCommitDiff = useAppStore((s) => s.openCommitDiff);
+  const workspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
 
-  const [repos, setRepos] = useState<GitRepoInfo[]>([]);
+  const [reposByRoot, setReposByRoot] = useState<Map<string, GitRepoInfo[]>>(new Map());
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
   const [repoStates, setRepoStates] = useState<Map<string, RepoState>>(new Map());
-  const [diffModal, setDiffModal] = useState<{
-    open: boolean;
-    repoPath: string;
-    commitHash: string;
-    commitMessage: string;
-    files: CommitFileInfo[];
-  } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const repoStatesRef = useRef(repoStates);
   repoStatesRef.current = repoStates;
 
   const loadRepos = useCallback(() => {
-    if (!project) return;
-    invoke<GitRepoInfo[]>('discover_git_repos', { projectPath: project.path })
-      .then(setRepos)
-      .catch(() => setRepos([]));
-  }, [project?.path]);
+    if (!workspace) return;
+
+    void Promise.all(
+      workspace.roots.map(async (root) => {
+        try {
+          const repos = await invoke<GitRepoInfo[]>('discover_git_repos', { projectPath: root.path });
+          return [root.id, repos] as const;
+        } catch {
+          return [root.id, []] as const;
+        }
+      }),
+    ).then((entries) => {
+      setReposByRoot(new Map(entries));
+    });
+  }, [workspace]);
 
   useEffect(() => {
     loadRepos();
@@ -107,8 +59,8 @@ export function GitHistory() {
 
       setRepoStates((prev) => {
         const next = new Map(prev);
-        const cur = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
-        next.set(repoPath, { ...cur, loading: true });
+        const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
+        next.set(repoPath, { ...current, loading: true });
         return next;
       });
 
@@ -120,9 +72,9 @@ export function GitHistory() {
         });
         setRepoStates((prev) => {
           const next = new Map(prev);
-          const cur = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
+          const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
           next.set(repoPath, {
-            commits: beforeCommit ? [...cur.commits, ...commits] : commits,
+            commits: beforeCommit ? [...current.commits, ...commits].slice(-120) : commits,
             loading: false,
             hasMore: commits.length >= 30,
           });
@@ -131,8 +83,8 @@ export function GitHistory() {
       } catch {
         setRepoStates((prev) => {
           const next = new Map(prev);
-          const cur = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
-          next.set(repoPath, { ...cur, loading: false });
+          const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
+          next.set(repoPath, { ...current, loading: false });
           return next;
         });
       }
@@ -149,7 +101,7 @@ export function GitHistory() {
         } else {
           next.add(repoPath);
           if (!repoStatesRef.current.has(repoPath)) {
-            loadCommits(repoPath);
+            void loadCommits(repoPath);
           }
         }
         return next;
@@ -170,42 +122,45 @@ export function GitHistory() {
       const state = repoStatesRef.current.get(repoPath);
       if (state && state.hasMore && !state.loading && state.commits.length > 0) {
         const lastHash = state.commits[state.commits.length - 1].hash;
-        loadCommits(repoPath, lastHash);
+        void loadCommits(repoPath, lastHash);
         break;
       }
     }
   }, [loadCommits]);
 
   const handleViewDiff = useCallback(async (repoPath: string, commit: GitCommitInfo) => {
+    if (!workspace) return;
     try {
       const files = await invoke<CommitFileInfo[]>('get_commit_files', {
         repoPath,
         commitHash: commit.hash,
       });
-      setDiffModal({
-        open: true,
+      openCommitDiff({
+        workspaceId: workspace.id,
         repoPath,
         commitHash: commit.hash,
         commitMessage: commit.message,
         files,
       });
-    } catch (e) {
-      console.error('get_commit_files failed:', e);
+    } catch (error) {
+      console.error('get_commit_files failed:', error);
     }
-  }, []);
+  }, [openCommitDiff, workspace]);
 
   const handleCommitContextMenu = useCallback(
     (e: React.MouseEvent, repoPath: string, commit: GitCommitInfo) => {
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, [
         {
-          label: '复制 Commit Hash',
+          label: 'Copy Commit Hash',
           onClick: () => writeText(commit.hash),
         },
         { separator: true },
         {
-          label: '查看变更',
-          onClick: () => handleViewDiff(repoPath, commit),
+          label: 'View Diff',
+          onClick: () => {
+            void handleViewDiff(repoPath, commit);
+          },
         },
       ]);
     },
@@ -213,184 +168,131 @@ export function GitHistory() {
   );
 
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const debouncedRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = setTimeout(() => {
       loadRepos();
       for (const repoPath of expandedReposRef.current) {
-        loadCommits(repoPath);
+        void loadCommits(repoPath);
       }
     }, 500);
-  }, [loadRepos, loadCommits]);
+  }, [loadCommits, loadRepos]);
 
-  useTauriEvent<PtyOutputPayload>(
-    'pty-output',
-    useCallback(
-      (payload: PtyOutputPayload) => {
-        if (GIT_REFRESH_PATTERNS.some((p) => p.test(payload.data))) {
-          debouncedRefresh();
-        }
-      },
-      [debouncedRefresh],
-    ),
-  );
-
-  const repoTree = project ? buildRepoTree(repos, project.path) : [];
-
-  // 递归渲染树节点
-  const renderTreeNode = (node: RepoTreeNode, depth: number) => {
-    // 仓库叶节点 —— 可展开显示 commits
-    if (node.repo) {
-      const repo = node.repo;
-      const isExpanded = expandedRepos.has(repo.path);
-      const state = repoStates.get(repo.path);
-      return (
-        <div key={repo.path}>
-          <div
-            className="sticky bg-[var(--bg-surface)] h-[30px] flex items-center"
-            style={{ top: `${depth * 30}px`, zIndex: 10 - depth }}
-          >
-            <div
-              className="flex items-center gap-1 w-full py-[5px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
-              style={{ paddingLeft: `${depth * 16 + 8}px` }}
-              onClick={() => toggleRepo(repo.path)}
-            >
-              <span
-                className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
-                style={{
-                  transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-                  display: 'inline-block',
-                }}
-              >
-                &#9662;
-              </span>
-              <span className="truncate font-medium">{node.name}</span>
-            </div>
-          </div>
-
-          {isExpanded && (
-            <div className="relative" style={{ zIndex: 0 }}>
-              {state?.commits.map((commit) => (
-                <div
-                  key={commit.hash}
-                  className="py-1.5 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] transition-colors duration-100"
-                  style={{ paddingLeft: `${(depth + 1) * 16 + 8}px`, paddingRight: '8px' }}
-                  onContextMenu={(e) => handleCommitContextMenu(e, repo.path, commit)}
-                  onDoubleClick={() => handleViewDiff(repo.path, commit)}
-                >
-                  <div className="text-sm text-[var(--text-primary)] truncate">
-                    {commit.message}
-                  </div>
-                  <div className="text-xs text-[var(--text-muted)] flex items-center gap-1.5 mt-0.5">
-                    <span>{commit.author}</span>
-                    <span>&middot;</span>
-                    <span>{formatRelativeTime(commit.timestamp)}</span>
-                    <span>&middot;</span>
-                    <span className="font-mono">{commit.shortHash}</span>
-                  </div>
-                </div>
-              ))}
-
-              {state?.loading && (
-                <div className="text-center text-[var(--text-muted)] text-xs py-2">
-                  加载中...
-                </div>
-              )}
-
-              {state && !state.loading && state.commits.length === 0 && (
-                <div className="text-center text-[var(--text-muted)] text-xs py-2">
-                  暂无提交
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      );
+  useEffect(() => {
+    if (!workspace) {
+      return;
     }
 
-    // 纯目录节点 —— 可折叠
-    const isDirExpanded = expandedRepos.has(node.key);
-    return (
-      <div key={node.key}>
-        <div
-          className="sticky bg-[var(--bg-surface)] h-[30px] flex items-center"
-          style={{ top: `${depth * 30}px`, zIndex: 10 - depth }}
-        >
-          <div
-            className="flex items-center gap-1 w-full py-[3px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base text-[var(--text-muted)] transition-colors duration-100"
-            style={{ paddingLeft: `${depth * 16 + 8}px` }}
-            onClick={() => {
-              setExpandedRepos((prev) => {
-                const next = new Set(prev);
-                if (next.has(node.key)) next.delete(node.key);
-                else next.add(node.key);
-                return next;
-              });
-            }}
-          >
-            <span
-              className="text-[13px] w-3 text-center transition-transform duration-150"
-              style={{ transform: isDirExpanded ? 'rotate(0deg)' : 'rotate(-90deg)', display: 'inline-block' }}
-            >
-              ▾
-            </span>
-            <span className="truncate">{node.name}</span>
-          </div>
-        </div>
-        {isDirExpanded && node.children.map((child) => renderTreeNode(child, depth + 1))}
-      </div>
-    );
-  };
+    const unsubscribers = workspace.roots.map((root) => subscribeProjectGitDirty(root.path, debouncedRefresh));
+    return () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
+    };
+  }, [debouncedRefresh, workspace]);
 
-  if (!project) {
+  const repoGroups = useMemo<RootRepoGroup[]>(() => {
+    if (!workspace) return [];
+    return workspace.roots.map((root) => ({
+      root,
+      repos: reposByRoot.get(root.id) ?? [],
+    }));
+  }, [reposByRoot, workspace]);
+
+  if (!workspace) {
     return (
-      <div className="h-full bg-[var(--bg-surface)] flex items-center justify-center text-[var(--text-muted)] text-base">
-        选择一个项目
+      <div className="flex h-full items-center justify-center bg-[var(--bg-surface)] text-base text-[var(--text-muted)]">
+        Select a workspace
       </div>
     );
   }
 
   return (
-    <div className="h-full bg-[var(--bg-surface)] flex flex-col border-t border-[var(--border-subtle)]">
-      <div className="flex items-center justify-between px-3 pt-3 pb-1.5 flex-shrink-0">
-        <span className="text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium select-none">
+    <div className="flex h-full flex-col border-t border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+      <div className="flex flex-shrink-0 items-center justify-between px-3 pt-3 pb-1.5">
+        <span className="text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)] select-none">
           Git History
         </span>
         <button
-          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-sm"
+          className="text-sm text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
           onClick={() => {
             loadRepos();
             for (const repoPath of expandedRepos) {
-              loadCommits(repoPath);
+              void loadCommits(repoPath);
             }
           }}
-          title="刷新"
+          title="Refresh"
         >
           ↻
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto px-1" ref={scrollRef} onScroll={handleScroll}>
-        {repos.length === 0 && (
-          <div className="text-center text-[var(--text-muted)] text-sm py-6">
-            未发现 Git 仓库
-          </div>
+        {repoGroups.every((group) => group.repos.length === 0) ? (
+          <div className="py-6 text-center text-sm text-[var(--text-muted)]">No Git repositories found</div>
+        ) : (
+          repoGroups.map((group) => (
+            <div key={group.root.id} className="pb-2">
+              <div className="sticky top-0 z-10 border-y border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                {group.root.name}
+              </div>
+              {group.repos.length === 0 ? (
+                <div className="px-3 py-2 text-xs text-[var(--text-muted)]">No repositories under this root</div>
+              ) : (
+                group.repos.map((repo) => {
+                  const isExpanded = expandedRepos.has(repo.path);
+                  const state = repoStates.get(repo.path);
+                  return (
+                    <div key={repo.path}>
+                      <div
+                        className="flex cursor-pointer items-center gap-1 rounded-[var(--radius-sm)] px-2 py-[5px] text-base text-[var(--color-folder)] transition-colors duration-100 hover:bg-[var(--border-subtle)]"
+                        onClick={() => toggleRepo(repo.path)}
+                      >
+                        <span
+                          className="w-3 text-center text-[13px] text-[var(--text-muted)] transition-transform duration-150"
+                          style={{ transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)', display: 'inline-block' }}
+                        >
+                          ▾
+                        </span>
+                        <span className="truncate font-medium">{repo.name}</span>
+                      </div>
+
+                      {isExpanded ? (
+                        <div>
+                          {state?.commits.map((commit) => (
+                            <div
+                              key={commit.hash}
+                              className="cursor-pointer rounded-[var(--radius-sm)] px-6 py-1.5 transition-colors duration-100 hover:bg-[var(--border-subtle)]"
+                              onContextMenu={(event) => handleCommitContextMenu(event, repo.path, commit)}
+                              onDoubleClick={() => {
+                                void handleViewDiff(repo.path, commit);
+                              }}
+                            >
+                              <div className="truncate text-sm text-[var(--text-primary)]">{commit.message}</div>
+                              <div className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+                                <span>{commit.author}</span>
+                                <span>·</span>
+                                <span>{formatRelativeTime(commit.timestamp)}</span>
+                                <span>·</span>
+                                <span className="font-mono">{commit.shortHash}</span>
+                              </div>
+                            </div>
+                          ))}
+
+                          {state?.loading ? (
+                            <div className="py-2 text-center text-xs text-[var(--text-muted)]">Loading…</div>
+                          ) : null}
+                          {state && !state.loading && state.commits.length === 0 ? (
+                            <div className="py-2 text-center text-xs text-[var(--text-muted)]">No commits</div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          ))
         )}
-
-        {repoTree.map((node) => renderTreeNode(node, 0))}
       </div>
-
-      {diffModal && (
-        <CommitDiffModal
-          open={diffModal.open}
-          onClose={() => setDiffModal(null)}
-          repoPath={diffModal.repoPath}
-          commitHash={diffModal.commitHash}
-          commitMessage={diffModal.commitMessage}
-          files={diffModal.files}
-        />
-      )}
     </div>
   );
 }

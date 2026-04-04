@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
-import { useTauriEvent } from './useTauriEvent';
+import {
+  subscribePtyExit,
+  subscribePtyOutputStream,
+  subscribePtySessionCommandStarted,
+  subscribePtySessionCreated,
+  subscribePtySessionCwdChanged,
+  subscribePtySessionPhaseChange,
+  subscribePtyStatusChange,
+} from '../runtime/tauriEventHub';
 import type {
   PaneStatus,
+  PtySessionCwdPayload,
   PtyExitPayload,
   PtyOutputPayload,
   PtySessionCommandPayload,
@@ -13,26 +22,55 @@ import type {
 
 export function useSessionRuntimeBridge() {
   const updatePaneStatusByPty = useAppStore((state) => state.updatePaneStatusByPty);
+  const updatePaneStatusesByPty = useAppStore((state) => state.updatePaneStatusesByPty);
   const upsertSession = useAppStore((state) => state.upsertSession);
+  const updateSessionCwd = useAppStore((state) => state.updateSessionCwd);
   const updateSessionPhase = useAppStore((state) => state.updateSessionPhase);
   const recordSessionCommand = useAppStore((state) => state.recordSessionCommand);
   const finishSessionCommand = useAppStore((state) => state.finishSessionCommand);
   const sessionIdleTimersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  const pendingStatusUpdatesRef = useRef(new Map<number, PaneStatus>());
+  const lastPaneStatusRef = useRef(new Map<number, PaneStatus>());
+  const statusFrameRef = useRef<number | null>(null);
 
-  useTauriEvent<PtyStatusChangePayload>(
-    'pty-status-change',
-    useCallback(
-      (payload) => {
-        updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus);
-      },
-      [updatePaneStatusByPty],
-    ),
+  const flushPendingStatuses = useCallback(() => {
+    statusFrameRef.current = null;
+    if (pendingStatusUpdatesRef.current.size === 0) {
+      return;
+    }
+
+    const updates: Array<{ ptyId: number; status: PaneStatus }> = [];
+    for (const [ptyId, status] of pendingStatusUpdatesRef.current) {
+      if (lastPaneStatusRef.current.get(ptyId) === status) {
+        continue;
+      }
+
+      lastPaneStatusRef.current.set(ptyId, status);
+      updates.push({ ptyId, status });
+    }
+
+    pendingStatusUpdatesRef.current.clear();
+    if (updates.length > 0) {
+      updatePaneStatusesByPty(updates);
+    }
+  }, [updatePaneStatusesByPty]);
+
+  const queuePaneStatus = useCallback(
+    (ptyId: number, status: PaneStatus) => {
+      pendingStatusUpdatesRef.current.set(ptyId, status);
+      if (statusFrameRef.current == null) {
+        statusFrameRef.current = window.requestAnimationFrame(flushPendingStatuses);
+      }
+    },
+    [flushPendingStatuses],
   );
 
-  useTauriEvent<PtyExitPayload>(
-    'pty-exit',
-    useCallback(
-      (payload) => {
+  useEffect(() => {
+    const unsubs = [
+      subscribePtyStatusChange((payload: PtyStatusChangePayload) => {
+        queuePaneStatus(payload.ptyId, payload.status as PaneStatus);
+      }),
+      subscribePtyExit((payload: PtyExitPayload) => {
         const idleTimer = sessionIdleTimersRef.current.get(payload.ptyId);
         if (idleTimer) {
           clearTimeout(idleTimer);
@@ -40,17 +78,11 @@ export function useSessionRuntimeBridge() {
         }
 
         if (payload.exitCode !== 0) {
+          lastPaneStatusRef.current.delete(payload.ptyId);
           updatePaneStatusByPty(payload.ptyId, 'error');
         }
-      },
-      [updatePaneStatusByPty],
-    ),
-  );
-
-  useTauriEvent<PtySessionCreatedPayload>(
-    'pty-session-created',
-    useCallback(
-      (payload) => {
+      }),
+      subscribePtySessionCreated((payload: PtySessionCreatedPayload) => {
         upsertSession({
           sessionId: payload.sessionId,
           ptyId: payload.ptyId,
@@ -63,25 +95,14 @@ export function useSessionRuntimeBridge() {
           createdAt: payload.createdAt,
           updatedAt: payload.updatedAt,
         });
-      },
-      [upsertSession],
-    ),
-  );
-
-  useTauriEvent<PtySessionCommandPayload>(
-    'pty-session-command-started',
-    useCallback(
-      (payload) => {
-        recordSessionCommand(payload.ptyId, payload.command, payload.updatedAt);
-      },
-      [recordSessionCommand],
-    ),
-  );
-
-  useTauriEvent<PtySessionPhasePayload>(
-    'pty-session-phase-change',
-    useCallback(
-      (payload) => {
+      }),
+      subscribePtySessionCommandStarted((payload: PtySessionCommandPayload) => {
+        recordSessionCommand(payload.ptyId, payload.command, payload.updatedAt, payload.usageScope);
+      }),
+      subscribePtySessionCwdChanged((payload: PtySessionCwdPayload) => {
+        updateSessionCwd(payload.ptyId, payload.cwd, payload.updatedAt);
+      }),
+      subscribePtySessionPhaseChange((payload: PtySessionPhasePayload) => {
         const idleTimer = sessionIdleTimersRef.current.get(payload.ptyId);
         if (idleTimer && (payload.phase === 'running' || payload.phase === 'exited' || payload.phase === 'error')) {
           clearTimeout(idleTimer);
@@ -97,15 +118,8 @@ export function useSessionRuntimeBridge() {
           lastExitCode: payload.lastExitCode,
           updatedAt: payload.updatedAt,
         });
-      },
-      [finishSessionCommand, updateSessionPhase],
-    ),
-  );
-
-  useTauriEvent<PtyOutputPayload>(
-    'pty-output',
-    useCallback(
-      (payload) => {
+      }),
+      subscribePtyOutputStream((payload: PtyOutputPayload) => {
         const session = useAppStore.getState().sessions.get(payload.ptyId);
         if (!session || session.phase === 'exited' || session.phase === 'error') {
           return;
@@ -131,13 +145,29 @@ export function useSessionRuntimeBridge() {
         }, 220);
 
         sessionIdleTimersRef.current.set(payload.ptyId, timer);
-      },
-      [updateSessionPhase],
-    ),
-  );
+      }),
+    ];
+
+    return () => {
+      unsubs.forEach((unsubscribe) => unsubscribe());
+    };
+  }, [
+    finishSessionCommand,
+    queuePaneStatus,
+    recordSessionCommand,
+    updatePaneStatusByPty,
+    updateSessionCwd,
+    updateSessionPhase,
+    upsertSession,
+  ]);
 
   useEffect(() => {
     return () => {
+      if (statusFrameRef.current != null) {
+        window.cancelAnimationFrame(statusFrameRef.current);
+      }
+      pendingStatusUpdatesRef.current.clear();
+      lastPaneStatusRef.current.clear();
       sessionIdleTimersRef.current.forEach((timer) => clearTimeout(timer));
       sessionIdleTimersRef.current.clear();
     };

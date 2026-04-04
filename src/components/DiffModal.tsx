@@ -1,152 +1,170 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { GitFileStatus, GitDiffResult, DiffLine } from '../types';
+import { useAppStore } from '../store';
+import type { DiffLine, GitDiffResult, GitFileStatus } from '../types';
+import { buildInlineEntries, buildSideBySideRows, type DiffTextSegment } from '../utils/diffHighlight';
+import { OverlaySurface } from './OverlaySurface';
+import { CloseIcon, MaximizeIcon, RestoreIcon, ToolbarButton } from './documentViewer/controls';
+import { resolveDocumentLanguage } from './documentViewer/language';
+import { resolveViewerSkin, toViewerCssVars } from './documentViewer/viewerSkin';
 
 interface DiffModalProps {
-  open: boolean;
+  open?: boolean;
   onClose: () => void;
   projectPath: string;
   status: GitFileStatus;
+  variant?: 'dialog' | 'tab';
+  active?: boolean;
 }
 
 type ViewMode = 'side-by-side' | 'inline';
-
-// ─── InlineView ───
+type DiffDialogLayoutMode = 'windowed' | 'maximized';
 
 export function InlineView({ hunks }: { hunks: GitDiffResult['hunks'] }) {
+  const entries = buildInlineEntries(hunks);
+
   return (
-    <div className="font-mono text-sm leading-6">
-      {hunks.map((hunk, hi) => (
-        <div key={hi}>
-          {hunk.lines.map((line, li) => (
-            <div
-              key={li}
-              className={`flex ${
-                line.kind === 'add'
-                  ? 'bg-[var(--diff-add-bg)]'
-                  : line.kind === 'delete'
-                  ? 'bg-[var(--diff-del-bg)]'
-                  : ''
-              }`}
-            >
-              <span className="w-12 text-right pr-2 text-[var(--text-muted)] select-none flex-shrink-0 opacity-50">
-                {line.kind === 'add' ? '+' : line.kind === 'delete' ? '-' : (line.oldLineno ?? '')}
-              </span>
-              <span
-                className={`flex-1 whitespace-pre px-2 ${
-                  line.kind === 'add'
-                    ? 'text-[var(--diff-add-text)]'
-                    : line.kind === 'delete'
-                    ? 'text-[var(--diff-del-text)]'
-                    : 'text-[var(--text-primary)]'
-                }`}
-              >
-                {line.content}
-              </span>
-            </div>
-          ))}
+    <div className="font-mono text-[12px] leading-[1.1]" style={{ fontFamily: 'var(--viewer-code-font)' }}>
+      {entries.map((entry, index) => (
+        <div
+          key={`${entry.line.kind}-${entry.line.oldLineno ?? 'n'}-${entry.line.newLineno ?? 'n'}-${index}`}
+          className={`flex ${
+            entry.line.kind === 'add'
+              ? 'bg-[var(--diff-add-bg)]'
+              : entry.line.kind === 'delete'
+                ? 'bg-[var(--diff-del-bg)]'
+                : ''
+          }`}
+        >
+          <span
+            className="w-7 flex-shrink-0 select-none pr-0.5 text-right text-[var(--text-muted)] opacity-60"
+            style={{
+              backgroundColor: 'var(--viewer-gutter)',
+              borderRight: '1px solid var(--viewer-border)',
+            }}
+          >
+            {entry.line.kind === 'add' ? '+' : entry.line.kind === 'delete' ? '-' : (entry.line.oldLineno ?? '')}
+          </span>
+          <span
+            className={`flex-1 whitespace-pre px-1 ${
+              entry.line.kind === 'add'
+                ? 'text-[var(--diff-add-text)]'
+                : entry.line.kind === 'delete'
+                  ? 'text-[var(--diff-del-text)]'
+                  : 'text-[var(--text-primary)]'
+            }`}
+          >
+            <DiffSegmentText segments={entry.segments} fallback={entry.line.content} />
+          </span>
         </div>
       ))}
     </div>
   );
 }
 
-// ─── SideBySideView ───
-
 export function SideBySideView({ hunks }: { hunks: GitDiffResult['hunks'] }) {
-  const rows: { left?: DiffLine; right?: DiffLine }[] = [];
+  const rows = buildSideBySideRows(hunks);
 
-  for (const hunk of hunks) {
-    let i = 0;
-    while (i < hunk.lines.length) {
-      const line = hunk.lines[i];
-      if (line.kind === 'context') {
-        rows.push({ left: line, right: line });
-        i++;
-      } else if (line.kind === 'delete') {
-        const deletes: DiffLine[] = [];
-        while (i < hunk.lines.length && hunk.lines[i].kind === 'delete') {
-          deletes.push(hunk.lines[i]);
-          i++;
-        }
-        const adds: DiffLine[] = [];
-        while (i < hunk.lines.length && hunk.lines[i].kind === 'add') {
-          adds.push(hunk.lines[i]);
-          i++;
-        }
-        const maxLen = Math.max(deletes.length, adds.length);
-        for (let j = 0; j < maxLen; j++) {
-          rows.push({
-            left: deletes[j] ?? undefined,
-            right: adds[j] ?? undefined,
-          });
-        }
-      } else if (line.kind === 'add') {
-        rows.push({ left: undefined, right: line });
-        i++;
-      } else {
-        i++;
-      }
-    }
-  }
-
-  const renderCell = (line: DiffLine | undefined, side: 'left' | 'right') => {
+  const renderCell = (line: DiffLine | undefined, side: 'left' | 'right', segments: DiffTextSegment[]) => {
     if (!line) {
       return (
         <div className="flex h-full bg-[var(--bg-base)] opacity-30">
-          <span className="w-12 flex-shrink-0" />
+          <span className="w-7 flex-shrink-0 border-r border-[var(--viewer-border)] bg-[var(--viewer-gutter)]" />
           <span className="flex-1" />
         </div>
       );
     }
+
     const isAdd = line.kind === 'add';
-    const isDel = line.kind === 'delete';
+    const isDelete = line.kind === 'delete';
     return (
-      <div
-        className={`flex ${
-          isAdd ? 'bg-[var(--diff-add-bg)]' : isDel ? 'bg-[var(--diff-del-bg)]' : ''
-        }`}
-      >
-        <span className="w-12 text-right pr-2 text-[var(--text-muted)] select-none flex-shrink-0 opacity-50">
+      <div className={`flex ${isAdd ? 'bg-[var(--diff-add-bg)]' : isDelete ? 'bg-[var(--diff-del-bg)]' : ''}`}>
+        <span
+          className="w-7 flex-shrink-0 select-none pr-0.5 text-right text-[var(--text-muted)] opacity-60"
+          style={{
+            backgroundColor: 'var(--viewer-gutter)',
+            borderRight: '1px solid var(--viewer-border)',
+          }}
+        >
           {side === 'left' ? (line.oldLineno ?? '') : (line.newLineno ?? '')}
         </span>
         <span
-          className={`flex-1 whitespace-pre px-2 ${
-            isAdd ? 'text-[var(--diff-add-text)]' : isDel ? 'text-[var(--diff-del-text)]' : 'text-[var(--text-primary)]'
+          className={`flex-1 whitespace-pre px-1 ${
+            isAdd ? 'text-[var(--diff-add-text)]' : isDelete ? 'text-[var(--diff-del-text)]' : 'text-[var(--text-primary)]'
           }`}
         >
-          {line.content}
+          <DiffSegmentText segments={segments} fallback={line.content} />
         </span>
       </div>
     );
   };
 
   return (
-    <div className="flex font-mono text-sm leading-6 h-full">
-      <div className="flex-1 overflow-auto border-r border-[var(--border-subtle)]">
-        {rows.map((row, i) => (
-          <div key={i}>{renderCell(row.left, 'left')}</div>
+    <div className="flex h-full font-mono text-[12px] leading-[1.1]" style={{ fontFamily: 'var(--viewer-code-font)' }}>
+      <div className="flex-1 overflow-auto border-r border-[var(--viewer-border)]">
+        {rows.map((row, index) => (
+          <div key={index}>{renderCell(row.left, 'left', row.leftSegments)}</div>
         ))}
       </div>
       <div className="flex-1 overflow-auto">
-        {rows.map((row, i) => (
-          <div key={i}>{renderCell(row.right, 'right')}</div>
+        {rows.map((row, index) => (
+          <div key={index}>{renderCell(row.right, 'right', row.rightSegments)}</div>
         ))}
       </div>
     </div>
   );
 }
 
-// ─── DiffModal ───
+function DiffSegmentText({ segments, fallback }: { segments: DiffTextSegment[]; fallback: string }) {
+  if (segments.length === 0) {
+    return fallback;
+  }
 
-export function DiffModal({ open, onClose, projectPath, status }: DiffModalProps) {
+  return (
+    <>
+      {segments.map((segment, index) => (
+        <span
+          key={`${segment.kind}-${index}`}
+          className={
+            segment.kind === 'added'
+              ? 'bg-[var(--diff-add-inline-bg)] text-[var(--diff-add-inline-text)]'
+              : segment.kind === 'removed'
+                ? 'bg-[var(--diff-del-inline-bg)] text-[var(--diff-del-inline-text)]'
+                : undefined
+          }
+        >
+          {segment.value}
+        </span>
+      ))}
+    </>
+  );
+}
+
+export function DiffModal({
+  open = true,
+  onClose,
+  projectPath,
+  status,
+  variant = 'dialog',
+  active: activeOverride,
+}: DiffModalProps) {
+  const themePreset = useAppStore((state) => state.config.theme.preset);
   const [viewMode, setViewMode] = useState<ViewMode>('side-by-side');
+  const [layoutMode, setLayoutMode] = useState<DiffDialogLayoutMode>('windowed');
   const [diffResult, setDiffResult] = useState<GitDiffResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  const active = variant === 'tab' ? activeOverride ?? true : open;
+  const maximized = layoutMode === 'maximized';
+  const fileName = status.path.split('/').pop() ?? status.path;
+  const language = resolveDocumentLanguage(status.path);
+  const skin = resolveViewerSkin(language.family, themePreset);
+  const viewerStyle = toViewerCssVars(skin);
+
   useEffect(() => {
-    if (!open) return;
+    if (!active) return;
+
     setLoading(true);
     setError('');
     setDiffResult(null);
@@ -156,103 +174,152 @@ export function DiffModal({ open, onClose, projectPath, status }: DiffModalProps
       filePath: status.path,
     })
       .then(setDiffResult)
-      .catch((e) => setError(String(e)))
+      .catch((reason) => setError(String(reason)))
       .finally(() => setLoading(false));
-  }, [open, projectPath, status.path]);
+  }, [active, projectPath, status.path]);
 
   useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [open, onClose]);
+    if (active) {
+      setLayoutMode('windowed');
+    }
+  }, [active, status.path]);
 
-  if (!open) return null;
+  if (variant === 'dialog' && !active) {
+    return null;
+  }
 
-  const fileName = status.path.split('/').pop() ?? status.path;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+  const content = (
+    <>
       <div
-        className="relative flex flex-col overflow-hidden bg-[var(--bg-surface)] border border-[var(--border-strong)] rounded-[var(--radius-md)] shadow-[var(--shadow-overlay)] animate-slide-in"
-        style={{ width: '90vw', height: '80vh' }}
-        onClick={(e) => e.stopPropagation()}
+        className="flex flex-shrink-0 items-center justify-between border-b px-1 py-[3px]"
+        style={{
+          borderColor: 'var(--viewer-border)',
+          background: 'var(--viewer-header-bg)',
+          backgroundColor: 'var(--viewer-header-bg)',
+        }}
       >
-        {/* 工具栏 */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-base font-medium text-[var(--accent)]">{fileName}</span>
-            <span className="text-sm text-[var(--text-muted)] truncate max-w-[300px]">
-              {status.path}
-            </span>
-            <span className="px-2 py-0.5 text-xs rounded bg-[var(--bg-elevated)] text-[var(--text-muted)] border border-[var(--border-subtle)]">
-              {status.statusLabel}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex rounded-[var(--radius-sm)] border border-[var(--border-default)] overflow-hidden">
-              <button
-                className={`px-3 py-1 text-sm transition-colors ${
-                  viewMode === 'side-by-side'
-                    ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                }`}
-                onClick={() => setViewMode('side-by-side')}
-              >
-                并排
-              </button>
-              <button
-                className={`px-3 py-1 text-sm transition-colors ${
-                  viewMode === 'inline'
-                    ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                }`}
-                onClick={() => setViewMode('inline')}
-              >
-                内联
-              </button>
-            </div>
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="truncate text-[10px] font-semibold tracking-[0.01em] text-[var(--accent)]" title={status.path}>
+            {fileName}
+          </span>
+          <span
+            className="border px-1 py-0 text-[7px] font-semibold tracking-[0.08em]"
+            style={{
+              color: 'var(--viewer-accent)',
+              borderColor: 'var(--viewer-border)',
+              backgroundColor: 'var(--viewer-accent-subtle)',
+            }}
+          >
+            {language.badge}
+          </span>
+          <span className="border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-1 py-0 text-[7px] text-[var(--text-muted)]">
+            {status.statusLabel}
+          </span>
+        </div>
+        <div className="flex items-center gap-px">
+          <div className="flex overflow-hidden border border-[var(--viewer-border)]">
             <button
-              className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-lg leading-none ml-2"
-              onClick={onClose}
+              className={`px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
+                viewMode === 'side-by-side'
+                  ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+              }`}
+              onClick={() => setViewMode('side-by-side')}
             >
-              ✕
+              Side
+            </button>
+            <button
+              className={`px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
+                viewMode === 'inline'
+                  ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+              }`}
+              onClick={() => setViewMode('inline')}
+            >
+              Inline
             </button>
           </div>
-        </div>
-
-        {/* 内容区 */}
-        <div className="flex-1 overflow-auto bg-[var(--bg-base)]">
-          {loading && (
-            <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-              加载中...
-            </div>
+          {variant === 'dialog' && (
+            <ToolbarButton
+              active={maximized}
+              compact
+              label={maximized ? 'Restore diff window size' : 'Maximize diff window'}
+              onClick={() => setLayoutMode((value) => (value === 'maximized' ? 'windowed' : 'maximized'))}
+              testId="diff-modal-maximize-toggle"
+            >
+              {maximized ? <RestoreIcon /> : <MaximizeIcon />}
+            </ToolbarButton>
           )}
-          {error && (
-            <div className="flex items-center justify-center h-full text-[var(--color-error)]">
-              {error}
-            </div>
-          )}
-          {diffResult && diffResult.isBinary && (
-            <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-              二进制文件，不支持 diff 预览
-            </div>
-          )}
-          {diffResult && diffResult.tooLarge && (
-            <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-              文件过大（&gt;1MB），不支持 diff 预览
-            </div>
-          )}
-          {diffResult && !diffResult.isBinary && !diffResult.tooLarge && (
-            viewMode === 'side-by-side'
-              ? <SideBySideView hunks={diffResult.hunks} />
-              : <InlineView hunks={diffResult.hunks} />
-          )}
+          <ToolbarButton compact label="Close diff" onClick={onClose}>
+            <CloseIcon />
+          </ToolbarButton>
         </div>
       </div>
-    </div>
+
+      <div className="flex-1 overflow-auto bg-[var(--viewer-panel)]" data-testid="worktree-diff-body">
+        {loading && (
+          <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
+            Loading diff...
+          </div>
+        )}
+        {error && (
+          <div className="flex h-full items-center justify-center text-[var(--color-error)]">
+            {error}
+          </div>
+        )}
+        {diffResult && diffResult.isBinary && (
+          <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
+            Binary file, diff preview is not available.
+          </div>
+        )}
+        {diffResult && diffResult.tooLarge && (
+          <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
+            File is too large to preview as diff.
+          </div>
+        )}
+        {diffResult && !diffResult.isBinary && !diffResult.tooLarge && (
+          viewMode === 'side-by-side' ? <SideBySideView hunks={diffResult.hunks} /> : <InlineView hunks={diffResult.hunks} />
+        )}
+      </div>
+    </>
+  );
+
+  if (variant === 'tab') {
+    return (
+      <div
+        role="region"
+        aria-label={`worktree-diff:${status.path}`}
+        data-language-family={language.family}
+        data-language-id={language.languageId}
+        style={viewerStyle}
+        className="flex h-full min-w-0 flex-col overflow-hidden bg-[var(--bg-surface)]"
+      >
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <OverlaySurface
+      open={open}
+      onClose={onClose}
+      rootClassName={maximized ? 'p-1' : ''}
+      panelProps={{
+        role: 'dialog',
+        'aria-modal': true,
+        'aria-label': `worktree-diff:${status.path}`,
+        'data-layout-mode': layoutMode,
+        'data-language-family': language.family,
+        'data-language-id': language.languageId,
+      }}
+      panelStyle={viewerStyle}
+      panelClassName={
+        maximized
+          ? 'relative flex h-[calc(100vh-8px)] w-[calc(100vw-8px)] flex-col overflow-hidden rounded-none border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-none animate-slide-in'
+          : 'relative flex h-[80vh] w-[90vw] flex-col overflow-hidden rounded-none border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-none animate-slide-in'
+      }
+    >
+      {content}
+    </OverlaySurface>
   );
 }

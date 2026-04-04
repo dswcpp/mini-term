@@ -1,10 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppStore } from '../store';
+import { useAppStore, selectWorkspaceConfig } from '../store';
 import { showContextMenu } from '../utils/contextMenu';
 import type { AiSession } from '../types';
 
-/** 将 ISO 时间戳转换为简短的相对/绝对时间 */
 function formatTime(iso: string): string {
   if (!iso) return '';
   const date = new Date(iso);
@@ -14,21 +13,20 @@ function formatTime(iso: string): string {
   const diff = now - date.getTime();
   const minutes = Math.floor(diff / 60000);
 
-  if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${minutes}分钟前`;
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
 
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}小时前`;
+  if (hours < 24) return `${hours}h ago`;
 
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}天前`;
+  if (days < 7) return `${days}d ago`;
 
-  // 超过一周显示日期
-  const m = date.getMonth() + 1;
-  const d = date.getDate();
-  const y = date.getFullYear();
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const year = date.getFullYear();
   const currentYear = new Date().getFullYear();
-  return y === currentYear ? `${m}月${d}日` : `${y}/${m}/${d}`;
+  return year === currentYear ? `${month}/${day}` : `${year}/${month}/${day}`;
 }
 
 const TYPE_BADGE: Record<string, { label: string; color: string }> = {
@@ -37,18 +35,17 @@ const TYPE_BADGE: Record<string, { label: string; color: string }> = {
 };
 
 export function SessionList() {
-  const config = useAppStore((s) => s.config);
-  const activeProjectId = useAppStore((s) => s.activeProjectId);
+  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const activeWorkspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
+  const rootNameByPath = new Map(activeWorkspace?.roots.map((root) => [root.path, root.name]) ?? []);
 
   const [sessions, setSessions] = useState<AiSession[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const activeProject = config.projects.find((p) => p.id === activeProjectId);
-
-  const fetchSessions = useCallback(async (projectPath: string) => {
+  const fetchSessions = useCallback(async (projectPaths: string[]) => {
     setLoading(true);
     try {
-      const result = await invoke<AiSession[]>('get_ai_sessions', { projectPath });
+      const result = await invoke<AiSession[]>('get_ai_sessions', { projectPaths });
       setSessions(result);
     } catch {
       setSessions([]);
@@ -58,76 +55,81 @@ export function SessionList() {
   }, []);
 
   useEffect(() => {
-    if (activeProject?.path) {
-      fetchSessions(activeProject.path);
+    if (activeWorkspace?.roots.length) {
+      void fetchSessions(activeWorkspace.roots.map((root) => root.path));
     } else {
       setSessions([]);
     }
-  }, [activeProject?.path, fetchSessions]);
+  }, [activeWorkspace, fetchSessions]);
 
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-[var(--bg-surface)]">
-      <div className="px-3 pt-2.5 pb-1.5 text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium flex items-center justify-between">
+    <div className="flex h-full flex-col overflow-hidden bg-[var(--bg-surface)]">
+      <div className="flex items-center justify-between px-3 pt-2.5 pb-1.5 text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
         <span>Sessions</span>
-        {activeProject && (
+        {activeWorkspace ? (
           <span
-            className="text-xs normal-case tracking-normal cursor-pointer hover:text-[var(--text-primary)] transition-colors"
-            onClick={() => fetchSessions(activeProject.path)}
-            title="刷新会话列表"
+            className="cursor-pointer text-xs normal-case tracking-normal transition-colors hover:text-[var(--text-primary)]"
+            onClick={() => void fetchSessions(activeWorkspace.roots.map((root) => root.path))}
+            title="Refresh session list"
           >
             ↻
           </span>
-        )}
+        ) : null}
       </div>
 
       <div className="flex-1 overflow-y-auto px-1.5">
-        {loading && sessions.length === 0 && (
-          <div className="px-2.5 py-3 text-xs text-[var(--text-muted)] text-center">加载中…</div>
-        )}
+        {loading && sessions.length === 0 ? (
+          <div className="px-2.5 py-3 text-center text-xs text-[var(--text-muted)]">Loading…</div>
+        ) : null}
 
-        {!loading && sessions.length === 0 && (
-          <div className="px-2.5 py-3 text-xs text-[var(--text-muted)] text-center">
-            {activeProject ? '暂无会话记录' : '请先选择项目'}
+        {!loading && sessions.length === 0 ? (
+          <div className="px-2.5 py-3 text-center text-xs text-[var(--text-muted)]">
+            {activeWorkspace ? 'No session history' : 'Select a workspace'}
           </div>
-        )}
+        ) : null}
 
         {sessions.map((session) => {
           const badge = TYPE_BADGE[session.sessionType] ?? TYPE_BADGE.claude;
+          const rootLabel = session.projectPath ? rootNameByPath.get(session.projectPath) ?? session.projectPath : undefined;
 
           return (
             <div
               key={`${session.sessionType}-${session.id}`}
-              className="flex items-start gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] text-xs group hover:bg-[var(--border-subtle)] transition-colors cursor-default"
+              className="group flex cursor-default items-start gap-2 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-xs transition-colors hover:bg-[var(--border-subtle)]"
               title={`${session.sessionType.toUpperCase()} · ${session.timestamp}`}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
                 const cmd = session.sessionType === 'claude'
                   ? `claude --resume ${session.id}`
                   : `codex resume ${session.id}`;
-                showContextMenu(e.clientX, e.clientY, [
+                showContextMenu(event.clientX, event.clientY, [
                   {
-                    label: '复制恢复命令',
+                    label: 'Copy Resume Command',
                     onClick: () => navigator.clipboard.writeText(cmd),
                   },
                 ]);
               }}
             >
-              {/* 类型徽标 */}
               <span
-                className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-[10px] font-bold mt-0.5"
-                style={{ backgroundColor: badge.color + '22', color: badge.color }}
+                className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-[10px] font-bold"
+                style={{ backgroundColor: `${badge.color}22`, color: badge.color }}
               >
                 {badge.label}
               </span>
 
-              {/* 标题 + 时间 */}
-              <div className="flex-1 min-w-0">
-                <div className="truncate text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] transition-colors leading-snug">
+              <div className="min-w-0 flex-1">
+                <div className="truncate leading-snug text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]">
                   {session.title}
                 </div>
-                <div className="text-[var(--text-muted)] text-[10px] mt-0.5 leading-none">
-                  {formatTime(session.timestamp)}
+                <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[var(--text-muted)]">
+                  <span>{formatTime(session.timestamp)}</span>
+                  {rootLabel ? (
+                    <>
+                      <span>·</span>
+                      <span className="truncate">{rootLabel}</span>
+                    </>
+                  ) : null}
                 </div>
               </div>
             </div>
