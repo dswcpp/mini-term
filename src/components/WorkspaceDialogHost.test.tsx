@@ -10,6 +10,7 @@ describe('WorkspaceDialogHost', () => {
       ...state,
       ui: {
         activeDialog: null,
+        activeNotice: null,
       },
     }));
   });

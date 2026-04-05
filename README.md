@@ -5,12 +5,12 @@
 <h1 align="center">Mini-Term</h1>
 
 <p align="center">
-  <strong>为 AI 时代打造的桌面终端管理器</strong><br>
-  基于 Tauri v2 · 多项目 · 多标签 · 分屏布局 · AI 进程感知
+  <strong>面向本地多工作区协作的桌面终端工作台 + MCP 控制面</strong><br>
+  Tauri v2 · React 19 · Rust · Tracked Tasks · Approvals · Git Review
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.1.9-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.2.4-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/Tauri-v2-orange" alt="tauri">
   <img src="https://img.shields.io/badge/React-19-61dafb" alt="react">
@@ -19,188 +19,257 @@
 
 ---
 
-## 解决痛点
+## 项目定位
 
-1. **重量级工具多余** — All In AI 的用户只需要终端跑 Agent，却不得不打开 VS Code / IDEA 等重型 IDE，大且占内存
-2. **多 Agent 并发无感知** — 同时开多个 Claude / Codex 会话，某个 Agent 跑完了无法直观看到
-3. **项目切换不便** — 系统终端缺少多项目组织、标签页和分屏管理能力
+Mini-Term 不是单纯的桌面终端管理器，也不是一个孤立的 MCP server。
 
-Mini-Term 用一个轻量桌面应用解决以上所有问题。
+当前定位是：
 
-## 预览
+- 本地多工作区桌面工作台
+- 终端与 Git / 文件 / Workspace 上下文宿主
+- Agent 任务工作台
+- MCP 控制面
+- 运行时 Prompt / Skill 策略注入中心
 
-![主界面](docs/screenshots/main.png)
-![设置界面](docs/screenshots/settings.png)
+它一方面托管本地 `codex` / `claude` 任务，另一方面向外暴露稳定的 MCP 接口，供外部 Agent 或 MCP client 使用。
 
+## 核心能力
 
-## 功能特性
+### 桌面工作台
 
-### 终端核心
+- 多工作区管理
+- 多标签与递归分屏终端
+- 文件树与 Git 状态感知
+- AI session 历史读取
+- Git diff / commit history 浏览
 
-- **多标签管理** — 每个项目独立标签页，拖拽排序，状态图标一目了然
+### Agent 任务工作台
 
-- **递归分屏** — 横向 / 纵向任意嵌套分屏，Allotment 拖拽调整比例
+- 启动并跟踪 `codex` / `claude` 任务
+- 展示任务状态、attention、输出摘要、变更文件
+- 支持补充输入、恢复会话、关闭任务
+- 提供独立任务面板标签页
+- 提供 `AgentInbox` 作为审批和高优先任务入口
 
-- **高性能渲染** — xterm.js v6 + WebGL 加速，自动降级为 Canvas
+### MCP Runtime
 
-- **10 万行滚动缓冲** — 大量日志输出也不丢失
+- 本地 stdio / HTTP MCP server
+- 运行时观测、PTY 控制、UI 控制、任务管理、兼容层工具
+- 工作区边界校验
+- 审批门控
+- 任务状态与 review attention 持久化
 
-- **终端缓存** — 切换标签 / 分屏不丢失已有内容
+### Prompt / Skill 策略层
 
-- **快捷键** — Ctrl+Shift+C/V 复制粘贴，文件拖拽到终端自动插入路径
+- `codex` / `claude` / `cursor` / `generic-mcp` 四类 profile
+- 分层 Prompt 体系
+- 任务启动时自动注入运行时策略
+- 设置页可编辑、预览、导出、逐层重置
 
-  
+## MCP 工具分组
 
-### AI 进程感知
+当前 MCP 工具固定为 6 个 group、37 个工具：
 
-- **实时状态检测** — 自动识别终端中运行的 Claude / Codex，显示 idle / working / error 状态
-- **状态聚合** — 从单个面板 → 标签页 → 项目级别逐层聚合，优先级 `error > ai-working > ai-idle > idle`
-- **会话历史** — 读取本地 Claude / Codex 历史会话记录，右键复制恢复命令快速续接
+- `core-runtime` (3)
+  - `ping`
+  - `server_info`
+  - `list_tools`
+- `runtime-observation` (9)
+  - `list_workspaces`
+  - `get_workspace_context`
+  - `get_config`
+  - `list_ptys`
+  - `get_pty_detail`
+  - `get_process_tree`
+  - `list_fs_watches`
+  - `get_recent_events`
+  - `get_ai_sessions`
+- `pty-control` (4)
+  - `create_pty`
+  - `write_pty`
+  - `resize_pty`
+  - `kill_pty`
+- `ui-control` (6)
+  - `set_config_fields`
+  - `focus_workspace`
+  - `create_tab`
+  - `close_tab`
+  - `split_pane`
+  - `notify_user`
+- `task-management` (8)
+  - `start_task`
+  - `get_task_status`
+  - `list_attention_tasks`
+  - `resume_session`
+  - `send_task_input`
+  - `close_task`
+  - `list_approval_requests`
+  - `decide_approval_request`
+- `legacy-compat` (7)
+  - `read_file`
+  - `search_files`
+  - `get_git_summary`
+  - `get_diff_for_review`
+  - `write_file`
+  - `run_workspace_command`
+  - `list_ai_sessions`
 
+`list_tools` 会额外暴露 `requiresHostConnection`，用来区分 snapshot-only 工具与依赖桌面宿主在线的 host-backed 工具。
 
+## 推荐工作流
 
-### 项目管理
+推荐工具顺序：
 
-- **项目列表** — 左侧边栏管理多个项目目录，一键切换工作区
-- **嵌套分组** — 最多 3 级项目分组，拖拽排序，折叠 / 展开
-- **文件树** — 集成目录浏览器，自动过滤 `.gitignore` 条目，文件监听实时刷新
+1. `list_workspaces`
+2. `get_workspace_context`
+3. `list_ptys` / `get_pty_detail` / `get_process_tree`
+4. `read_file` / `search_files`
+5. `get_git_summary` / `get_diff_for_review`
+6. `start_task` / `get_task_status` / `send_task_input`
 
+审批型动作默认流程：
 
+1. 首次调用工具
+2. 返回 `approvalRequired`
+3. 在 Mini-Term Inbox 中审批
+4. 通过后带 `approvalRequestId` 重试
 
-### Git 集成
+## 界面概览
 
-- **文件状态** — 文件树显示 Git 状态颜色（修改 / 新增 / 删除 / 冲突）
-- **变更 Diff** — 查看工作区文件变更的详细 Diff
-- **提交历史** — 浏览仓库提交记录，支持游标分页加载
-- **提交 Diff** — 查看任意提交的文件变更，支持并排 / 内联两种 Diff 模式
-- **多仓库发现** — 自动扫描项目目录下所有 Git 仓库
+主要 UI 由四块组成：
 
-![Git 集成](docs/screenshots/git.png)
+- 工作区与文件侧边栏
+- 终端与分屏标签区
+- `AgentInbox` 摘要入口
+- `Tasks` 独立任务工作台标签页
 
-### 其他
+截图：
 
-- **布局持久化** — 分屏比例、标签页、窗口大小 / 位置自动保存，重启恢复
-- **关闭确认** — 关闭窗口前弹出二次确认，避免误操作
-- **版本检查** — 启动时自动检查更新，标题栏显示新版本提示
-- **Warm Carbon 主题** — 暖炭色调，自定义 CSS 变量体系
-- **多 Shell 支持** — 可配置多种 Shell（PowerShell、CMD、Git Bash 等）
+- ![主界面](docs/screenshots/main.png)
+- ![设置页](docs/screenshots/settings.png)
+- ![Git 集成](docs/screenshots/git.png)
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
-| 框架 | Tauri v2（Rust 后端 + WebView 前端） |
-| 前端 | React 19 + TypeScript 5.8 + Tailwind CSS v4 + Vite 7 |
-| 终端 | xterm.js v6（WebGL addon，Canvas 降级） |
-| 状态 | Zustand（全局单一 Store） |
-| 布局 | Allotment（三栏主布局 + 递归 SplitNode 分屏树） |
-| PTY | portable-pty 0.8 |
-| Git | git2 0.19 |
-| 文件监听 | notify 7 + ignore 0.4（.gitignore 过滤） |
+| 桌面宿主 | Tauri v2 |
+| 前端 | React 19 + TypeScript + Tailwind CSS v4 + Vite 7 |
+| 后端 | Rust 2021 |
+| 终端 | xterm.js v6 |
+| 状态管理 | Zustand |
+| 分屏布局 | Allotment + 递归 SplitNode |
+| PTY | portable-pty |
+| Git | git2 |
+| 文件监听 | notify + ignore |
 
-## 快速开始
-
-### 直接下载
-
-前往 [Releases](https://github.com/pchaganti/mini-term/releases) 页面下载最新安装包。
-
-> 目前仅支持 Windows、MacOS 平台。
-
-### 从源码构建
-
-#### 前置条件
-
-- [Node.js](https://nodejs.org/) >= 18
-- [Rust](https://www.rust-lang.org/tools/install) >= 1.70
-- [Tauri v2 CLI](https://v2.tauri.app/start/prerequisites/)
-
-#### 安装与运行
+## 开发命令
 
 ```bash
-# 克隆仓库
-git clone https://github.com/pchaganti/mini-term.git
-cd mini-term
-
-# 安装依赖
-npm install
-
-# 启动完整 Tauri 开发环境（前端 + 后端）
+# 启动完整 Tauri 开发环境
 npm run tauri dev
 
-# 构建发布包
+# 仅启动前端
+npm run dev
+
+# 启动 MCP server
+npm run mcp
+
+# 前端测试
+npm test
+
+# MCP 黑盒回归
+npm run test:mcp
+
+# 构建前端
+npm run build
+
+# 构建桌面应用
 npm run tauri build
+
+# Rust 测试
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-## 项目结构
+## 文档
 
-```
-mini-term/
-├── src/                          # 前端源码
-│   ├── App.tsx                   # 三栏主布局入口
-│   ├── store.ts                  # Zustand 全局状态
-│   ├── types.ts                  # 类型定义
-│   ├── styles.css                # 全局样式与 CSS 变量
-│   └── components/
-│       ├── ProjectList.tsx       # 项目列表 + 嵌套分组
-│       ├── SessionList.tsx       # AI 会话历史列表
-│       ├── FileTree.tsx          # 文件目录树 + Git 状态
-│       ├── TerminalArea.tsx      # 标签管理 + 分屏逻辑
-│       ├── SplitLayout.tsx       # 递归渲染分屏树
-│       ├── TerminalInstance.tsx  # xterm.js 终端实例
-│       ├── TabBar.tsx            # 标签栏
-│       ├── GitHistory.tsx        # Git 提交历史面板
-│       ├── CommitDiffModal.tsx   # 提交 Diff 查看器
-│       ├── DiffModal.tsx         # 文件变更 Diff 查看器
-│       ├── FileViewerModal.tsx   # 文件内容查看器
-│       ├── SettingsModal.tsx     # 设置弹窗
-│       └── StatusDot.tsx         # 状态指示点
-├── src-tauri/                    # Rust 后端
-│   └── src/
-│       ├── lib.rs                # Tauri 初始化与命令注册
-│       ├── pty.rs                # PTY 生命周期管理
-│       ├── process_monitor.rs    # 进程状态轮询
-│       ├── config.rs             # 配置持久化
-│       ├── fs.rs                 # 目录列表与文件监听
-│       ├── git.rs                # Git 操作（状态/Diff/日志）
-│       └── ai_sessions.rs       # Claude/Codex 会话读取
-└── package.json
-```
+- [MCP 接入说明](docs/MCP_SETUP.md)
+- [MCP 详细说明](docs/MCP.md)
+- [Prompt 体系设计](docs/AGENT_POLICY_PROMPTS.md)
+- [Codex Skill](docs/skills/mini-term-codex/SKILL.md)
+- [Claude Skill](docs/skills/mini-term-claude/SKILL.md)
+- [Cursor Skill](docs/skills/mini-term-cursor/SKILL.md)
+- [Generic MCP Skill](docs/skills/mini-term-generic-mcp/SKILL.md)
+- [Mini-Term Maintainer Skill](docs/skills/mini-term-maintainer/SKILL.md)
+- [Mini-Term Troubleshooting Skill](docs/skills/mini-term-troubleshooting/SKILL.md)
 
 ## 架构概览
 
-### 数据流
+### Rust 后端
 
-```
-用户键入 → xterm.onData → invoke('write_pty') → Rust PTY writer
-Rust PTY reader → 16ms 批量缓冲 → emit('pty-output') → term.write()
-进程监控 → 500ms 轮询子进程名 → emit('pty-status-change') → StatusDot 更新
-```
+- `src-tauri/src/lib.rs`
+  - Tauri app 初始化，注册 commands、plugins、运行时监控
+- `src-tauri/src/pty.rs`
+  - PTY 生命周期、输入输出跟踪、终端会话事件
+- `src-tauri/src/process_monitor.rs`
+  - AI 进程识别与 PTY 状态轮询
+- `src-tauri/src/fs.rs`
+  - 文件树读取、文件监听、fs-change 事件
+- `src-tauri/src/config.rs`
+  - `AppConfig` 持久化与兼容迁移
+- `src-tauri/src/ai_sessions.rs`
+  - Claude / Codex 历史会话读取
+- `src-tauri/src/agent_core/*`
+  - workspace context、task runtime、approval、task store
+- `src-tauri/src/mcp/*`
+  - MCP protocol、registry、tool handlers
+- `src-tauri/src/runtime_mcp.rs`
+  - 运行时快照持久化，供独立 MCP 进程读取
+- `src-tauri/src/host_control.rs`
+  - 宿主控制桥，支持 PTY 细节与 UI 控制转发
 
-### 状态优先级
+### 前端
 
-终端面板状态从叶节点聚合到标签页和项目级别：
+- `src/store.ts`
+  - 全局状态源
+- `src/components/TerminalArea.tsx`
+  - tab 与分屏终端宿主
+- `src/components/SplitLayout.tsx`
+  - 递归渲染 pane tree
+- `src/components/AgentInbox.tsx`
+  - 审批与 attention 摘要入口
+- `src/components/AgentTaskPanelTabHost.tsx`
+  - 完整任务工作台
+- `src/components/settings/AgentSettings.tsx`
+  - Prompt / Skill 策略设置页
+- `src/hooks/useHostControlBridge.ts`
+  - 宿主 UI 控制桥
 
-```
-error > ai-working > ai-idle > idle
-```
+## 设计原则
 
-### 布局模型
+- Mini-Term 的 MCP / Agent 实现是仓库原生实现，不依赖额外外部宿主层
+- MCP 工具暴露的是能力，不把提示词工程硬编码进工具 handler
+- Prompt / Skill 采用分层治理，不依赖单一超大 system prompt
+- Workspace override 只允许增强，不允许削弱审批、review、workspace context 规则
 
-```
-App (Allotment 三栏)
-├── 左栏：ProjectList（项目 + 分组 + 会话）
-├── 中栏：FileTree（目录浏览 + Git 状态）
-└── 右栏
-    ├── TabBar（标签管理）
-    ├── SplitLayout（递归 SplitNode 分屏树）
-    │   └── TerminalInstance × N
-    └── GitHistory（提交历史面板）
-```
+## 当前范围
 
-## 推荐开发环境
+当前已包含：
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- MCP v1 工具集
+- AgentInbox
+- 任务工作台
+- 审批流
+- Prompt 分层设置与导出
+- 宿主控制桥
 
-## 社区
+当前明确不包含：
 
-学 AI，上 L 站 — [LinuxDO](https://linux.do/)
+- 动态 skill marketplace
+- memory / indexing / popup runtime
+- 自动远程写入外部客户端配置
+- 多 agent 编排和任务树
+
+## 许可证
+
+仓库当前未在本文件中单独声明许可证，请以项目实际发布信息为准。

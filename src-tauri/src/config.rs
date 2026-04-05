@@ -1,7 +1,8 @@
+use crate::agent_policy::AgentPoliciesConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
@@ -63,6 +64,8 @@ pub struct AppConfig {
     pub workspace_sidebar_sizes: Option<Vec<f64>>,
     #[serde(default)]
     pub completion_usage: CompletionUsageConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_policies: Option<AgentPoliciesConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,7 +211,9 @@ pub struct SavedPane {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum SavedSplitNode {
-    Leaf { pane: SavedPane },
+    Leaf {
+        pane: SavedPane,
+    },
     Split {
         direction: String,
         children: Vec<SavedSplitNode>,
@@ -325,6 +330,7 @@ impl Default for AppConfig {
             middle_column_sizes: None,
             workspace_sidebar_sizes: None,
             completion_usage: CompletionUsageConfig::default(),
+            agent_policies: Some(crate::agent_policy::default_agent_policies()),
         }
     }
 }
@@ -416,10 +422,19 @@ fn default_shells() -> Vec<ShellConfig> {
     }]
 }
 
+pub const APP_IDENTIFIER: &str = "com.tauri-app.tauri-app";
+
+pub fn config_path_for_data_dir(data_dir: &Path) -> PathBuf {
+    fs::create_dir_all(data_dir).ok();
+    data_dir.join("config.json")
+}
+
 fn config_path(app: &AppHandle) -> PathBuf {
-    let dir = app.path().app_data_dir().expect("failed to get app data dir");
-    fs::create_dir_all(&dir).ok();
-    dir.join("config.json")
+    let dir = app
+        .path()
+        .app_data_dir()
+        .expect("failed to get app data dir");
+    config_path_for_data_dir(&dir)
 }
 
 fn get_path_base_name(path: &str) -> String {
@@ -427,6 +442,21 @@ fn get_path_base_name(path: &str) -> String {
         .find(|segment| !segment.is_empty())
         .unwrap_or(path)
         .to_string()
+}
+
+fn path_exists(path: &str) -> bool {
+    fs::metadata(path).is_ok()
+}
+
+fn normalize_path_string(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_string()
+}
+
+fn path_is_within_root(path: &str, root_path: &str) -> bool {
+    let normalized_path = normalize_path_string(path);
+    let normalized_root = normalize_path_string(root_path);
+    normalized_path == normalized_root
+        || normalized_path.starts_with(&format!("{normalized_root}/"))
 }
 
 fn ensure_single_primary_root(roots: &mut [WorkspaceRootConfig]) {
@@ -489,13 +519,18 @@ fn workspace_to_project(workspace: &WorkspaceConfig) -> ProjectConfig {
     ProjectConfig {
         id: workspace.id.clone(),
         name: workspace.name.clone(),
-        path: primary_root.map(|root| root.path.clone()).unwrap_or_default(),
+        path: primary_root
+            .map(|root| root.path.clone())
+            .unwrap_or_default(),
         saved_layout: workspace.saved_layout.clone(),
         expanded_dirs,
     }
 }
 
 fn normalize_workspace(mut workspace: WorkspaceConfig) -> WorkspaceConfig {
+    workspace
+        .roots
+        .retain(|root| !root.path.trim().is_empty() && path_exists(&root.path));
     workspace.roots.retain(|root| !root.path.trim().is_empty());
     ensure_single_primary_root(&mut workspace.roots);
 
@@ -520,10 +555,17 @@ fn normalize_workspace(mut workspace: WorkspaceConfig) -> WorkspaceConfig {
         .retain(|root_id, _| workspace.roots.iter().any(|root| root.id == *root_id));
 
     for root in &workspace.roots {
+        let filtered = workspace
+            .expanded_dirs_by_root
+            .get(&root.id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| path_exists(path) && path_is_within_root(path, &root.path))
+            .collect::<Vec<_>>();
         workspace
             .expanded_dirs_by_root
-            .entry(root.id.clone())
-            .or_default();
+            .insert(root.id.clone(), filtered);
     }
 
     workspace
@@ -580,7 +622,7 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
     config
 }
 
-fn normalize_config(mut config: AppConfig) -> AppConfig {
+pub fn normalize_config(mut config: AppConfig) -> AppConfig {
     if config.workspaces.is_empty() && !config.projects.is_empty() {
         config.workspaces = config.projects.iter().map(project_to_workspace).collect();
     }
@@ -589,6 +631,7 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
         .workspaces
         .into_iter()
         .map(normalize_workspace)
+        .filter(|workspace| !workspace.roots.is_empty())
         .collect();
 
     config.recent_workspaces = config
@@ -598,7 +641,10 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
         .collect();
 
     if config.last_workspace_id.is_none() {
-        config.last_workspace_id = config.workspaces.first().map(|workspace| workspace.id.clone());
+        config.last_workspace_id = config
+            .workspaces
+            .first()
+            .map(|workspace| workspace.id.clone());
     }
 
     config.projects = config.workspaces.iter().map(workspace_to_project).collect();
@@ -624,6 +670,10 @@ fn normalize_config(mut config: AppConfig) -> AppConfig {
             .first()
             .map(|shell| shell.name.clone())
             .unwrap_or_else(default_shell_name);
+    }
+
+    if config.agent_policies.is_none() {
+        config.agent_policies = Some(crate::agent_policy::default_agent_policies());
     }
 
     config
@@ -660,23 +710,46 @@ fn normalize_shell(mut shell: ShellConfig) -> ShellConfig {
 #[tauri::command]
 pub fn load_config(app: AppHandle) -> AppConfig {
     let path = config_path(&app);
-    match fs::read_to_string(&path) {
-        Ok(content) => normalize_config(migrate_config(serde_json::from_str(&content).unwrap_or_default())),
-        Err(_) => normalize_config(migrate_config(AppConfig::default())),
-    }
+    let config = load_config_from_path(&path);
+    let _ = save_config_to_path(&path, config.clone());
+    config
 }
 
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let path = config_path(&app);
+    save_config_to_path(&path, config)
+}
+
+pub fn load_config_from_path(path: &Path) -> AppConfig {
+    match fs::read_to_string(path) {
+        Ok(content) => normalize_config(migrate_config(
+            serde_json::from_str(&content).unwrap_or_default(),
+        )),
+        Err(_) => normalize_config(migrate_config(AppConfig::default())),
+    }
+}
+
+pub fn save_config_to_path(path: &Path, config: AppConfig) -> Result<(), String> {
     let config = normalize_config(migrate_config(config));
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())
+    fs::write(path, json).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mini-term-config-{label}-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn default_config_has_shells() {
@@ -745,7 +818,9 @@ mod tests {
 
         let args = shell.args.expect("powershell args should be added");
         assert!(args.iter().any(|arg| arg == "-NoExit"));
-        assert!(args.iter().any(|arg| arg.contains("Set-PSReadLineKeyHandler")));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("Set-PSReadLineKeyHandler")));
     }
 
     #[test]
@@ -756,8 +831,20 @@ mod tests {
                 split_layout: SavedSplitNode::Split {
                     direction: "horizontal".into(),
                     children: vec![
-                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "cmd".into(), run_command: None, run_profile: None } },
-                        SavedSplitNode::Leaf { pane: SavedPane { shell_name: "powershell".into(), run_command: None, run_profile: None } },
+                        SavedSplitNode::Leaf {
+                            pane: SavedPane {
+                                shell_name: "cmd".into(),
+                                run_command: None,
+                                run_profile: None,
+                            },
+                        },
+                        SavedSplitNode::Leaf {
+                            pane: SavedPane {
+                                shell_name: "powershell".into(),
+                                run_command: None,
+                                run_profile: None,
+                            },
+                        },
                     ],
                     sizes: vec![50.0, 50.0],
                 },
@@ -819,13 +906,17 @@ mod tests {
 
     #[test]
     fn normalize_config_migrates_legacy_projects_to_workspaces() {
+        let root = create_temp_dir("legacy-workspace");
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+
         let config = normalize_config(AppConfig {
             projects: vec![ProjectConfig {
                 id: "workspace-1".into(),
                 name: "mini-term".into(),
-                path: "/tmp/mini-term".into(),
+                path: root.to_string_lossy().to_string(),
                 saved_layout: None,
-                expanded_dirs: vec!["/tmp/mini-term/src".into()],
+                expanded_dirs: vec![src.to_string_lossy().to_string()],
             }],
             ..AppConfig::default()
         });
@@ -840,48 +931,131 @@ mod tests {
                 .get("workspace-1-root-1")
                 .cloned()
                 .unwrap_or_default(),
-            vec!["/tmp/mini-term/src".to_string()]
+            vec![src.to_string_lossy().to_string()]
         );
         assert_eq!(config.last_workspace_id.as_deref(), Some("workspace-1"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn workspaces_round_trip_with_recent_entries() {
-        let json = r##"{
-            "workspaces": [{
-                "id": "workspace-1",
-                "name": "mini-term",
-                "roots": [
-                    {"id": "root-a", "name": "mini-term", "path": "/tmp/mini-term", "role": "member"},
-                    {"id": "root-b", "name": "shared", "path": "/tmp/shared", "role": "primary"}
-                ],
-                "pinned": true,
-                "accent": "#ff6600",
-                "expandedDirsByRoot": {
-                    "root-a": ["/tmp/mini-term/src"]
-                },
-                "createdAt": 100,
-                "lastOpenedAt": 200
-            }],
-            "recentWorkspaces": [{
-                "id": "recent-1",
-                "name": "recent workspace",
-                "rootPaths": ["/tmp/recent"],
-                "lastOpenedAt": 300
-            }],
-            "lastWorkspaceId": "workspace-1",
-            "defaultShell": "cmd",
-            "availableShells": [{"name": "cmd", "command": "cmd"}]
-        }"##;
+        let root_a = create_temp_dir("workspace-root-a");
+        let root_a_src = root_a.join("src");
+        fs::create_dir_all(&root_a_src).unwrap();
+        let root_b = create_temp_dir("workspace-root-b");
 
-        let config = normalize_config(serde_json::from_str(json).unwrap());
+        let config = normalize_config(
+            serde_json::from_value(serde_json::json!({
+                "workspaces": [{
+                    "id": "workspace-1",
+                    "name": "mini-term",
+                    "roots": [
+                        {"id": "root-a", "name": "mini-term", "path": root_a.to_string_lossy(), "role": "member"},
+                        {"id": "root-b", "name": "shared", "path": root_b.to_string_lossy(), "role": "primary"}
+                    ],
+                    "pinned": true,
+                    "accent": "#ff6600",
+                    "expandedDirsByRoot": {
+                        "root-a": [root_a_src.to_string_lossy()]
+                    },
+                    "createdAt": 100,
+                    "lastOpenedAt": 200
+                }],
+                "recentWorkspaces": [{
+                    "id": "recent-1",
+                    "name": "recent workspace",
+                    "rootPaths": [root_a.to_string_lossy()],
+                    "lastOpenedAt": 300
+                }],
+                "lastWorkspaceId": "workspace-1",
+                "defaultShell": "cmd",
+                "availableShells": [{"name": "cmd", "command": "cmd"}]
+            }))
+            .unwrap(),
+        );
 
         assert_eq!(config.workspaces.len(), 1);
         assert_eq!(config.workspaces[0].roots[0].role, "member");
         assert_eq!(config.workspaces[0].roots[1].role, "primary");
         assert_eq!(config.recent_workspaces.len(), 1);
-        assert_eq!(config.recent_workspaces[0].root_paths, vec!["/tmp/recent".to_string()]);
+        assert_eq!(
+            config.recent_workspaces[0].root_paths,
+            vec![root_a.to_string_lossy().to_string()]
+        );
         assert_eq!(config.projects.len(), 1);
-        assert_eq!(config.projects[0].path, "/tmp/shared");
+        assert_eq!(
+            config.projects[0].path,
+            root_b.to_string_lossy().to_string()
+        );
+
+        let _ = fs::remove_dir_all(root_a);
+        let _ = fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn normalize_config_drops_missing_expanded_dirs_and_empty_workspaces() {
+        let existing_root = std::env::temp_dir().join("mini-term-config-existing-root");
+        let existing_child = existing_root.join("src");
+        fs::create_dir_all(&existing_child).unwrap();
+
+        let missing_root = std::env::temp_dir().join("mini-term-config-missing-root");
+        let missing_child = existing_root.join("sanshu");
+
+        let config = normalize_config(AppConfig {
+            workspaces: vec![
+                WorkspaceConfig {
+                    id: "workspace-1".into(),
+                    name: "mini-term".into(),
+                    roots: vec![WorkspaceRootConfig {
+                        id: "root-1".into(),
+                        name: "mini-term".into(),
+                        path: existing_root.to_string_lossy().to_string(),
+                        role: "primary".into(),
+                    }],
+                    pinned: false,
+                    accent: None,
+                    saved_layout: None,
+                    expanded_dirs_by_root: BTreeMap::from([(
+                        "root-1".into(),
+                        vec![
+                            existing_child.to_string_lossy().to_string(),
+                            missing_child.to_string_lossy().to_string(),
+                        ],
+                    )]),
+                    created_at: 1,
+                    last_opened_at: 1,
+                },
+                WorkspaceConfig {
+                    id: "workspace-2".into(),
+                    name: "missing".into(),
+                    roots: vec![WorkspaceRootConfig {
+                        id: "root-2".into(),
+                        name: "missing".into(),
+                        path: missing_root.to_string_lossy().to_string(),
+                        role: "primary".into(),
+                    }],
+                    pinned: false,
+                    accent: None,
+                    saved_layout: None,
+                    expanded_dirs_by_root: BTreeMap::new(),
+                    created_at: 1,
+                    last_opened_at: 1,
+                },
+            ],
+            ..AppConfig::default()
+        });
+
+        assert_eq!(config.workspaces.len(), 1);
+        assert_eq!(
+            config.workspaces[0]
+                .expanded_dirs_by_root
+                .get("root-1")
+                .cloned()
+                .unwrap_or_default(),
+            vec![existing_child.to_string_lossy().to_string()]
+        );
+
+        let _ = fs::remove_dir_all(existing_root);
     }
 }

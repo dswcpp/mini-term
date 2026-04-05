@@ -12,7 +12,7 @@ import {
   subscribeProjectFs,
   subscribeProjectGitDirty,
 } from '../runtime/workspaceRuntime';
-import type { FileEntry, GitFileStatus, WorkspaceRootConfig } from '../types';
+import type { FileEntry, GitFileHistoryResult, GitFileStatus, WorkspaceRootConfig } from '../types';
 import { showContextMenu } from '../utils/contextMenu';
 import { isMarkdownFilePath } from '../utils/markdownPreview';
 import { showPrompt } from '../utils/prompt';
@@ -134,6 +134,7 @@ export function FileTree() {
   const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
   const openFileViewer = useAppStore((state) => state.openFileViewer);
   const openWorktreeDiff = useAppStore((state) => state.openWorktreeDiff);
+  const openFileHistory = useAppStore((state) => state.openFileHistory);
   const createTerminalTab = useAppStore((state) => state.createTerminalTab);
   const workspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
 
@@ -308,6 +309,63 @@ export function FileTree() {
     [openWorktreeDiff, workspace],
   );
 
+  const resolveFileHistoryMenuItem = useCallback(
+    async (root: WorkspaceRootConfig, entry: FileEntry, gitStatus?: GitFileStatus) => {
+      if (!workspace || entry.isDir) {
+        return null;
+      }
+
+      if (entry.ignored) {
+        return {
+          label: '查看修改历史（已忽略）',
+          disabled: true,
+        };
+      }
+
+      if (gitStatus?.status === 'untracked') {
+        return {
+          label: '查看修改历史（未纳入 Git）',
+          disabled: true,
+        };
+      }
+
+      if (gitStatus?.status === 'added') {
+        return {
+          label: '查看修改历史（尚无提交记录）',
+          disabled: true,
+        };
+      }
+
+      try {
+        const result = await invoke<GitFileHistoryResult>('get_file_git_history', {
+          projectPath: root.path,
+          filePath: entry.path,
+          beforeCommit: null,
+          limit: 1,
+        });
+
+        if (result.entries.length === 0) {
+          return {
+            label: '查看修改历史（暂无提交记录）',
+            disabled: true,
+          };
+        }
+
+        return {
+          label: '查看修改历史',
+          disabled: false,
+          onClick: () => openFileHistory(workspace.id, root.path, entry.path),
+        };
+      } catch {
+        return {
+          label: '查看修改历史（不在 Git 仓库中）',
+          disabled: true,
+        };
+      }
+    },
+    [openFileHistory, workspace],
+  );
+
   const handleToggleEntry = useCallback(
     async (node: VisibleTreeNode) => {
       if (!workspace) {
@@ -343,7 +401,7 @@ export function FileTree() {
   );
 
   const handleEntryContextMenu = useCallback(
-    (event: React.MouseEvent, node: VisibleTreeNode) => {
+    async (event: React.MouseEvent, node: VisibleTreeNode) => {
       if (!workspace) {
         return;
       }
@@ -356,6 +414,8 @@ export function FileTree() {
       const normalizedRelativePath = normalizePath(relativePath);
       const gitStatus = gitStatusByRoot.get(root.id)?.get(normalizedRelativePath);
       const separator = root.path.includes('/') ? '/' : '\\';
+      const clientX = event.clientX;
+      const clientY = event.clientY;
       const items: Parameters<typeof showContextMenu>[2] = [];
 
       if (!entry.isDir) {
@@ -428,6 +488,13 @@ export function FileTree() {
         );
       }
 
+      if (!entry.isDir) {
+        const fileHistoryItem = await resolveFileHistoryMenuItem(root, entry, gitStatus);
+        if (fileHistoryItem) {
+          items.push({ separator: true }, fileHistoryItem);
+        }
+      }
+
       if (gitStatus && !entry.isDir) {
         items.push(
           { separator: true },
@@ -438,9 +505,17 @@ export function FileTree() {
         );
       }
 
-      showContextMenu(event.clientX, event.clientY, items);
+      showContextMenu(clientX, clientY, items);
     },
-    [createTerminalTab, gitStatusByRoot, handleOpenDiff, handleOpenFile, loadDirectory, workspace],
+    [
+      createTerminalTab,
+      gitStatusByRoot,
+      handleOpenDiff,
+      handleOpenFile,
+      loadDirectory,
+      resolveFileHistoryMenuItem,
+      workspace,
+    ],
   );
 
   if (!workspace) {

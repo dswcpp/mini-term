@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import type { SettingsPage } from '../types';
 import { OverlaySurface } from './OverlaySurface';
 import { AboutSettings } from './settings/AboutSettings';
+import { AgentSettings } from './settings/AgentSettings';
 import { ShortcutsSettings } from './settings/ShortcutsSettings';
 import { SystemSettings } from './settings/SystemSettings';
 import { TerminalSettings } from './settings/TerminalSettings';
@@ -17,12 +18,18 @@ const MENU_ITEMS: { key: SettingsPage; label: string }[] = [
   { key: 'terminal', label: '终端' },
   { key: 'theme', label: '主题' },
   { key: 'system', label: '系统' },
+  { key: 'agent', label: 'Agent' },
+  { key: 'mcp', label: 'MCP' },
   { key: 'shortcuts', label: '快捷键' },
   { key: 'about', label: '关于' },
 ];
 
 export function SettingsModal({ open, onClose, initialPage = 'terminal' }: Props) {
   const [activePage, setActivePage] = useState<SettingsPage>(initialPage);
+  const isWidePage = activePage === 'agent' || activePage === 'mcp';
+  const panelWidthClass = isWidePage
+    ? 'w-[min(1440px,calc(100vw-32px))]'
+    : 'w-[min(980px,calc(100vw-32px))]';
 
   useEffect(() => {
     if (open) {
@@ -42,7 +49,7 @@ export function SettingsModal({ open, onClose, initialPage = 'terminal' }: Props
         'aria-label': 'settings-dialog',
         'data-testid': 'settings-modal',
       }}
-      panelClassName="relative flex max-h-[80vh] w-[760px] flex-col overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl animate-slide-in"
+      panelClassName={`relative flex max-h-[86vh] ${panelWidthClass} flex-col overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-strong)] bg-[var(--bg-surface)] shadow-2xl animate-slide-in`}
     >
       <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-5 py-4">
         <h2 className="text-lg font-semibold text-[var(--text-primary)]">设置</h2>
@@ -69,20 +76,22 @@ export function SettingsModal({ open, onClose, initialPage = 'terminal' }: Props
               }`}
               onClick={() => setActivePage(item.key)}
             >
-              {activePage === item.key && (
+              {activePage === item.key ? (
                 <span className="h-4 w-0.5 flex-shrink-0 rounded-full bg-[var(--accent)]" />
-              )}
+              ) : null}
               <span>{item.label}</span>
             </button>
           ))}
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          {activePage === 'terminal' && <TerminalSettings />}
-          {activePage === 'theme' && <ThemeSettings />}
-          {activePage === 'system' && <SystemSettings />}
-          {activePage === 'shortcuts' && <ShortcutsSettings />}
-          {activePage === 'about' && <AboutSettings />}
+          {activePage === 'terminal' ? <TerminalSettings /> : null}
+          {activePage === 'theme' ? <ThemeSettings /> : null}
+          {activePage === 'system' ? <SystemSettings /> : null}
+          {activePage === 'agent' ? <AgentSettings mode="agent" /> : null}
+          {activePage === 'mcp' ? <AgentSettings mode="mcp" /> : null}
+          {activePage === 'shortcuts' ? <ShortcutsSettings /> : null}
+          {activePage === 'about' ? <AboutSettings /> : null}
         </div>
       </div>
     </OverlaySurface>

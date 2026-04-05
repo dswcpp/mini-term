@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach } from 'vitest';
 import { describe, expect, it, vi } from 'vitest';
 import { DocumentViewerPanel } from './DocumentViewerPanel';
@@ -13,18 +13,20 @@ const resolvePreviewRendererMock = vi.fn((_context?: unknown, _mode?: unknown) =
     </div>
   ),
 }));
-const useDocumentContentMock = vi.fn((_filePath: string, _enabled: boolean) => ({
-  result: {
-    content: '# Title',
-    isBinary: false,
-    tooLarge: false,
-  },
-  loading: false,
-  error: '',
-}));
+const useDocumentContentMock = vi.fn();
+const useWorkspaceAutoRefreshMock = vi.fn();
+let latestAutoRefreshOptions: Record<string, unknown> | undefined;
+let reloadMock = vi.fn();
 
 vi.mock('./useDocumentContent', () => ({
   useDocumentContent: (filePath: string, enabled: boolean) => useDocumentContentMock(filePath, enabled),
+}));
+
+vi.mock('../../hooks/useWorkspaceAutoRefresh', () => ({
+  useWorkspaceAutoRefresh: (options: Record<string, unknown>) => {
+    latestAutoRefreshOptions = options;
+    useWorkspaceAutoRefreshMock(options);
+  },
 }));
 
 vi.mock('./renderers', () => ({
@@ -35,6 +37,20 @@ describe('DocumentViewerPanel', () => {
   beforeEach(() => {
     resolvePreviewRendererMock.mockClear();
     useDocumentContentMock.mockClear();
+    useWorkspaceAutoRefreshMock.mockClear();
+    latestAutoRefreshOptions = undefined;
+    reloadMock = vi.fn().mockResolvedValue(true);
+    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+      result: {
+        content: '# Title',
+        isBinary: false,
+        tooLarge: false,
+      },
+      loading: false,
+      refreshing: false,
+      error: '',
+      reload: reloadMock,
+    }));
     Element.prototype.scrollIntoView = vi.fn();
   });
 
@@ -44,6 +60,7 @@ describe('DocumentViewerPanel', () => {
     render(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/README.md"
+        projectPath="D:/code/JavaScript/mini-term"
         mode="source"
         onModeChange={onModeChange}
         onClose={vi.fn()}
@@ -60,6 +77,7 @@ describe('DocumentViewerPanel', () => {
     render(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/README.md"
+        projectPath="D:/code/JavaScript/mini-term"
         mode="preview"
         onModeChange={vi.fn()}
         onClose={vi.fn()}
@@ -87,6 +105,7 @@ describe('DocumentViewerPanel', () => {
     render(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/README.md"
+        projectPath="D:/code/JavaScript/mini-term"
         mode="source"
         active={false}
         onModeChange={vi.fn()}
@@ -105,6 +124,7 @@ describe('DocumentViewerPanel', () => {
     render(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/src/App.tsx"
+        projectPath="D:/code/JavaScript/mini-term"
         mode="source"
         navigationTarget={{
           line: 2,
@@ -126,6 +146,7 @@ describe('DocumentViewerPanel', () => {
     const { rerender } = render(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/src/App.tsx"
+        projectPath="D:/code/JavaScript/mini-term"
         mode="source"
         navigationTarget={{
           line: 2,
@@ -143,6 +164,7 @@ describe('DocumentViewerPanel', () => {
     rerender(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/src/App.tsx"
+        projectPath="D:/code/JavaScript/mini-term"
         mode="source"
         navigationTarget={{
           line: 2,
@@ -157,5 +179,27 @@ describe('DocumentViewerPanel', () => {
       expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(2);
     });
     expect(screen.getByText('line-2').getAttribute('data-source-active-line')).toBe('true');
+  });
+
+  it('silently reloads the current file after an fs change and shows refresh feedback', async () => {
+    render(
+      <DocumentViewerPanel
+        filePath="D:/code/JavaScript/mini-term/README.md"
+        projectPath="D:/code/JavaScript/mini-term"
+        mode="source"
+        onClose={vi.fn()}
+        variant="tab"
+      />,
+    );
+
+    expect(latestAutoRefreshOptions?.projectPath).toBe('D:/code/JavaScript/mini-term');
+
+    await act(async () => {
+      await (latestAutoRefreshOptions?.onFsChange as (() => Promise<void>) | undefined)?.();
+    });
+
+    expect(reloadMock).toHaveBeenCalledWith({ silent: true });
+    expect(await screen.findByTestId('document-refresh-feedback')).not.toBeNull();
+    expect(screen.getByTestId('document-refresh-feedback').textContent).toContain('已自动刷新');
   });
 });

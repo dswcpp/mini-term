@@ -47,8 +47,8 @@ const cwd = process.cwd().startsWith('\\\\?\\')
 
 const child = process.platform === 'win32'
   ? spawn(
-      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-      ['-NoLogo', '-NoProfile', '-Command', 'npm run dev'],
+      'C:\\Windows\\System32\\cmd.exe',
+      ['/d', '/s', '/c', 'npm run dev'],
       {
         stdio: 'inherit',
         env: process.env,

@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useAppStore } from '../../store';
+import { selectWorkspaceConfig, useAppStore } from '../../store';
+import { useAutoRefreshFeedback } from '../../hooks/useAutoRefreshFeedback';
+import { useWorkspaceAutoRefresh } from '../../hooks/useWorkspaceAutoRefresh';
 import type { PreviewMode } from '../../types';
 import { isMarkdownFilePath } from '../../utils/markdownPreview';
+import { getWorkspaceMatch } from '../../utils/workspace';
+import { AutoRefreshFeedbackBadge } from '../AutoRefreshFeedback';
 import { OverlaySurface } from '../OverlaySurface';
 import {
   CloseIcon,
@@ -32,12 +36,16 @@ export function DocumentViewerDialog({
   initialMode = 'source',
 }: DocumentViewerDialogProps) {
   const themePreset = useAppStore((state) => state.config.theme.preset);
+  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const activeWorkspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
   const [previewMode, setPreviewMode] = useState<PreviewMode>(initialMode);
   const [maximized, setMaximized] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const fullscreenHostRef = useRef<HTMLDivElement | null>(null);
 
-  const { result, loading, error } = useDocumentContent(filePath, open);
+  const projectPath = activeWorkspace ? getWorkspaceMatch(activeWorkspace, filePath)?.root.path : undefined;
+  const { result, loading, error, reload } = useDocumentContent(filePath, open);
+  const { feedback, clearFeedback, showRefreshing, showSuccess, showError } = useAutoRefreshFeedback();
   const fileName = useMemo(
     () => filePath.replace(/\\/g, '/').split('/').pop() ?? filePath,
     [filePath],
@@ -49,10 +57,27 @@ export function DocumentViewerDialog({
   const previewReady = markdownFile && !!result && !result.isBinary && !result.tooLarge && !error;
   const layoutMode: ViewerLayoutMode = isFullscreen ? 'fullscreen' : maximized ? 'maximized' : 'windowed';
 
+  useWorkspaceAutoRefresh({
+    active: open,
+    projectPath,
+    filePaths: [filePath],
+    watchFs: true,
+    onFsChange: async () => {
+      showRefreshing('正在同步最新内容');
+      const succeeded = await reload({ silent: true });
+      if (succeeded) {
+        showSuccess('已自动刷新');
+      } else {
+        showError('自动刷新失败');
+      }
+    },
+  });
+
   useEffect(() => {
     setPreviewMode(initialMode === 'preview' && markdownFile ? 'preview' : 'source');
     setMaximized(false);
-  }, [filePath, initialMode, markdownFile, open]);
+    clearFeedback();
+  }, [clearFeedback, filePath, initialMode, markdownFile, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -208,6 +233,7 @@ export function DocumentViewerDialog({
           </span>
         </div>
         <div className="ml-1 flex items-center gap-px">
+          <AutoRefreshFeedbackBadge feedback={feedback} testId="dialog-document-refresh-feedback" />
           {markdownFile && (
             <ToolbarButton
               active={previewMode === 'preview'}

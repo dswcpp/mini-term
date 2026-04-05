@@ -20,6 +20,7 @@ import {
   normalizeWorkspacePath,
 } from '../utils/workspace';
 import { SessionList } from './SessionList';
+import { AgentInbox } from './AgentInbox';
 import { StatusDot } from './StatusDot';
 
 const MAX_ROOT_BADGES = 3;
@@ -727,8 +728,11 @@ export function WorkspaceSidebar() {
         </Allotment.Pane>
 
         <Allotment.Pane minSize={140}>
-          <div className="h-full border-t border-[var(--border-subtle)]">
-            <SessionList />
+          <div className="flex h-full flex-col border-t border-[var(--border-subtle)]">
+            <AgentInbox />
+            <div className="min-h-0 flex-1">
+              <SessionList />
+            </div>
           </div>
         </Allotment.Pane>
       </Allotment>

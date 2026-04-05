@@ -1,0 +1,7 @@
+interface:
+  display_name: "Mini-Term Troubleshooting"
+  short_description: "Diagnose Mini-Term MCP, host, PTY, approval, and injection issues."
+  default_prompt: "Use $mini-term-troubleshooting to diagnose a Mini-Term MCP, host connection, PTY, approval, or client injection problem."
+
+policy:
+  allow_implicit_invocation: true

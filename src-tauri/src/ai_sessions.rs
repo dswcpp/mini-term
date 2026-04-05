@@ -1,10 +1,10 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSession {
     pub id: String,
@@ -15,18 +15,48 @@ pub struct AiSession {
 }
 
 fn home_dir() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("MINI_TERM_HOME_DIR") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
     dirs::home_dir()
 }
 
+fn clean_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        let cleaned = if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+            format!("\\\\{rest}")
+        } else if let Some(rest) = path.strip_prefix("\\\\?\\") {
+            rest.to_string()
+        } else {
+            path.to_string()
+        };
+        cleaned.replace('/', "\\")
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_string()
+    }
+}
+
+fn normalize_project_path_input(path: &str) -> String {
+    clean_path(path).trim_end_matches(['\\', '/']).to_string()
+}
+
 fn encode_project_path(project_path: &str) -> String {
-    project_path
+    normalize_project_path_input(project_path)
         .replace(':', "-")
         .replace('\\', "-")
         .replace('/', "-")
 }
 
 fn normalize_path(path: &str) -> String {
-    path.replace('/', "\\")
+    clean_path(path)
+        .replace('/', "\\")
         .to_lowercase()
         .trim_end_matches('\\')
         .to_string()
@@ -37,8 +67,9 @@ fn dedupe_project_paths(project_paths: &[String]) -> Vec<String> {
     let mut deduped = Vec::new();
 
     for project_path in project_paths {
-        if seen.insert(project_path.clone()) {
-            deduped.push(project_path.clone());
+        let normalized = normalize_project_path_input(project_path);
+        if seen.insert(normalized.clone()) {
+            deduped.push(normalized);
         }
     }
 
@@ -206,7 +237,9 @@ fn try_read_codex_session(
             .pointer("/payload/cwd")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        matched_project_path = project_paths_by_normalized.get(&normalize_path(cwd)).cloned();
+        matched_project_path = project_paths_by_normalized
+            .get(&normalize_path(cwd))
+            .cloned();
 
         if matched_project_path.is_none() {
             return None;
@@ -246,11 +279,17 @@ fn try_read_codex_session(
             if obj.get("type").and_then(|value| value.as_str()) != Some("response_item") {
                 continue;
             }
-            if obj.pointer("/payload/role").and_then(|value| value.as_str()) != Some("user") {
+            if obj
+                .pointer("/payload/role")
+                .and_then(|value| value.as_str())
+                != Some("user")
+            {
                 continue;
             }
 
-            if let Some(items) = obj.pointer("/payload/content").and_then(|value| value.as_array())
+            if let Some(items) = obj
+                .pointer("/payload/content")
+                .and_then(|value| value.as_array())
             {
                 for item in items {
                     if item.get("type").and_then(|value| value.as_str()) != Some("input_text") {
@@ -456,9 +495,154 @@ mod tests {
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].session_type, "codex");
         assert_eq!(sessions[0].title, "Codex Thread");
-        assert_eq!(sessions[0].project_path.as_deref(), Some(project_path.as_str()));
+        assert_eq!(
+            sessions[0].project_path.as_deref(),
+            Some(project_path.as_str())
+        );
         assert_eq!(sessions[1].session_type, "claude");
         assert_eq!(sessions[1].title, "Claude first prompt");
-        assert_eq!(sessions[1].project_path.as_deref(), Some(project_path.as_str()));
+        assert_eq!(
+            sessions[1].project_path.as_deref(),
+            Some(project_path.as_str())
+        );
+    }
+
+    #[test]
+    fn get_ai_sessions_supports_mini_term_home_dir_override() {
+        let home = TestDir::new("mini-term-ai-sessions-home-override");
+        let project_path = home.path.join("workspace").to_string_lossy().to_string();
+
+        let claude_session_path = home
+            .path
+            .join(".claude")
+            .join("projects")
+            .join(encode_project_path(&project_path))
+            .join("claude-1.jsonl");
+        write_lines(
+            &claude_session_path,
+            &[r#"{"type":"user","timestamp":"2026-04-01T09:30:00Z","message":{"content":"Claude first prompt"}}"#.to_string()],
+        );
+
+        std::env::set_var("MINI_TERM_HOME_DIR", &home.path);
+        let sessions = get_ai_sessions(vec![project_path.clone()]).expect("sessions should load");
+        std::env::remove_var("MINI_TERM_HOME_DIR");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_type, "claude");
+        assert_eq!(sessions[0].title, "Claude first prompt");
+        assert_eq!(
+            sessions[0].project_path.as_deref(),
+            Some(project_path.as_str())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collect_ai_sessions_matches_windows_verbatim_project_paths() {
+        let home = TestDir::new("mini-term-ai-sessions-verbatim");
+        let project_path = home.path.join("workspace").to_string_lossy().to_string();
+
+        let claude_session_path = home
+            .path
+            .join(".claude")
+            .join("projects")
+            .join(encode_project_path(&project_path))
+            .join("claude-1.jsonl");
+        write_lines(
+            &claude_session_path,
+            &[r#"{"type":"user","timestamp":"2026-04-01T09:30:00Z","message":{"content":"Claude first prompt"}}"#.to_string()],
+        );
+
+        let codex_index_path = home.path.join(".codex").join("session_index.jsonl");
+        write_lines(
+            &codex_index_path,
+            &[r#"{"id":"codex-1","thread_name":"Codex Thread"}"#.to_string()],
+        );
+
+        let project_path_json =
+            serde_json::to_string(&project_path).expect("failed to serialize project path");
+        let codex_session_path = home
+            .path
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("04")
+            .join("codex-1.jsonl");
+        write_lines(
+            &codex_session_path,
+            &[format!(
+                r#"{{"type":"session_meta","payload":{{"cwd":{project_path_json},"id":"codex-1","timestamp":"2026-04-04T12:00:00Z"}}}}"#
+            )],
+        );
+
+        let sessions = collect_ai_sessions(&home.path, &[format!("\\\\?\\{project_path}")]);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions[0].project_path.as_deref(),
+            Some(project_path.as_str())
+        );
+        assert_eq!(
+            sessions[1].project_path.as_deref(),
+            Some(project_path.as_str())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn collect_ai_sessions_normalizes_windows_separator_style() {
+        let home = TestDir::new("mini-term-ai-sessions-separators");
+        let project_path = home
+            .path
+            .join("workspace")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        let claude_session_path = home
+            .path
+            .join(".claude")
+            .join("projects")
+            .join(encode_project_path(&project_path))
+            .join("claude-1.jsonl");
+        write_lines(
+            &claude_session_path,
+            &[r#"{"type":"user","timestamp":"2026-04-01T09:30:00Z","message":{"content":"Claude first prompt"}}"#.to_string()],
+        );
+
+        let codex_index_path = home.path.join(".codex").join("session_index.jsonl");
+        write_lines(
+            &codex_index_path,
+            &[r#"{"id":"codex-1","thread_name":"Codex Thread"}"#.to_string()],
+        );
+
+        let project_path_json =
+            serde_json::to_string(&project_path).expect("failed to serialize project path");
+        let codex_session_path = home
+            .path
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("04")
+            .join("codex-1.jsonl");
+        write_lines(
+            &codex_session_path,
+            &[format!(
+                r#"{{"type":"session_meta","payload":{{"cwd":{project_path_json},"id":"codex-1","timestamp":"2026-04-04T12:00:00Z"}}}}"#
+            )],
+        );
+
+        let sessions = collect_ai_sessions(&home.path, &[project_path]);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions[0].project_path.as_deref(),
+            Some(home.path.join("workspace").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            sessions[1].project_path.as_deref(),
+            Some(home.path.join("workspace").to_string_lossy().as_ref())
+        );
     }
 }

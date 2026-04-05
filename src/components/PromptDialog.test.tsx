@@ -10,6 +10,7 @@ describe('PromptDialog', () => {
       ...state,
       ui: {
         activeDialog: null,
+        activeNotice: null,
       },
     }));
   });

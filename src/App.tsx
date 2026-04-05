@@ -26,7 +26,9 @@ import { TerminalArea } from './components/TerminalArea';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { FileTree } from './components/FileTree';
 import { GitHistory } from './components/GitHistory';
+import { GlobalNoticeHost } from './components/GlobalNoticeHost';
 import { WorkspaceDialogHost } from './components/WorkspaceDialogHost';
+import { useHostControlBridge } from './hooks/useHostControlBridge';
 import { useSessionRuntimeBridge } from './hooks/useSessionRuntimeBridge';
 import { createFallbackAppConfig, isTauriRuntime } from './runtime/tauriRuntime';
 import { applyDocumentTheme, resolveTheme } from './theme';
@@ -113,6 +115,7 @@ function TauriApp() {
   const resolvedTheme = resolveTheme(themeConfig);
 
   useSessionRuntimeBridge();
+  useHostControlBridge();
 
   useEffect(() => {
     const bootstrapConfig = async () => {
@@ -622,6 +625,7 @@ function TauriApp() {
       </div>
 
       <WorkspaceDialogHost />
+      <GlobalNoticeHost />
     </div>
   );
 }

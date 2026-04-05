@@ -4264,7 +4264,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-app"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "dirs",
  "git2",
@@ -4274,12 +4274,15 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-window-state",
+ "toml 0.8.2",
+ "uuid",
  "windows 0.58.0",
 ]
 

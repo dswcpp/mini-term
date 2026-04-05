@@ -159,7 +159,7 @@ export function CommitDiffModal({
           })}
         </div>
         <div className="border-t px-1 py-[3px] text-[8px]" style={{ borderColor: 'var(--viewer-border)', color: 'var(--text-muted)' }}>
-          {files.length} files changed
+          共 {files.length} 个变更文件
         </div>
       </div>
 
@@ -201,7 +201,7 @@ export function CommitDiffModal({
                 }`}
                 onClick={() => setViewMode('side-by-side')}
               >
-                Side
+                并排
               </button>
               <button
                 className={`px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
@@ -211,21 +211,21 @@ export function CommitDiffModal({
                 }`}
                 onClick={() => setViewMode('inline')}
               >
-                Inline
+                内联
               </button>
             </div>
             {variant === 'dialog' && (
               <ToolbarButton
                 active={maximized}
                 compact
-                label={maximized ? 'Restore commit diff window size' : 'Maximize commit diff window'}
+                label={maximized ? '还原提交 diff 窗口大小' : '最大化提交 diff 窗口'}
                 onClick={() => setLayoutMode((value) => (value === 'maximized' ? 'windowed' : 'maximized'))}
                 testId="commit-diff-modal-maximize-toggle"
               >
                 {maximized ? <RestoreIcon /> : <MaximizeIcon />}
               </ToolbarButton>
             )}
-            <ToolbarButton compact label="Close commit diff" onClick={onClose}>
+            <ToolbarButton compact label="关闭提交 diff" onClick={onClose}>
               <CloseIcon />
             </ToolbarButton>
           </div>
@@ -234,7 +234,7 @@ export function CommitDiffModal({
         <div className="flex-1 overflow-auto" style={{ backgroundColor: 'var(--viewer-panel)' }} data-testid="commit-diff-body">
           {loading && (
             <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-              Loading diff...
+              正在加载 diff...
             </div>
           )}
           {error && (
@@ -244,12 +244,12 @@ export function CommitDiffModal({
           )}
           {diffResult && diffResult.isBinary && (
             <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-              Binary file, diff preview is not available.
+              二进制文件暂不支持 diff 预览。
             </div>
           )}
           {diffResult && diffResult.tooLarge && (
             <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-              File is too large to preview as diff.
+              文件过大，暂不支持 diff 预览。
             </div>
           )}
           {diffResult && !diffResult.isBinary && !diffResult.tooLarge && (
@@ -257,7 +257,7 @@ export function CommitDiffModal({
           )}
           {!loading && !error && !diffResult && files.length === 0 && (
             <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-              This commit does not contain file changes.
+              这个提交没有文件变更。
             </div>
           )}
         </div>

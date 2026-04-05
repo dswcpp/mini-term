@@ -31,6 +31,7 @@ describe('ui dialog store', () => {
       ]),
       ui: {
         activeDialog: null,
+        activeNotice: null,
       },
     }));
   });
@@ -312,5 +313,46 @@ describe('ui dialog store', () => {
     useAppStore.getState().closeDialog();
 
     expect(useAppStore.getState().ui.activeDialog).toBeNull();
+  });
+
+  it('stores a global notice without clearing the active dialog', () => {
+    useAppStore.getState().openSettings('theme');
+    useAppStore.getState().showNotice({
+      message: '该文件已无差异，已关闭 diff',
+      tone: 'success',
+    });
+
+    expect(useAppStore.getState().ui.activeDialog).toEqual({
+      kind: 'settings',
+      page: 'theme',
+    });
+    expect(useAppStore.getState().ui.activeNotice).toEqual({
+      id: expect.any(String),
+      message: '该文件已无差异，已关闭 diff',
+      tone: 'success',
+      durationMs: 1500,
+      createdAt: expect.any(Number),
+    });
+  });
+
+  it('does not clear a newer notice when given a stale notice id', () => {
+    useAppStore.getState().showNotice({
+      message: '第一条提示',
+      tone: 'info',
+    });
+    const firstNoticeId = useAppStore.getState().ui.activeNotice?.id;
+
+    useAppStore.getState().showNotice({
+      message: '第二条提示',
+      tone: 'success',
+    });
+    const secondNotice = useAppStore.getState().ui.activeNotice;
+
+    expect(firstNoticeId).toBeTruthy();
+    expect(secondNotice?.message).toBe('第二条提示');
+
+    useAppStore.getState().clearNotice(firstNoticeId);
+
+    expect(useAppStore.getState().ui.activeNotice).toEqual(secondNotice);
   });
 });

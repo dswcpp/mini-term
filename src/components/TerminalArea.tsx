@@ -9,7 +9,8 @@ import { createTerminalPane } from '../utils/session';
 import { TabBar } from './TabBar';
 import { TerminalTabHost } from './TerminalTabHost';
 import { DocumentTabHost } from './DocumentTabHost';
-import { CommitDiffTabHost, WorktreeDiffTabHost } from './DiffTabHost';
+import { CommitDiffTabHost, FileHistoryViewTabHost, WorktreeDiffTabHost } from './DiffTabHost';
+import { AgentTaskPanelTabHost } from './AgentTaskPanelTabHost';
 import {
   collectPaneIds,
   findPane,
@@ -20,7 +21,7 @@ import {
 import { showContextMenu } from '../utils/contextMenu';
 import { showPrompt } from '../utils/prompt';
 import { areSplitNodesEquivalent } from '../utils/splitLayout';
-import type { PaneState, ShellConfig, SplitNode, TerminalTab, WorkspaceTab } from '../types';
+import type { AgentTaskPanelTab, PaneState, ShellConfig, SplitNode, TerminalTab, WorkspaceTab } from '../types';
 
 interface Props {
   workspaceId: string;
@@ -31,6 +32,10 @@ interface Props {
 
 function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
   return tab.kind === 'terminal';
+}
+
+function isAgentTaskPanelTab(tab: WorkspaceTab): tab is AgentTaskPanelTab {
+  return tab.kind === 'agent-tasks';
 }
 
 function getTerminalTabById(ps: { tabs: WorkspaceTab[] } | undefined, tabId: string): TerminalTab | null {
@@ -365,6 +370,20 @@ export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSett
                   onClose={() => {
                     void handleCloseTab(tab.id);
                   }}
+                />
+              ) : tab.kind === 'file-history' ? (
+                <FileHistoryViewTabHost
+                  tab={tab}
+                  isActive={tabIsActive}
+                  onClose={() => {
+                    void handleCloseTab(tab.id);
+                  }}
+                />
+              ) : isAgentTaskPanelTab(tab) ? (
+                <AgentTaskPanelTabHost
+                  tab={tab}
+                  workspaceId={workspaceId}
+                  isActive={tabIsActive}
                 />
               ) : (
                 <CommitDiffTabHost

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Mini-Term Maintainer"
+  short_description: "Modify the Mini-Term codebase with the right file map and validation path."
+  default_prompt: "Use $mini-term-maintainer to modify or review the Mini-Term codebase itself, including Tauri, React, MCP, PTY, and task runtime changes."
+
+policy:
+  allow_implicit_invocation: true

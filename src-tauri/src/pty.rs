@@ -1,4 +1,4 @@
-﻿use git2::Repository;
+use git2::Repository;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
+
+use crate::runtime_mcp;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,22 +99,8 @@ pub struct TrackInputOutcome {
 
 const AI_COMMANDS: &[&str] = &["claude", "codex"];
 const STARTUP_OUTPUT_LIMIT: usize = 64 * 1024;
-const NON_INTERACTIVE_FLAGS: &[&str] = &[
-    "-v",
-    "--version",
-    "-h",
-    "--help",
-    "-p",
-    "--print",
-];
-const AI_EXIT_COMMANDS: &[&str] = &[
-    "/exit",
-    "exit",
-    "/quit",
-    "quit",
-    ":quit",
-    "/logout",
-];
+const NON_INTERACTIVE_FLAGS: &[&str] = &["-v", "--version", "-h", "--help", "-p", "--print"];
+const AI_EXIT_COMMANDS: &[&str] = &["/exit", "exit", "/quit", "quit", ":quit", "/logout"];
 const DOUBLE_CTRLC_WINDOW: Duration = Duration::from_millis(1000);
 const MAX_TRACKED_INPUT_LEN: usize = 4096;
 
@@ -216,7 +204,9 @@ fn tokenize_shell_words(input: &str, shell_kind: &str) -> Vec<String> {
             if ch == ';' {
                 break;
             }
-            if (ch == '|' && chars.peek() == Some(&'|')) || (ch == '&' && chars.peek() == Some(&'&')) {
+            if (ch == '|' && chars.peek() == Some(&'|'))
+                || (ch == '&' && chars.peek() == Some(&'&'))
+            {
                 break;
             }
             if ch == '|' || ch == '&' {
@@ -285,7 +275,11 @@ fn resolve_cwd_change(current_cwd: &str, shell_kind: &str, command: &str) -> Opt
     match first.as_str() {
         "cd" | "chdir" => {
             let mut index = 1;
-            if shell_kind == "cmd" && tokens.get(index).is_some_and(|token| token.eq_ignore_ascii_case("/d")) {
+            if shell_kind == "cmd"
+                && tokens
+                    .get(index)
+                    .is_some_and(|token| token.eq_ignore_ascii_case("/d"))
+            {
                 index += 1;
             }
             if tokens.get(index).is_some_and(|token| token == "--") {
@@ -322,7 +316,12 @@ fn resolve_cwd_change(current_cwd: &str, shell_kind: &str, command: &str) -> Opt
     }
 }
 
-fn resolve_usage_scope(command: &str, shell_kind: &str, current_cwd: &str, default_scope: &str) -> Option<String> {
+fn resolve_usage_scope(
+    command: &str,
+    shell_kind: &str,
+    current_cwd: &str,
+    default_scope: &str,
+) -> Option<String> {
     let first = tokenize_shell_words(command, shell_kind)
         .first()
         .map(|token| token.to_ascii_lowercase())?;
@@ -344,6 +343,7 @@ pub struct PtyManager {
     session_id_by_pty: Arc<Mutex<HashMap<u32, String>>>,
     pty_id_by_session: Arc<Mutex<HashMap<String, u32>>>,
     last_output: Arc<Mutex<HashMap<u32, Instant>>>,
+    last_command_activity: Arc<Mutex<HashMap<u32, Instant>>>,
     startup_output: Arc<Mutex<HashMap<u32, String>>>,
     ai_sessions: Arc<Mutex<HashSet<u32>>>,
     input_buffers: Arc<Mutex<HashMap<u32, TrackedInputState>>>,
@@ -481,6 +481,7 @@ impl PtyManager {
             session_id_by_pty: Arc::new(Mutex::new(HashMap::new())),
             pty_id_by_session: Arc::new(Mutex::new(HashMap::new())),
             last_output: Arc::new(Mutex::new(HashMap::new())),
+            last_command_activity: Arc::new(Mutex::new(HashMap::new())),
             startup_output: Arc::new(Mutex::new(HashMap::new())),
             ai_sessions: Arc::new(Mutex::new(HashSet::new())),
             input_buffers: Arc::new(Mutex::new(HashMap::new())),
@@ -497,6 +498,27 @@ impl PtyManager {
 
     pub fn has_recent_output(&self, pty_id: u32, within: Duration) -> bool {
         let map = self.last_output.lock().unwrap();
+        map.get(&pty_id)
+            .map_or(false, |timestamp| timestamp.elapsed() < within)
+    }
+
+    #[cfg(test)]
+    pub fn note_output_activity(&self, pty_id: u32) {
+        self.last_output
+            .lock()
+            .unwrap()
+            .insert(pty_id, Instant::now());
+    }
+
+    pub fn note_command_activity(&self, pty_id: u32) {
+        self.last_command_activity
+            .lock()
+            .unwrap()
+            .insert(pty_id, Instant::now());
+    }
+
+    pub fn has_recent_command_activity(&self, pty_id: u32, within: Duration) -> bool {
+        let map = self.last_command_activity.lock().unwrap();
         map.get(&pty_id)
             .map_or(false, |timestamp| timestamp.elapsed() < within)
     }
@@ -608,7 +630,10 @@ impl PtyManager {
                         let normalized = raw_command.to_lowercase();
 
                         if in_ai {
-                            if AI_EXIT_COMMANDS.iter().any(|&command| normalized == command) {
+                            if AI_EXIT_COMMANDS
+                                .iter()
+                                .any(|&command| normalized == command)
+                            {
                                 exit_ai = true;
                             }
                         } else if !normalized.is_empty() {
@@ -619,8 +644,10 @@ impl PtyManager {
                                     || first_word.ends_with(&format!("/{ai}"))
                                     || first_word.ends_with(&format!("\\{ai}"))
                             });
-                            let has_non_interactive_flag =
-                                is_ai_command && words.any(|word| NON_INTERACTIVE_FLAGS.iter().any(|&flag| word == flag));
+                            let has_non_interactive_flag = is_ai_command
+                                && words.any(|word| {
+                                    NON_INTERACTIVE_FLAGS.iter().any(|&flag| word == flag)
+                                });
                             if is_ai_command && !has_non_interactive_flag {
                                 enter_ai = true;
                             }
@@ -683,12 +710,16 @@ fn create_pty_internal(
     cwd: String,
     session_id: Option<String>,
     mode: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
 ) -> Result<PtySessionCreatedPayload, String> {
     let pty_system = native_pty_system();
+    let cols = cols.unwrap_or(80);
+    let rows = rows.unwrap_or(24);
     let pair = pty_system
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -709,6 +740,7 @@ fn create_pty_internal(
     cmd.env("LC_CTYPE", "UTF-8");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let root_pid = child.process_id();
 
     let pty_id = {
         let mut next = state.next_id.lock().unwrap();
@@ -717,8 +749,14 @@ fn create_pty_internal(
         id
     };
 
-    let writer = pair.master.take_writer().map_err(|error| error.to_string())?;
-    let mut reader = pair.master.try_clone_reader().map_err(|error| error.to_string())?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| error.to_string())?;
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| error.to_string())?;
     let master = pair.master;
     let session_id = session_id.unwrap_or_else(|| session_id_for_pty(pty_id));
     let mode = mode.unwrap_or_else(|| "human".to_string());
@@ -747,6 +785,7 @@ fn create_pty_internal(
     let session_id_by_pty = state.session_id_by_pty.clone();
     let pty_id_by_session = state.pty_id_by_session.clone();
     let last_output = state.last_output.clone();
+    let last_command_activity = state.last_command_activity.clone();
     let startup_output = state.startup_output.clone();
     let ai_sessions = state.ai_sessions.clone();
     let input_buffers = state.input_buffers.clone();
@@ -775,9 +814,10 @@ fn create_pty_internal(
                             PtyOutputPayload {
                                 session_id: session_id_for_reader.clone(),
                                 pty_id: pty_id_for_reader,
-                                data,
+                                data: data.clone(),
                             },
                         );
+                        let _ = runtime_mcp::append_pty_output(pty_id_for_reader, &data);
                     }
 
                     let exit_code = {
@@ -804,6 +844,7 @@ fn create_pty_internal(
                             updated_at: now_timestamp_ms(),
                         },
                     );
+                    let _ = runtime_mcp::update_pty_phase(pty_id_for_reader, "exited");
                     let _ = app_flush.emit(
                         "pty-exit",
                         PtyExitPayload {
@@ -812,6 +853,7 @@ fn create_pty_internal(
                             exit_code,
                         },
                     );
+                    let _ = runtime_mcp::mark_pty_exited(pty_id_for_reader, exit_code);
 
                     session_id_by_pty.lock().unwrap().remove(&pty_id_for_reader);
                     let mut session_map = pty_id_by_session.lock().unwrap();
@@ -819,6 +861,10 @@ fn create_pty_internal(
                         session_map.remove(&session_id_for_reader);
                     }
                     last_output.lock().unwrap().remove(&pty_id_for_reader);
+                    last_command_activity
+                        .lock()
+                        .unwrap()
+                        .remove(&pty_id_for_reader);
                     startup_output.lock().unwrap().remove(&pty_id_for_reader);
                     ai_sessions.lock().unwrap().remove(&pty_id_for_reader);
                     input_buffers.lock().unwrap().remove(&pty_id_for_reader);
@@ -847,9 +893,10 @@ fn create_pty_internal(
                     PtyOutputPayload {
                         session_id: session_id_for_reader.clone(),
                         pty_id: pty_id_for_reader,
-                        data,
+                        data: data.clone(),
                     },
                 );
+                let _ = runtime_mcp::append_pty_output(pty_id_for_reader, &data);
                 pending.clear();
                 if let Ok(mut map) = last_output.lock() {
                     map.insert(pty_id_for_reader, Instant::now());
@@ -904,6 +951,17 @@ fn create_pty_internal(
         updated_at: now,
     };
     let _ = app.emit("pty-session-created", payload.clone());
+    let _ = runtime_mcp::register_pty(
+        payload.pty_id,
+        &payload.session_id,
+        &payload.shell,
+        &payload.shell_kind,
+        &payload.cwd,
+        &payload.mode,
+        &payload.phase,
+    );
+    let _ = runtime_mcp::update_pty_size(payload.pty_id, cols, rows);
+    let _ = runtime_mcp::update_pty_root_pid(payload.pty_id, root_pid);
 
     Ok(payload)
 }
@@ -925,21 +983,14 @@ fn write_pty_internal(
     }
 
     let tracked = state.track_input(pty_id, &data);
+    if !tracked.commands.is_empty() {
+        state.note_command_activity(pty_id);
+    }
     let session_id = state.get_session_id(pty_id);
     for command in tracked.commands {
         let updated_at = now_timestamp_ms();
-        let current_cwd = state
-            .session_cwds
-            .lock()
-            .unwrap()
-            .get(&pty_id)
-            .cloned();
-        let default_scope = state
-            .session_roots
-            .lock()
-            .unwrap()
-            .get(&pty_id)
-            .cloned();
+        let current_cwd = state.session_cwds.lock().unwrap().get(&pty_id).cloned();
+        let default_scope = state.session_roots.lock().unwrap().get(&pty_id).cloned();
         let shell_kind = state
             .shell_kinds
             .lock()
@@ -976,6 +1027,8 @@ fn write_pty_internal(
                 updated_at,
             },
         );
+        let _ = runtime_mcp::update_pty_phase(pty_id, "running");
+        let _ = runtime_mcp::update_pty_status(pty_id, "running");
 
         if let Some(next_cwd) = next_cwd {
             state
@@ -988,10 +1041,11 @@ fn write_pty_internal(
                 PtySessionCwdPayload {
                     session_id: session_id.clone(),
                     pty_id,
-                    cwd: next_cwd,
+                    cwd: next_cwd.clone(),
                     updated_at,
                 },
             );
+            let _ = runtime_mcp::update_pty_cwd(pty_id, &next_cwd);
         }
     }
 
@@ -1014,13 +1068,20 @@ fn resize_pty_internal(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let _ = runtime_mcp::update_pty_size(pty_id, cols, rows);
+    Ok(())
 }
 
 fn kill_pty_internal(state: &PtyManager, pty_id: u32) -> Result<(), String> {
     let session_id = state.get_session_id(pty_id);
-    state.instances.lock().unwrap().remove(&pty_id);
+    if let Some(mut instance) = state.instances.lock().unwrap().remove(&pty_id) {
+        let _ = instance.child.kill();
+    } else {
+        return Err("PTY not found".to_string());
+    }
     state.last_output.lock().unwrap().remove(&pty_id);
+    state.last_command_activity.lock().unwrap().remove(&pty_id);
     state.startup_output.lock().unwrap().remove(&pty_id);
     state.ai_sessions.lock().unwrap().remove(&pty_id);
     state.input_buffers.lock().unwrap().remove(&pty_id);
@@ -1029,12 +1090,49 @@ fn kill_pty_internal(state: &PtyManager, pty_id: u32) -> Result<(), String> {
     state.session_roots.lock().unwrap().remove(&pty_id);
     state.shell_kinds.lock().unwrap().remove(&pty_id);
     unlink_session(state, pty_id, &session_id);
+    let _ = runtime_mcp::remove_pty(pty_id);
     Ok(())
 }
 
 fn take_startup_output_internal(state: &PtyManager, pty_id: u32) -> Result<String, String> {
     let mut startup_output = state.startup_output.lock().unwrap();
     Ok(startup_output.remove(&pty_id).unwrap_or_default())
+}
+
+pub(crate) fn create_terminal_session_for_host(
+    app: &AppHandle,
+    state: &PtyManager,
+    shell: String,
+    args: Vec<String>,
+    cwd: String,
+    session_id: Option<String>,
+    mode: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<PtySessionCreatedPayload, String> {
+    create_pty_internal(app, state, shell, args, cwd, session_id, mode, cols, rows)
+}
+
+pub(crate) fn write_pty_for_host(
+    app: &AppHandle,
+    state: &PtyManager,
+    pty_id: u32,
+    data: String,
+) -> Result<(), String> {
+    write_pty_internal(app, state, pty_id, data)
+}
+
+pub(crate) fn resize_pty_for_host(
+    state: &PtyManager,
+    pty_id: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    resize_pty_internal(state, pty_id, cols, rows)
+}
+
+pub(crate) fn kill_pty_for_host(state: &PtyManager, pty_id: u32) -> Result<(), String> {
+    kill_pty_internal(state, pty_id)
 }
 
 #[tauri::command]
@@ -1045,7 +1143,18 @@ pub fn create_pty(
     args: Vec<String>,
     cwd: String,
 ) -> Result<u32, String> {
-    create_pty_internal(&app, state.inner(), shell, args, cwd, None, None).map(|payload| payload.pty_id)
+    create_pty_internal(
+        &app,
+        state.inner(),
+        shell,
+        args,
+        cwd,
+        None,
+        None,
+        None,
+        None,
+    )
+    .map(|payload| payload.pty_id)
 }
 
 #[tauri::command]
@@ -1058,7 +1167,17 @@ pub fn create_terminal_session(
     session_id: Option<String>,
     mode: Option<String>,
 ) -> Result<PtySessionCreatedPayload, String> {
-    create_pty_internal(&app, state.inner(), shell, args, cwd, session_id, mode)
+    create_pty_internal(
+        &app,
+        state.inner(),
+        shell,
+        args,
+        cwd,
+        session_id,
+        mode,
+        None,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1151,7 +1270,17 @@ pub fn restart_terminal_session(
         let _ = kill_pty_internal(state.inner(), existing_pty_id);
     }
 
-    create_pty_internal(&app, state.inner(), shell, args, cwd, Some(session_id), mode)
+    create_pty_internal(
+        &app,
+        state.inner(),
+        shell,
+        args,
+        cwd,
+        Some(session_id),
+        mode,
+        None,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1411,11 +1540,7 @@ mod tests {
         let next = current.join("src");
         fs::create_dir_all(&next).unwrap();
 
-        let resolved = resolve_cwd_change(
-            current.to_string_lossy().as_ref(),
-            "bash",
-            "cd src",
-        );
+        let resolved = resolve_cwd_change(current.to_string_lossy().as_ref(), "bash", "cd src");
 
         assert_eq!(resolved, Some(normalize_path_string(&next)));
         let _ = fs::remove_dir_all(&root);

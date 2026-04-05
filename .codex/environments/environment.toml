@@ -8,4 +8,16 @@ script = ""
 [[actions]]
 name = "运行"
 icon = "run"
-command = "npm run tauri dev"
+command = '''
+npm run build
+npm run tauri dev
+'''
+
+[[actions]]
+name = "运行"
+icon = "tool"
+command = '''
+cmd /c npm test
+cmd /c npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --lib --bin mini-term-mcp
+'''

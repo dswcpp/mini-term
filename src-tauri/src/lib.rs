@@ -1,9 +1,16 @@
+mod agent_api;
+pub mod agent_core;
+mod agent_policy;
 mod ai_sessions;
 mod config;
 mod fs;
 mod git;
+mod host_control;
+pub mod mcp;
+mod mcp_host;
 mod process_monitor;
 mod pty;
+mod runtime_mcp;
 
 use tauri::Manager;
 
@@ -17,6 +24,9 @@ pub fn run() {
         .manage(pty::PtyManager::new())
         .manage(fs::FsWatcherManager::new())
         .setup(|app| {
+            runtime_mcp::initialize_runtime_host(env!("CARGO_PKG_VERSION"))?;
+            host_control::start_host_control_server(app.handle().clone())?;
+            runtime_mcp::start_runtime_heartbeat(env!("CARGO_PKG_VERSION").to_string());
             let pty_manager = app.state::<crate::pty::PtyManager>();
             let pty_clone = pty_manager.inner().clone();
             process_monitor::start_monitor(app.handle().clone(), pty_clone);
@@ -49,11 +59,40 @@ pub fn run() {
             ai_sessions::get_ai_sessions,
             git::get_git_status,
             git::get_git_diff,
+            git::restore_git_file,
+            git::restore_git_hunk,
+            git::restore_git_change_block,
             git::discover_git_repos,
             git::get_git_completion_data,
             git::get_git_log,
             git::get_commit_files,
             git::get_commit_file_diff,
+            git::get_file_git_history,
+            git::get_file_git_blame,
+            agent_api::list_agent_workspaces,
+            agent_api::get_agent_workspace_context,
+            agent_api::list_agent_tasks,
+            agent_api::get_agent_task_status,
+            agent_api::list_attention_task_summaries,
+            agent_api::list_approval_requests,
+            agent_api::resolve_approval_request,
+            agent_api::start_agent_task,
+            agent_api::send_agent_task_input,
+            agent_api::close_agent_task,
+            agent_api::resume_agent_task,
+            agent_api::list_agent_policy_profiles,
+            agent_api::get_agent_policy_profile,
+            agent_api::get_default_agent_policy_profile,
+            agent_api::save_agent_policy_profile,
+            agent_api::reset_agent_policy_profile,
+            agent_api::export_agent_policy_bundle,
+            agent_api::install_mcp_client_config_command,
+            agent_api::get_task_injection_preview,
+            agent_api::get_task_effective_policy,
+            agent_api::get_embedded_mcp_launch_info,
+            agent_api::list_embedded_mcp_tools_command,
+            agent_api::call_embedded_mcp_tool_command,
+            host_control::resolve_host_control_request,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

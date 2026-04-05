@@ -1,9 +1,10 @@
 [package]
 name = "tauri-app"
-version = "0.2.3"
+version = "0.2.4"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+default-run = "tauri-app"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -31,6 +32,9 @@ tauri-plugin-window-state = "2"
 dirs = "6"
 git2 = "0.19"
 pathdiff = "0.2"
+uuid = { version = "1", features = ["v7"] }
+sha2 = "0.10"
+toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

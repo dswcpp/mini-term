@@ -1,0 +1,7 @@
+interface:
+  display_name: "Mini-Term Generic MCP"
+  short_description: "Use Mini-Term MCP conservatively in non-IDE-specific clients."
+  default_prompt: "Use $mini-term-generic-mcp to operate through Mini-Term MCP with runtime-first ordering, host checks, approvals, and review."
+
+policy:
+  allow_implicit_invocation: true

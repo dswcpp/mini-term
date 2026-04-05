@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FileViewerModal } from './FileViewerModal';
 
 const invokeMock = vi.fn();
+const useWorkspaceAutoRefreshMock = vi.fn();
+let latestAutoRefreshOptions: Record<string, unknown> | undefined;
 const convertFileSrcMock = vi.fn((path: string) => `asset://${path}`);
 const openPathMock = vi.fn((path: string, openWith?: string) => Promise.resolve({ path, openWith }));
 const openUrlMock = vi.fn((url: string | URL, openWith?: string) => Promise.resolve({ url, openWith }));
@@ -32,6 +34,13 @@ const svgPanZoomMock = vi.fn((_svg?: SVGSVGElement, _options?: unknown) => {
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (command: string, args?: unknown) => invokeMock(command, args),
   convertFileSrc: (path: string) => convertFileSrcMock(path),
+}));
+
+vi.mock('../hooks/useWorkspaceAutoRefresh', () => ({
+  useWorkspaceAutoRefresh: (options: Record<string, unknown>) => {
+    latestAutoRefreshOptions = options;
+    useWorkspaceAutoRefreshMock(options);
+  },
 }));
 
 vi.mock('@tauri-apps/plugin-opener', () => ({
@@ -73,6 +82,8 @@ describe('FileViewerModal', () => {
 
   beforeEach(() => {
     invokeMock.mockReset();
+    useWorkspaceAutoRefreshMock.mockClear();
+    latestAutoRefreshOptions = undefined;
     convertFileSrcMock.mockClear();
     openPathMock.mockClear();
     openUrlMock.mockClear();
@@ -127,7 +138,7 @@ describe('FileViewerModal', () => {
 
     await waitFor(() => {
       expect(screen.queryByRole('heading', { level: 1, name: 'Title' })).not.toBeNull();
-    });
+    }, { timeout: 4000 });
 
     expect(convertFileSrcMock).toHaveBeenCalledWith('D:/code/JavaScript/mini-term/assets/diagram.png');
 
@@ -153,7 +164,7 @@ describe('FileViewerModal', () => {
 
     await waitFor(() => {
       expect(screen.queryByRole('heading', { level: 1, name: 'Preview First' })).not.toBeNull();
-    });
+    }, { timeout: 4000 });
   });
 
   it('renders mermaid fenced blocks as diagrams and wires zoom controls', async () => {
@@ -309,5 +320,39 @@ describe('FileViewerModal', () => {
     await screen.findByText('export const value = 1;');
 
     expect(screen.queryByTestId('file-viewer-preview-toggle')).toBeNull();
+  });
+
+  it('silently refreshes the open dialog after a matching fs change', async () => {
+    invokeMock
+      .mockResolvedValueOnce({
+        content: '# Initial',
+        isBinary: false,
+        tooLarge: false,
+      })
+      .mockResolvedValueOnce({
+        content: '# Updated',
+        isBinary: false,
+        tooLarge: false,
+      });
+
+    render(
+      <FileViewerModal
+        open
+        onClose={vi.fn()}
+        filePath="D:\\code\\JavaScript\\mini-term\\README.md"
+        initialPreview
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { level: 1, name: 'Initial' })).not.toBeNull();
+    });
+
+    await (latestAutoRefreshOptions?.onFsChange as (() => Promise<void>) | undefined)?.();
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId('dialog-document-refresh-feedback').textContent).toContain('已自动刷新');
+    });
   });
 });

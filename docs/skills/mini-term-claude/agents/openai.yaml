@@ -1,0 +1,7 @@
+interface:
+  display_name: "Mini-Term Claude"
+  short_description: "Operate Claude through Mini-Term MCP with host and review awareness."
+  default_prompt: "Use $mini-term-claude to work through Mini-Term MCP for runtime observation, tracked tasks, approvals, and review."
+
+policy:
+  allow_implicit_invocation: true

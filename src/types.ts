@@ -15,7 +15,7 @@ export interface LegacyProjectConfig {
   expandedDirs?: string[];
 }
 
-export type SettingsPage = 'terminal' | 'theme' | 'system' | 'shortcuts' | 'about';
+export type SettingsPage = 'terminal' | 'theme' | 'system' | 'agent' | 'mcp' | 'shortcuts' | 'about';
 export type PreviewMode = 'source' | 'preview';
 export type InteractionDialogMode = 'alert' | 'confirm' | 'prompt';
 export type InteractionDialogTone = 'neutral' | 'warning' | 'danger';
@@ -87,6 +87,7 @@ export interface AppConfig {
   middleColumnSizes?: number[];
   workspaceSidebarSizes?: number[];
   completionUsage?: CompletionUsageStats;
+  agentPolicies?: AgentPoliciesConfig;
 }
 
 export interface ShellConfig {
@@ -254,7 +255,34 @@ export interface CommitDiffTab {
   files: CommitFileInfo[];
 }
 
-export type WorkspaceTab = TerminalTab | FileViewerTab | WorktreeDiffTab | CommitDiffTab;
+export interface FileHistoryTab {
+  kind: 'file-history';
+  id: string;
+  projectPath: string;
+  filePath: string;
+}
+
+export interface AgentTaskPanelFilter {
+  scope: 'workspace' | 'all';
+  attention?: TaskAttentionState | 'all';
+  target?: TaskTarget | 'all';
+}
+
+export interface AgentTaskPanelTab {
+  kind: 'agent-tasks';
+  id: string;
+  filter: AgentTaskPanelFilter;
+  selectedTaskId?: string;
+  status: PaneStatus;
+}
+
+export type WorkspaceTab =
+  | TerminalTab
+  | FileViewerTab
+  | WorktreeDiffTab
+  | CommitDiffTab
+  | FileHistoryTab
+  | AgentTaskPanelTab;
 
 export type SplitNode =
   | { type: 'leaf'; pane: PaneState }
@@ -271,6 +299,252 @@ export interface AiSession {
   title: string;
   timestamp: string;
   projectPath?: string;
+}
+
+export type TaskTarget = 'codex' | 'claude';
+export type TaskContextPreset = 'light' | 'standard' | 'review';
+export type TaskAttentionState = 'running' | 'waiting-input' | 'needs-review' | 'failed' | 'completed';
+export type ApprovalRiskLevel = 'medium' | 'high';
+export type ApprovalDecision = 'pending' | 'approved' | 'rejected' | 'executed';
+
+export interface ApprovalRequest {
+  requestId: string;
+  toolName: string;
+  reason: string;
+  riskLevel: ApprovalRiskLevel;
+  payloadPreview: string;
+  status: ApprovalDecision;
+  createdAt: number;
+  updatedAt: number;
+  approvalKey?: string;
+}
+
+export interface AgentTaskSummary {
+  taskId: string;
+  workspaceId: string;
+  workspaceName: string;
+  workspaceRootPath: string;
+  target: TaskTarget;
+  title: string;
+  status: string;
+  attentionState: TaskAttentionState;
+  sessionId: string;
+  cwd: string;
+  startedAt: number;
+  updatedAt: number;
+  completedAt?: number;
+  exitCode?: number;
+  contextPreset: TaskContextPreset;
+  changedFiles: GitFileStatus[];
+  promptPreview: string;
+  lastOutputExcerpt: string;
+  injectionProfileId?: string;
+  injectionPreset?: TaskContextPreset;
+  policySummary?: string;
+}
+
+export interface AgentActionResult<T> {
+  ok: boolean;
+  data?: T;
+  approvalRequired: boolean;
+  request?: ApprovalRequest;
+}
+
+export interface AgentTaskStatusDetail {
+  summary: AgentTaskSummary;
+  recentOutputExcerpt: string;
+  diffSummary: GitFileStatus[];
+  logPath: string;
+}
+
+export interface AgentWorkspaceSummary {
+  workspaceId: string;
+  name: string;
+  rootPaths: string[];
+  primaryRootPath?: string;
+}
+
+export interface ContextDocument {
+  path: string;
+  label: string;
+  content: string;
+}
+
+export interface GitSummary {
+  repoCount: number;
+  changedFiles: GitFileStatus[];
+}
+
+export interface WorkspaceContextResult {
+  workspace: AgentWorkspaceSummary;
+  preset: TaskContextPreset;
+  instructions: ContextDocument[];
+  gitSummary: GitSummary;
+  recentSessions: AiSession[];
+  relatedFiles: ContextDocument[];
+}
+
+export type AgentClientType = 'codex' | 'claude' | 'cursor' | 'generic-mcp';
+export type PromptStyle = 'minimal' | 'balanced' | 'strict';
+export type InjectionTargets = 'codex' | 'claude' | 'both';
+
+export interface ToolUsagePolicy {
+  preferredSequence: string[];
+  approvalTools: string[];
+  readOnlyTools: string[];
+  taskTools: string[];
+}
+
+export interface AgentPolicyProfile {
+  id: string;
+  clientType: AgentClientType;
+  enabled: boolean;
+  displayName: string;
+  platformPromptTemplate: string;
+  toolPolicyPromptTemplate: string;
+  clientWrapperPromptTemplate: string;
+  systemPromptTemplate: string;
+  skillTemplate: string;
+  mcpInstructionsTemplate: string;
+  toolUsagePolicy: ToolUsagePolicy;
+}
+
+export interface RenderedPromptSections {
+  platformPrompt: string;
+  toolPolicyPrompt: string;
+  clientWrapperPrompt: string;
+  taskPresetPrompt: string;
+  workspaceOverridePrompt: string;
+}
+
+export interface WorkspacePolicyOverride {
+  workspaceId: string;
+  profileId: string;
+  enabledTools: string[];
+  extraInstructions: string;
+  promptStyle: PromptStyle;
+}
+
+export interface PresetPolicyTemplates {
+  light: string;
+  standard: string;
+  review: string;
+}
+
+export interface TaskInjectionProfileBindings {
+  codex?: string;
+  claude?: string;
+}
+
+export interface TaskInjectionTargetPresetPolicies {
+  codex?: PresetPolicyTemplates;
+  claude?: PresetPolicyTemplates;
+}
+
+export interface TaskInjectionPolicy {
+  enabled: boolean;
+  targets: InjectionTargets;
+  presetPolicies: PresetPolicyTemplates;
+  approvalHints: boolean;
+  reviewHints: boolean;
+  profileBindings: TaskInjectionProfileBindings;
+  targetPresetPolicies: TaskInjectionTargetPresetPolicies;
+}
+
+export interface AgentPoliciesConfig {
+  profiles: AgentPolicyProfile[];
+  workspaceOverrides: WorkspacePolicyOverride[];
+  taskInjection: TaskInjectionPolicy;
+}
+
+export interface AgentPolicyExportBundle {
+  clientType: AgentClientType;
+  profile: AgentPolicyProfile;
+  workspaceId?: string;
+  workspaceName?: string;
+  platformPrompt: string;
+  toolPolicyPrompt: string;
+  clientWrapperPrompt: string;
+  taskPresetTemplates: PresetPolicyTemplates;
+  systemPrompt: string;
+  skillText: string;
+  mcpInstructions: string;
+  workspaceOverridePrompt: string;
+  effectivePolicySummary: string;
+  mcpLaunch: McpLaunchInfo;
+  mcpConfigJson: string;
+}
+
+export interface McpLaunchInfo {
+  status: 'resolved' | 'manual-required';
+  transport: 'stdio' | 'http';
+  command?: string;
+  args: string[];
+  url?: string;
+  cwd?: string;
+  notes?: string;
+}
+
+export interface McpClientInstallFileResult {
+  path: string;
+  kind: 'primary' | 'catalog' | string;
+  created: boolean;
+  updated: boolean;
+}
+
+export interface McpClientInstallResult {
+  clientType: AgentClientType;
+  serverName: string;
+  files: McpClientInstallFileResult[];
+  launch: McpLaunchInfo;
+}
+
+export interface EmbeddedMcpToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  group: string;
+  stability: string;
+  readOnly: boolean;
+  requiresConfirmation: boolean;
+  requiresHostConnection?: boolean;
+  supportsDryRun: boolean;
+  supportsPagination: boolean;
+  whenToUse: string;
+}
+
+export interface EmbeddedMcpCallError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface EmbeddedMcpCallResult {
+  ok: boolean;
+  data?: unknown;
+  error?: EmbeddedMcpCallError | null;
+  meta?: Record<string, unknown>;
+  requiresConfirmation?: boolean;
+  confirmation?: ApprovalRequest | null;
+}
+
+export interface TaskInjectionPreview {
+  profileId: string;
+  clientType: AgentClientType;
+  preset: TaskContextPreset;
+  workspaceId: string;
+  workspaceName: string;
+  policySummary: string;
+  renderedSections: RenderedPromptSections;
+  finalPrompt: string;
+}
+
+export interface TaskEffectivePolicy {
+  taskId: string;
+  injectionProfileId?: string;
+  injectionPreset?: TaskContextPreset;
+  policySummary?: string;
+  isInjected: boolean;
 }
 
 export interface FileEntry {
@@ -350,11 +624,13 @@ export interface GitFileStatus {
 }
 
 export interface DiffHunk {
+  hunkKey: string;
   oldStart: number;
   oldLines: number;
   newStart: number;
   newLines: number;
   lines: DiffLine[];
+  changeBlocks: DiffChangeBlockInfo[];
 }
 
 export interface DiffLine {
@@ -364,12 +640,32 @@ export interface DiffLine {
   newLineno?: number;
 }
 
+export interface GitBlameInfo {
+  authorName: string;
+  authorEmail?: string;
+  authorTime: number;
+  commitId?: string;
+  summary?: string;
+  isUncommitted: boolean;
+}
+
+export interface DiffChangeBlockInfo {
+  blockIndex: number;
+  lineStartIndex: number;
+  lineEndIndex: number;
+  blame?: GitBlameInfo;
+}
+
 export interface GitDiffResult {
   oldContent: string;
   newContent: string;
   hunks: DiffHunk[];
   isBinary: boolean;
   tooLarge: boolean;
+  canRestoreFile: boolean;
+  canRestorePartial: boolean;
+  restoreMode: 'file-only' | 'file-and-hunk' | 'unsupported';
+  diffCleared: boolean;
 }
 
 export interface FileContentResult {
@@ -405,6 +701,45 @@ export interface GitCommitInfo {
   timestamp: number;
 }
 
+export interface GitFileHistoryEntry {
+  commitHash: string;
+  shortHash: string;
+  message: string;
+  author: string;
+  timestamp: number;
+  path: string;
+  oldPath?: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+}
+
+export interface GitFileHistoryResult {
+  repoPath: string;
+  filePath: string;
+  entries: GitFileHistoryEntry[];
+  hasMore: boolean;
+  nextCursor?: string;
+}
+
+export interface GitBlameRange {
+  startLine: number;
+  endLine: number;
+  lines: string[];
+  author: string;
+  timestamp: number;
+  commitHash: string;
+  shortHash: string;
+  message: string;
+  isUncommitted: boolean;
+}
+
+export interface GitFileBlameResult {
+  repoPath: string;
+  filePath: string;
+  ranges: GitBlameRange[];
+  isBinary: boolean;
+  tooLarge: boolean;
+}
+
 export interface CommitFileInfo {
   path: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed';
@@ -427,6 +762,16 @@ export type UiDialog =
       tone?: InteractionDialogTone;
       readOnly?: boolean;
     };
+
+export type UiNoticeTone = 'info' | 'success' | 'error';
+
+export interface UiNotice {
+  id: string;
+  message: string;
+  tone: UiNoticeTone;
+  durationMs: number;
+  createdAt: number;
+}
 
 export type ProjectConfig = LegacyProjectConfig;
 export type ProjectState = WorkspaceState;

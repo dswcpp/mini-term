@@ -1,0 +1,7 @@
+interface:
+  display_name: "Mini-Term Cursor"
+  short_description: "Guide Cursor to use Mini-Term MCP for runtime truth and tracked work."
+  default_prompt: "Use $mini-term-cursor to rely on Mini-Term MCP for workspace truth, runtime observation, approvals, and review."
+
+policy:
+  allow_implicit_invocation: true

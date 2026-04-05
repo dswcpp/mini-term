@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
+import { useAutoRefreshFeedback } from '../../hooks/useAutoRefreshFeedback';
+import { useWorkspaceAutoRefresh } from '../../hooks/useWorkspaceAutoRefresh';
 import type { FileNavigationTarget, PreviewMode } from '../../types';
 import { isMarkdownFilePath } from '../../utils/markdownPreview';
+import { AutoRefreshFeedbackBadge } from '../AutoRefreshFeedback';
 import { resolveDocumentLanguage } from './language';
 import {
   CloseIcon,
@@ -56,6 +59,7 @@ function applySourceNavigation(host: HTMLElement, navigationTarget: FileNavigati
 
 interface DocumentViewerPanelProps {
   filePath: string;
+  projectPath?: string;
   mode?: PreviewMode;
   navigationTarget?: FileNavigationTarget;
   active?: boolean;
@@ -66,6 +70,7 @@ interface DocumentViewerPanelProps {
 
 export function DocumentViewerPanel({
   filePath,
+  projectPath,
   mode,
   navigationTarget,
   active = true,
@@ -79,7 +84,8 @@ export function DocumentViewerPanel({
   const fullscreenHostRef = useRef<HTMLDivElement | null>(null);
   const navigationHostRef = useRef<HTMLDivElement | null>(null);
 
-  const { result, loading, error } = useDocumentContent(filePath, active);
+  const { result, loading, refreshing, error, reload } = useDocumentContent(filePath, active);
+  const { feedback, clearFeedback, showRefreshing, showSuccess, showError } = useAutoRefreshFeedback();
   const fileName = useMemo(
     () => filePath.replace(/\\/g, '/').split('/').pop() ?? filePath,
     [filePath],
@@ -92,9 +98,29 @@ export function DocumentViewerPanel({
   const previewReady = markdownFile && !!result && !result.isBinary && !result.tooLarge && !error;
   const layoutMode: ViewerLayoutMode = isFullscreen ? 'fullscreen' : 'windowed';
 
+  useWorkspaceAutoRefresh({
+    active,
+    projectPath,
+    filePaths: [filePath],
+    watchFs: true,
+    onFsChange: async () => {
+      showRefreshing('正在同步最新内容');
+      const succeeded = await reload({ silent: true });
+      if (succeeded) {
+        showSuccess('已自动刷新');
+      } else {
+        showError('自动刷新失败');
+      }
+    },
+  });
+
   useEffect(() => {
     setInternalMode(mode === 'preview' && markdownFile ? 'preview' : 'source');
   }, [filePath, mode, markdownFile]);
+
+  useEffect(() => {
+    clearFeedback();
+  }, [clearFeedback, filePath]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -266,6 +292,7 @@ export function DocumentViewerPanel({
           </span>
         </div>
         <div className="ml-1 flex items-center gap-px">
+          <AutoRefreshFeedbackBadge feedback={feedback} testId="document-refresh-feedback" />
           {markdownFile && (
             <ToolbarButton
               active={previewMode === 'preview'}
@@ -300,6 +327,7 @@ export function DocumentViewerPanel({
         data-source-navigation-host="true"
         className="flex-1 overflow-auto"
         style={{ backgroundColor: 'var(--viewer-panel)' }}
+        data-refreshing={refreshing ? 'true' : 'false'}
       >
         {renderContent()}
       </div>

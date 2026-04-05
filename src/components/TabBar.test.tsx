@@ -57,6 +57,12 @@ describe('TabBar', () => {
                 },
               },
               {
+                kind: 'file-history',
+                id: 'file-history',
+                projectPath: 'D:/code/JavaScript/mini-term',
+                filePath: 'D:/code/JavaScript/mini-term/src/components/FileTree.tsx',
+              },
+              {
                 kind: 'commit-diff',
                 id: 'commit-diff',
                 repoPath: 'D:/code/JavaScript/mini-term',
@@ -68,6 +74,17 @@ describe('TabBar', () => {
                     status: 'modified',
                   },
                 ],
+              },
+              {
+                kind: 'agent-tasks',
+                id: 'agent-tasks',
+                filter: {
+                  scope: 'workspace',
+                  attention: 'all',
+                  target: 'all',
+                },
+                selectedTaskId: 'task-1',
+                status: 'idle',
               },
             ],
           },
@@ -95,6 +112,7 @@ describe('TabBar', () => {
     expect(screen.getByTestId('workspace-tab-detail-file-source').textContent).toBe('docs');
     expect(screen.getByTestId('workspace-tab-detail-file-text').textContent).toBe('src');
     expect(screen.getByTestId('workspace-tab-detail-worktree-diff').textContent).toBe('src/components');
+    expect(screen.getByTestId('workspace-tab-detail-file-history').textContent).toBe('src/components');
   });
 
   it('shows language badges for source and diff tabs', () => {
@@ -102,6 +120,7 @@ describe('TabBar', () => {
 
     const textTab = screen.getByTestId('workspace-tab-file-text');
     const worktreeTab = screen.getByTestId('workspace-tab-worktree-diff');
+    const historyTab = screen.getByTestId('workspace-tab-file-history');
     const commitTab = screen.getByTestId('workspace-tab-commit-diff');
 
     expect(textTab.textContent).toContain('main.ts');
@@ -110,6 +129,9 @@ describe('TabBar', () => {
 
     expect(worktreeTab.textContent).toContain('TabBar.tsx');
     expect(within(worktreeTab).getByText('WEB')).not.toBeNull();
+
+    expect(historyTab.textContent).toContain('FileTree.tsx');
+    expect(within(historyTab).getByText('WEB')).not.toBeNull();
 
     expect(commitTab.textContent).toContain('feat: improve diff tabs');
     expect(screen.getByTestId('workspace-tab-detail-commit-diff').textContent).toBe('abc1234');
@@ -150,5 +172,13 @@ describe('TabBar', () => {
     render(<TabBar projectId="project-1" onNewTab={vi.fn()} onCloseTab={vi.fn()} />);
 
     expect(within(screen.getByTestId('workspace-tab-commit-diff')).getByText('MIX')).not.toBeNull();
+  });
+
+  it('renders agent task tabs with workspace context', () => {
+    render(<TabBar projectId="project-1" onNewTab={vi.fn()} onCloseTab={vi.fn()} />);
+
+    const taskTab = screen.getByTestId('workspace-tab-agent-tasks');
+    expect(taskTab.textContent).toContain('Tasks');
+    expect(screen.getByTestId('workspace-tab-detail-agent-tasks').textContent).toBe('mini-term');
   });
 });

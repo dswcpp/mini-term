@@ -1,34 +1,43 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to Codex when working with code in this repository.
 
 ## Project Overview
 
-**mini-term** — 一个基于 Tauri v2 的桌面终端管理器，支持多项目、多标签、分屏布局，并能感知 AI 进程（Codex/Codex）状态。
+**mini-term** 是一个基于 Tauri v2 的桌面终端工作台，支持多工作区、多标签、分屏布局，并逐步演进为面向外部代理宿主的 MCP 控制面。
 
-- **前端**: React 19 + TypeScript + Tailwind CSS v4 + Vite
-- **后端**: Rust (Tauri v2)，使用 `portable-pty` 管理 PTY
-- **终端渲染**: xterm.js v6（WebGL addon，自动降级为 Canvas）
-- **状态管理**: Zustand（全局单一 store）
-- **布局分割**: Allotment（三栏主布局）+ 递归 SplitNode 树（分屏终端）
+- 前端: React 19 + TypeScript + Tailwind CSS v4 + Vite
+- 后端: Rust + Tauri v2
+- 终端渲染: xterm.js v6
+- 状态管理: Zustand
+- 分屏布局: Allotment + 递归 SplitNode
 
 ## 开发命令
 
 ```bash
-# 启动完整 Tauri 开发环境（前端 + 后端一起）
+# 启动完整 Tauri 开发环境
 npm run tauri dev
 
-# 仅启动 Vite 前端（无后端，Tauri API 不可用）
+# 仅启动前端
 npm run dev
 
-# 构建发布包
-npm run tauri build
+# 启动 MCP server
+npm run mcp
 
-# 仅构建前端
+# 前端测试
+npm test
+
+# MCP 黑盒回归
+npm run test:mcp
+
+# 构建前端
 npm run build
 
-# Rust 单元测试（在 src-tauri/ 目录下运行）
-cd src-tauri && cargo test
+# 构建桌面应用
+npm run tauri build
+
+# Rust 测试
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 ## 架构说明
@@ -36,49 +45,62 @@ cd src-tauri && cargo test
 ### Rust 后端 (`src-tauri/src/`)
 
 | 文件 | 职责 |
-|------|------|
-| `lib.rs` | Tauri app 初始化，注册所有 command 和 plugin |
-| `pty.rs` | PTY 生命周期管理（create/write/resize/kill）；16ms 批量缓冲后通过 `pty-output` 事件推送数据 |
-| `process_monitor.rs` | 后台线程每 500ms 轮询子进程名，识别 idle/running/ai-working 状态，通过 `pty-status-change` 事件通知前端 |
-| `config.rs` | `AppConfig` 持久化到 `{app_data_dir}/config.json`；提供跨平台预置 shell 列表 |
-| `fs.rs` | 目录列表（过滤 `.gitignore`）+ `notify` 文件监听，通过 `fs-change` 事件通知前端 |
-| `ai_sessions.rs` | 读取 Codex/Codex 历史会话记录 |
-
-**Tauri Commands**: `load_config`, `save_config`, `create_pty`, `write_pty`, `resize_pty`, `kill_pty`, `list_directory`, `watch_directory`, `unwatch_directory`, `get_ai_sessions`
-
-**Tauri Events（后端→前端）**: `pty-output`, `pty-exit`, `pty-status-change`, `fs-change`
+|---|---|
+| `lib.rs` | Tauri app 初始化，注册 commands、plugins、运行时监控 |
+| `pty.rs` | PTY 生命周期、输入输出跟踪、终端会话事件 |
+| `process_monitor.rs` | AI 进程识别与 PTY 状态轮询 |
+| `fs.rs` | 文件树读取、文件监听、fs-change 事件 |
+| `config.rs` | `AppConfig` 持久化与兼容迁移 |
+| `ai_sessions.rs` | Claude / Codex 历史会话读取 |
+| `agent_core/*` | workspace context、task runtime、approval、task store |
+| `mcp/*` | MCP protocol、registry、tool handlers |
+| `runtime_mcp.rs` | 运行时快照持久化，供独立 MCP 进程读取 |
 
 ### 前端 (`src/`)
 
-**数据流**：
-- `store.ts` 是唯一全局状态，用 `Map<projectId, ProjectState>` 存储每个项目的 tabs
-- 每个 Tab 的终端区域是一棵 `SplitNode` 树（leaf = 单个 pane，split = 横/纵分屏）
-- `PaneStatus` 优先级：`error > ai-working > running > idle`，从叶节点聚合到 Tab 级别
+- `store.ts` 是唯一全局状态源，持有 workspace/tab/pane/layout 等运行时状态
+- `TerminalArea.tsx` 负责 tab 与分屏终端宿主
+- `SplitLayout.tsx` 负责递归渲染 pane tree
+- `AgentInbox.tsx` 和任务面板负责 Agent task / approval UI
 
-**关键组件**：
+## PTY 数据流
 
-| 组件 | 职责 |
-|------|------|
-| `App.tsx` | 三栏 Allotment 主布局（ProjectList \| FileTree \| TerminalArea + AIHistoryPanel） |
-| `TerminalArea.tsx` | Tab 管理 + 分屏逻辑（`insertSplit`/`removePane` 操作 SplitNode 树） |
-| `SplitLayout.tsx` | 递归渲染 SplitNode 树，使用 Allotment 实现可拖拽分屏 |
-| `TerminalInstance.tsx` | xterm.js 终端实例，WebGL 渲染，ResizeObserver 自适应，文件拖拽插入路径 |
-| `TerminalConfigModal.tsx` | 终端配置 modal（shell 列表管理） |
-
-**类型系统** (`src/types.ts`): 前端所有类型定义，与后端 Rust 结构通过 `serde(rename_all = "camelCase")` 对齐。
-
-### PTY 数据流
-
+```text
+用户键入 -> xterm.onData -> invoke('write_pty') -> Rust writer
+Rust reader -> emit('pty-output') -> term.write()
+进程退出 -> emit('pty-exit') -> store 更新状态
+进程监控 -> emit('pty-status-change') -> store 更新状态
+运行时快照 -> 写入 app data -> mini-term-mcp 读取
 ```
-用户键入 → xterm.onData → invoke('write_pty') → Rust writer
-Rust reader → 16ms 批量缓冲 → emit('pty-output') → term.write()
-进程退出 → emit('pty-exit') → store.updatePaneStatusByPty('error')
-进程监控 → emit('pty-status-change') → store.updatePaneStatusByPty(status)
-```
+
+## MCP 指南
+
+- 本仓库可用的 MCP server 名称是 `mini-term-mcp`
+- 标准启动方式是 `npm run mcp`
+- 当前推荐代理优先使用这些 tools:
+  - `ping`
+  - `server_info`
+  - `list_tools`
+  - `list_ptys`
+  - `list_fs_watches`
+  - `get_recent_events`
+  - `get_ai_sessions`
+  - `get_config`
+  - `set_config_fields`
+- 这些工具属于兼容面，除非确实需要，不应作为默认优先路径:
+  - `read_file`
+  - `search_files`
+  - `write_file`
+  - `run_workspace_command`
+- 不要通过 MCP 做这些事情:
+  - 纯源码静态阅读
+  - 代理自己已经具备的通用本地 shell 操作
+  - 通用文件编辑，除非明确需要 Mini-Term 的审批/跟踪语义
+- 对外部代理来说，Mini-Term 的 MCP 价值重点是运行时观测和高层控制，而不是重复文件系统能力
 
 ## 注意事项
 
-- 文件拖拽到终端会将文件路径作为文本写入 PTY（不是上传文件）
-- `WebkitAppRegion: 'drag'` 用于自定义标题栏拖拽，菜单项需设置 `no-drag` 区域
-- 分屏关闭最后一个 pane 时会关闭整个 tab（`removePane` 返回 `null` 时触发）
-- AI 进程识别通过检测子进程名包含 `Codex` 或 `codex` 实现（`process_monitor.rs`）
+- 文件拖拽到终端只会把路径文本写入 PTY，不会上传文件
+- 自定义标题栏拖拽依赖 `WebkitAppRegion: 'drag'`，交互按钮需要 `no-drag`
+- 关闭最后一个 pane 时会关闭整个 tab
+- AI 进程识别通过检测子进程名中的 `codex` / `claude`

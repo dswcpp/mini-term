@@ -10,6 +10,7 @@ describe('MessageBoxDialog', () => {
       ...state,
       ui: {
         activeDialog: null,
+        activeNotice: null,
       },
     }));
   });

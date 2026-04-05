@@ -1,0 +1,7 @@
+interface:
+  display_name: "Mini-Term Codex"
+  short_description: "Operate Codex through Mini-Term MCP with runtime-first discipline."
+  default_prompt: "Use $mini-term-codex to work through Mini-Term MCP for runtime observation, tracked tasks, approvals, and review."
+
+policy:
+  allow_implicit_invocation: true

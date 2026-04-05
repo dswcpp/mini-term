@@ -1,11 +1,13 @@
 use ignore::gitignore::Gitignore;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, Event as NotifyEvent};
-use serde::Serialize;
+use notify::{Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+
+use crate::runtime_mcp;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +20,8 @@ pub struct FileEntry {
 
 fn sort_entries(entries: &mut [FileEntry]) {
     entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir)
+        b.is_dir
+            .cmp(&a.is_dir)
             .then_with(|| a.ignored.cmp(&b.ignored))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
@@ -33,10 +36,23 @@ fn build_gitignore(project_root: &Path) -> Option<Gitignore> {
     Some(gi)
 }
 
-const ALWAYS_IGNORE: &[&str] = &[".git", "node_modules", "target", ".next", "dist", "__pycache__", ".superpowers"];
+const ALWAYS_IGNORE: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".next",
+    "dist",
+    "__pycache__",
+    ".superpowers",
+];
 
 #[cfg(test)]
-fn should_ignore(name: &str, full_path: &Path, is_dir: bool, gitignore: &Option<Gitignore>) -> bool {
+fn should_ignore(
+    name: &str,
+    full_path: &Path,
+    is_dir: bool,
+    gitignore: &Option<Gitignore>,
+) -> bool {
     if is_dir && ALWAYS_IGNORE.contains(&name) {
         return true;
     }
@@ -121,7 +137,9 @@ pub struct FsWatcherManager {
 
 impl FsWatcherManager {
     pub fn new() -> Self {
-        Self { watchers: Arc::new(Mutex::new(HashMap::new())) }
+        Self {
+            watchers: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -140,14 +158,21 @@ pub fn watch_directory(
     let mut watcher = notify::recommended_watcher(move |res: Result<NotifyEvent, _>| {
         if let Ok(event) = res {
             for p in &event.paths {
-                let _ = app_clone.emit("fs-change", FsChangePayload {
-                    project_path: project_path_clone.clone(),
-                    path: p.to_string_lossy().to_string(),
-                    kind: format!("{:?}", event.kind),
-                });
+                let path = p.to_string_lossy().to_string();
+                let kind = format!("{:?}", event.kind);
+                let _ = app_clone.emit(
+                    "fs-change",
+                    FsChangePayload {
+                        project_path: project_path_clone.clone(),
+                        path: path.clone(),
+                        kind: kind.clone(),
+                    },
+                );
+                let _ = runtime_mcp::record_fs_event(&project_path_clone, &path, &kind);
             }
         }
-    }).map_err(|e| e.to_string())?;
+    })
+    .map_err(|e| e.to_string())?;
 
     let recursive_mode = if recursive.unwrap_or(false) {
         RecursiveMode::Recursive
@@ -155,14 +180,21 @@ pub fn watch_directory(
         RecursiveMode::NonRecursive
     };
 
-    watcher.watch(&watch_path, recursive_mode).map_err(|e| e.to_string())?;
+    watcher
+        .watch(&watch_path, recursive_mode)
+        .map_err(|e| e.to_string())?;
 
     let mut watchers = state.watchers.lock().unwrap();
     watchers.insert(path, watcher);
+    let _ = runtime_mcp::register_fs_watch(
+        &watch_path.to_string_lossy(),
+        &project_path,
+        recursive.unwrap_or(false),
+    );
     Ok(())
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileContentResult {
     pub content: String,
@@ -180,12 +212,24 @@ pub fn read_file_content(path: String) -> Result<FileContentResult, String> {
     }
     let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
     if metadata.len() > MAX_FILE_VIEW_SIZE {
-        return Ok(FileContentResult { content: String::new(), is_binary: false, too_large: true });
+        return Ok(FileContentResult {
+            content: String::new(),
+            is_binary: false,
+            too_large: true,
+        });
     }
     let bytes = fs::read(p).map_err(|e| e.to_string())?;
     match String::from_utf8(bytes) {
-        Ok(s) => Ok(FileContentResult { content: s, is_binary: false, too_large: false }),
-        Err(_) => Ok(FileContentResult { content: String::new(), is_binary: true, too_large: false }),
+        Ok(s) => Ok(FileContentResult {
+            content: s,
+            is_binary: false,
+            too_large: false,
+        }),
+        Err(_) => Ok(FileContentResult {
+            content: String::new(),
+            is_binary: true,
+            too_large: false,
+        }),
     }
 }
 
@@ -218,9 +262,13 @@ pub fn write_binary_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn unwatch_directory(state: tauri::State<'_, FsWatcherManager>, path: String) -> Result<(), String> {
+pub fn unwatch_directory(
+    state: tauri::State<'_, FsWatcherManager>,
+    path: String,
+) -> Result<(), String> {
     let mut watchers = state.watchers.lock().unwrap();
     watchers.remove(&path);
+    let _ = runtime_mcp::unregister_fs_watch(&path);
     Ok(())
 }
 
@@ -278,7 +326,10 @@ mod tests {
 
         let entries = complete_path_entries(root.to_string_lossy().to_string()).unwrap();
 
-        assert_eq!(entries.first().map(|entry| entry.name.as_str()), Some("src"));
+        assert_eq!(
+            entries.first().map(|entry| entry.name.as_str()),
+            Some("src")
+        );
         assert_eq!(entries.first().map(|entry| entry.is_dir), Some(true));
 
         let _ = fs::remove_dir_all(root);

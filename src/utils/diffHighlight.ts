@@ -12,11 +12,14 @@ export interface DiffRenderRow {
   right?: DiffLine;
   leftSegments: DiffTextSegment[];
   rightSegments: DiffTextSegment[];
+  leftLineIndex?: number;
+  rightLineIndex?: number;
 }
 
 export interface DiffInlineEntry {
   line: DiffLine;
   segments: DiffTextSegment[];
+  lineIndex: number;
 }
 
 function createSegment(value: string, kind: DiffSegmentKind): DiffTextSegment {
@@ -156,21 +159,29 @@ export function buildSideBySideRows(hunks: GitDiffResult['hunks']) {
           right: line,
           leftSegments: createFullSegments(line.content, 'unchanged'),
           rightSegments: createFullSegments(line.content, 'unchanged'),
+          leftLineIndex: index,
+          rightLineIndex: index,
         });
         index += 1;
         continue;
       }
 
       if (line.kind === 'delete') {
-        const deletes: DiffLine[] = [];
+        const deletes: Array<{ line: DiffLine; lineIndex: number }> = [];
         while (index < hunk.lines.length && hunk.lines[index].kind === 'delete') {
-          deletes.push(hunk.lines[index]);
+          deletes.push({
+            line: hunk.lines[index],
+            lineIndex: index,
+          });
           index += 1;
         }
 
-        const adds: DiffLine[] = [];
+        const adds: Array<{ line: DiffLine; lineIndex: number }> = [];
         while (index < hunk.lines.length && hunk.lines[index].kind === 'add') {
-          adds.push(hunk.lines[index]);
+          adds.push({
+            line: hunk.lines[index],
+            lineIndex: index,
+          });
           index += 1;
         }
 
@@ -178,12 +189,14 @@ export function buildSideBySideRows(hunks: GitDiffResult['hunks']) {
         for (let rowIndex = 0; rowIndex < maxLen; rowIndex += 1) {
           const left = deletes[rowIndex];
           const right = adds[rowIndex];
-          const { leftSegments, rightSegments } = buildPairedDiffSegments(left?.content, right?.content);
+          const { leftSegments, rightSegments } = buildPairedDiffSegments(left?.line.content, right?.line.content);
           rows.push({
-            left,
-            right,
+            left: left?.line,
+            right: right?.line,
             leftSegments,
             rightSegments,
+            leftLineIndex: left?.lineIndex,
+            rightLineIndex: right?.lineIndex,
           });
         }
         continue;
@@ -194,6 +207,7 @@ export function buildSideBySideRows(hunks: GitDiffResult['hunks']) {
         right: line,
         leftSegments: [],
         rightSegments: createFullSegments(line.content, 'added'),
+        rightLineIndex: index,
       });
       index += 1;
     }
@@ -215,32 +229,41 @@ export function buildInlineEntries(hunks: GitDiffResult['hunks']) {
         entries.push({
           line,
           segments: createFullSegments(line.content, 'unchanged'),
+          lineIndex: index,
         });
         index += 1;
         continue;
       }
 
       if (line.kind === 'delete') {
-        const deletes: DiffLine[] = [];
+        const deletes: Array<{ line: DiffLine; lineIndex: number }> = [];
         while (index < hunk.lines.length && hunk.lines[index].kind === 'delete') {
-          deletes.push(hunk.lines[index]);
+          deletes.push({
+            line: hunk.lines[index],
+            lineIndex: index,
+          });
           index += 1;
         }
 
-        const adds: DiffLine[] = [];
+        const adds: Array<{ line: DiffLine; lineIndex: number }> = [];
         while (index < hunk.lines.length && hunk.lines[index].kind === 'add') {
-          adds.push(hunk.lines[index]);
+          adds.push({
+            line: hunk.lines[index],
+            lineIndex: index,
+          });
           index += 1;
         }
 
         const maxLen = Math.max(deletes.length, adds.length);
-        const deleteSegments: DiffTextSegment[][] = deletes.map((item) => createFullSegments(item.content, 'removed'));
-        const addSegments: DiffTextSegment[][] = adds.map((item) => createFullSegments(item.content, 'added'));
+        const deleteSegments: DiffTextSegment[][] = deletes.map((item) =>
+          createFullSegments(item.line.content, 'removed'),
+        );
+        const addSegments: DiffTextSegment[][] = adds.map((item) => createFullSegments(item.line.content, 'added'));
 
         for (let rowIndex = 0; rowIndex < maxLen; rowIndex += 1) {
           const { leftSegments, rightSegments } = buildPairedDiffSegments(
-            deletes[rowIndex]?.content,
-            adds[rowIndex]?.content,
+            deletes[rowIndex]?.line.content,
+            adds[rowIndex]?.line.content,
           );
 
           if (deletes[rowIndex]) {
@@ -253,15 +276,17 @@ export function buildInlineEntries(hunks: GitDiffResult['hunks']) {
 
         deletes.forEach((item, rowIndex) => {
           entries.push({
-            line: item,
+            line: item.line,
             segments: deleteSegments[rowIndex],
+            lineIndex: item.lineIndex,
           });
         });
 
         adds.forEach((item, rowIndex) => {
           entries.push({
-            line: item,
+            line: item.line,
             segments: addSegments[rowIndex],
+            lineIndex: item.lineIndex,
           });
         });
         continue;
@@ -270,6 +295,7 @@ export function buildInlineEntries(hunks: GitDiffResult['hunks']) {
       entries.push({
         line,
         segments: createFullSegments(line.content, 'added'),
+        lineIndex: index,
       });
       index += 1;
     }

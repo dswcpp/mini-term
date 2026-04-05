@@ -20,6 +20,8 @@ import {
   restoreWorkspaceFromRecent,
 } from './utils/workspace';
 import type {
+  AgentTaskPanelFilter,
+  AgentTaskPanelTab,
   AppConfig,
   CommandBlock,
   CommitFileInfo,
@@ -43,6 +45,7 @@ import type {
   TerminalUiState,
   TerminalViewState,
   UiDialog,
+  UiNoticeTone,
   WorkspaceConfig,
   WorkspaceExplorerRuntime,
   WorkspaceState,
@@ -130,6 +133,10 @@ function createExplorerRuntimeState(): WorkspaceExplorerRuntime {
 
 function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
   return tab.kind === 'terminal';
+}
+
+function isAgentTaskPanelTab(tab: WorkspaceTab): tab is AgentTaskPanelTab {
+  return tab.kind === 'agent-tasks';
 }
 
 function normalizeFileViewerMode(filePath: string, mode?: PreviewMode): PreviewMode {
@@ -931,13 +938,35 @@ interface AppStore {
 
   ui: {
     activeDialog: UiDialog | null;
+    activeNotice: {
+      id: string;
+      message: string;
+      tone: UiNoticeTone;
+      durationMs: number;
+      createdAt: number;
+    } | null;
   };
   terminalUi: TerminalUiState;
   openSettings: (page?: SettingsPage) => void;
+  showNotice: (payload: { message: string; tone?: UiNoticeTone; durationMs?: number }) => void;
+  clearNotice: (noticeId?: string) => void;
   openRunProfileInspector: (paneId: string) => void;
   closeRunProfileInspector: () => void;
   openFileViewer: (workspaceId: string, filePath: string, options?: FileViewerOpenOptions) => void;
   setFileViewerTabMode: (workspaceId: string, tabId: string, mode: PreviewMode) => void;
+  openAgentTaskPanel: (
+    workspaceId: string,
+    options?: {
+      selectedTaskId?: string;
+      scope?: AgentTaskPanelFilter['scope'];
+    },
+  ) => void;
+  setAgentTaskPanelSelection: (workspaceId: string, tabId: string, taskId?: string) => void;
+  setAgentTaskPanelFilter: (
+    workspaceId: string,
+    tabId: string,
+    filterPatch: Partial<AgentTaskPanelFilter>,
+  ) => void;
   openInteractionDialog: (payload: {
     dialogId: string;
     mode: 'alert' | 'confirm' | 'prompt';
@@ -952,6 +981,7 @@ interface AppStore {
     readOnly?: boolean;
   }) => void;
   openWorktreeDiff: (workspaceId: string, projectPath: string, status: GitFileStatus) => void;
+  openFileHistory: (workspaceId: string, projectPath: string, filePath: string) => void;
   openCommitDiff: (payload: {
     workspaceId?: string;
     projectId?: string;
@@ -1099,6 +1129,11 @@ export const selectWorkspaceGitDirtyToken =
   (state: AppStore): number =>
     (rootPath ? getWorkspaceExplorerRuntimeMap(state).get(normalizeWorkspacePath(rootPath))?.gitDirtyToken : undefined) ?? 0;
 
+export const selectWorkspaceExplorerRuntime =
+  (rootPath: string | undefined) =>
+  (state: AppStore): WorkspaceExplorerRuntime | undefined =>
+    rootPath ? getWorkspaceExplorerRuntimeMap(state).get(normalizeWorkspacePath(rootPath)) : undefined;
+
 const defaultConfig: AppConfig = normalizeWorkspaceStoreConfig({
   workspaces: [],
   projects: [],
@@ -1133,6 +1168,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   projectStates: new Map(),
   ui: {
     activeDialog: null,
+    activeNotice: null,
   },
   terminalUi: createDefaultTerminalUi(),
 
@@ -2356,13 +2392,45 @@ export const useAppStore = create<AppStore>((set, get) => ({
   markProjectGitDirty: (rootPath) => get().markWorkspaceGitDirty(rootPath),
 
   openSettings: (page = 'terminal') =>
-    set({
+    set((state) => ({
       ui: {
+        ...state.ui,
         activeDialog: {
           kind: 'settings',
           page,
         },
       },
+    })),
+
+  showNotice: (payload) =>
+    set((state) => ({
+      ui: {
+        ...state.ui,
+        activeNotice: {
+          id: genId(),
+          message: payload.message,
+          tone: payload.tone ?? 'info',
+          durationMs: payload.durationMs ?? 1500,
+          createdAt: Date.now(),
+        },
+      },
+    })),
+
+  clearNotice: (noticeId) =>
+    set((state) => {
+      const activeNotice = state.ui.activeNotice;
+      if (!activeNotice) {
+        return state;
+      }
+      if (noticeId && activeNotice.id !== noticeId) {
+        return state;
+      }
+      return {
+        ui: {
+          ...state.ui,
+          activeNotice: null,
+        },
+      };
     }),
 
   openRunProfileInspector: (paneId) =>
@@ -2469,15 +2537,138 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
     }),
 
+  openAgentTaskPanel: (workspaceId, options) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState) {
+        return state;
+      }
+
+      const workspaceStates = new Map(sourceWorkspaceStates);
+      const existing = workspaceState.tabs.find((tab) => isAgentTaskPanelTab(tab));
+      const nextScope = options?.scope ?? 'workspace';
+
+      if (existing && isAgentTaskPanelTab(existing)) {
+        workspaceStates.set(workspaceId, {
+          ...workspaceState,
+          activeTabId: existing.id,
+          tabs: workspaceState.tabs.map((tab) =>
+            tab.id === existing.id && isAgentTaskPanelTab(tab)
+              ? {
+                  ...tab,
+                  selectedTaskId: options?.selectedTaskId ?? tab.selectedTaskId,
+                  filter: {
+                    ...tab.filter,
+                    scope: nextScope,
+                  },
+                }
+              : tab,
+          ),
+        });
+      } else {
+        const tab: AgentTaskPanelTab = {
+          kind: 'agent-tasks',
+          id: genId(),
+          selectedTaskId: options?.selectedTaskId,
+          filter: {
+            scope: nextScope,
+            attention: 'all',
+            target: 'all',
+          },
+          status: 'idle',
+        };
+        workspaceStates.set(workspaceId, {
+          ...workspaceState,
+          tabs: [...workspaceState.tabs, tab],
+          activeTabId: tab.id,
+        });
+      }
+
+      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+    }),
+
+  setAgentTaskPanelSelection: (workspaceId, tabId, taskId) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState) {
+        return state;
+      }
+
+      let changed = false;
+      const tabs = workspaceState.tabs.map((tab) => {
+        if (tab.id !== tabId || !isAgentTaskPanelTab(tab) || tab.selectedTaskId === taskId) {
+          return tab;
+        }
+        changed = true;
+        return {
+          ...tab,
+          selectedTaskId: taskId,
+        };
+      });
+
+      if (!changed) {
+        return state;
+      }
+
+      const workspaceStates = new Map(sourceWorkspaceStates);
+      workspaceStates.set(workspaceId, {
+        ...workspaceState,
+        tabs,
+      });
+      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+    }),
+
+  setAgentTaskPanelFilter: (workspaceId, tabId, filterPatch) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState) {
+        return state;
+      }
+
+      let changed = false;
+      const tabs = workspaceState.tabs.map((tab) => {
+        if (tab.id !== tabId || !isAgentTaskPanelTab(tab)) {
+          return tab;
+        }
+        const nextFilter = {
+          ...tab.filter,
+          ...filterPatch,
+        };
+        if (JSON.stringify(nextFilter) === JSON.stringify(tab.filter)) {
+          return tab;
+        }
+        changed = true;
+        return {
+          ...tab,
+          filter: nextFilter,
+        };
+      });
+
+      if (!changed) {
+        return state;
+      }
+
+      const workspaceStates = new Map(sourceWorkspaceStates);
+      workspaceStates.set(workspaceId, {
+        ...workspaceState,
+        tabs,
+      });
+      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+    }),
+
   openInteractionDialog: (payload) =>
-    set({
+    set((state) => ({
       ui: {
+        ...state.ui,
         activeDialog: {
           kind: 'interaction-dialog',
           ...payload,
         },
       },
-    }),
+    })),
 
   openWorktreeDiff: (workspaceId, projectPath, status) =>
     set((state) => {
@@ -2505,6 +2696,41 @@ export const useAppStore = create<AppStore>((set, get) => ({
           id: genId(),
           projectPath,
           status,
+        };
+        workspaceStates.set(workspaceId, {
+          ...workspaceState,
+          tabs: [...workspaceState.tabs, tab],
+          activeTabId: tab.id,
+        });
+      }
+
+      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+    }),
+
+  openFileHistory: (workspaceId, projectPath, filePath) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState) {
+        return state;
+      }
+
+      const existing = workspaceState.tabs.find(
+        (tab) => tab.kind === 'file-history' && tab.projectPath === projectPath && tab.filePath === filePath,
+      );
+      const workspaceStates = new Map(sourceWorkspaceStates);
+
+      if (existing) {
+        workspaceStates.set(workspaceId, {
+          ...workspaceState,
+          activeTabId: existing.id,
+        });
+      } else {
+        const tab: WorkspaceTab = {
+          kind: 'file-history',
+          id: genId(),
+          projectPath,
+          filePath,
         };
         workspaceStates.set(workspaceId, {
           ...workspaceState,
@@ -2562,11 +2788,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }),
 
   closeDialog: () =>
-    set({
+    set((state) => ({
       ui: {
+        ...state.ui,
         activeDialog: null,
       },
-    }),
+    })),
 }));
 
 function normalizeStoreStatePatch(patch: Partial<AppStore> | AppStore, previousState: AppStore) {
@@ -2643,6 +2870,7 @@ useAppStore.setState = ((partial, replace) => {
 export const selectProjectState = selectWorkspaceState;
 export const selectProjects = selectWorkspaces;
 export const selectProjectGitDirtyToken = selectWorkspaceGitDirtyToken;
+export const selectProjectExplorerRuntime = selectWorkspaceExplorerRuntime;
 export const selectProjectPath =
   (workspaceId: string) =>
   (state: AppStore): string | undefined =>

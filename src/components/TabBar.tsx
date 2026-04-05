@@ -70,11 +70,18 @@ function getPathDetail(path: string) {
   return detail && detail !== '.' ? detail : undefined;
 }
 
-function getTabText(tab: WorkspaceTab, rootPaths: string[]) {
+function getTabText(tab: WorkspaceTab, rootPaths: string[], workspaceName?: string) {
   if (tab.kind === 'terminal') {
     return {
       primary: tab.customTitle ?? (tab.splitLayout.type === 'leaf' ? tab.splitLayout.pane.shellName : 'split'),
       secondary: undefined,
+    };
+  }
+
+  if (tab.kind === 'agent-tasks') {
+    return {
+      primary: 'Tasks',
+      secondary: tab.filter.scope === 'all' ? 'All Workspaces' : workspaceName ?? 'Current Workspace',
     };
   }
 
@@ -88,6 +95,14 @@ function getTabText(tab: WorkspaceTab, rootPaths: string[]) {
 
   if (tab.kind === 'worktree-diff') {
     const relativePath = normalizePath(tab.status.path);
+    return {
+      primary: getFileName(relativePath),
+      secondary: getPathDetail(relativePath),
+    };
+  }
+
+  if (tab.kind === 'file-history') {
+    const relativePath = getRelativePath(tab.filePath, rootPaths) ?? normalizePath(tab.filePath);
     return {
       primary: getFileName(relativePath),
       secondary: getPathDetail(relativePath),
@@ -142,6 +157,19 @@ function CommitIcon() {
   );
 }
 
+function TasksIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.7" aria-hidden="true">
+      <path d="M9 6.5h10" />
+      <path d="M9 12h10" />
+      <path d="M9 17.5h10" />
+      <path d="M5.5 6.5h.01" />
+      <path d="M5.5 12h.01" />
+      <path d="M5.5 17.5h.01" />
+    </svg>
+  );
+}
+
 function CloseTabIcon() {
   return (
     <svg viewBox="0 0 16 16" className="h-3 w-3 fill-none stroke-current" strokeWidth="1.8" aria-hidden="true">
@@ -184,6 +212,17 @@ function CommitDiffLeading() {
   );
 }
 
+function FileHistoryLeading() {
+  return (
+    <span className="text-[var(--viewer-accent)]" aria-hidden="true">
+      <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.7">
+        <path d="M12 6v6l3 2" />
+        <circle cx="12" cy="12" r="7.5" />
+      </svg>
+    </span>
+  );
+}
+
 function getLanguageBadgeMeta(tab: Exclude<WorkspaceTab, { kind: 'terminal' }>): {
   label: string;
   title: string;
@@ -212,6 +251,23 @@ function getLanguageBadgeMeta(tab: Exclude<WorkspaceTab, { kind: 'terminal' }>):
       label: language.badge,
       title: `${language.displayName} Diff`,
       family: language.family,
+    };
+  }
+
+  if (tab.kind === 'file-history') {
+    const language = resolveDocumentLanguage(tab.filePath);
+    return {
+      label: language.badge,
+      title: `${language.displayName} History`,
+      family: language.family,
+    };
+  }
+
+  if (tab.kind === 'agent-tasks') {
+    return {
+      label: 'TASKS',
+      title: 'Agent Tasks',
+      family: 'generic',
     };
   }
 
@@ -262,6 +318,7 @@ interface TabBarItemProps {
   tab: WorkspaceTab;
   isActive: boolean;
   rootPaths: string[];
+  workspaceName?: string;
   themePreset: ThemePresetId;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
@@ -271,14 +328,15 @@ const TabBarItem = memo(function TabBarItem({
   tab,
   isActive,
   rootPaths,
+  workspaceName,
   themePreset,
   onSelectTab,
   onCloseTab,
 }: TabBarItemProps) {
   const draggable = tab.kind === 'terminal';
   const terminalStatus = useAppStore(selectTabRuntimeStatus(tab.id));
-  const text = getTabText(tab, rootPaths);
-  const badgeMeta = tab.kind === 'terminal' ? null : getLanguageBadgeMeta(tab);
+  const text = getTabText(tab, rootPaths, workspaceName);
+  const badgeMeta = tab.kind === 'terminal' || tab.kind === 'agent-tasks' ? null : getLanguageBadgeMeta(tab);
 
   return (
     <div
@@ -306,7 +364,13 @@ const TabBarItem = memo(function TabBarItem({
       {tab.kind === 'terminal' && <StatusDot status={terminalStatus} />}
       {tab.kind === 'file-viewer' && <FileTabLeading tab={tab} />}
       {tab.kind === 'worktree-diff' && <WorktreeDiffLeading />}
+      {tab.kind === 'file-history' && <FileHistoryLeading />}
       {tab.kind === 'commit-diff' && <CommitDiffLeading />}
+      {tab.kind === 'agent-tasks' && (
+        <span className="text-[var(--color-ai)]" aria-hidden="true">
+          <TasksIcon />
+        </span>
+      )}
       <div className="flex min-w-0 max-w-[220px] items-center gap-1.5">
         <span className="truncate font-medium">{text.primary}</span>
         {text.secondary && (
@@ -366,6 +430,7 @@ export function TabBar({ workspaceId, projectId, onNewTab, onCloseTab }: Props) 
           tab={tab}
           isActive={tab.id === workspaceState.activeTabId}
           rootPaths={rootPaths}
+          workspaceName={workspace?.name}
           themePreset={themePreset}
           onSelectTab={handleSelectTab}
           onCloseTab={onCloseTab}

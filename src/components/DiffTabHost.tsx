@@ -1,6 +1,7 @@
 import { CommitDiffModal } from './CommitDiffModal';
 import { DiffModal } from './DiffModal';
-import type { CommitDiffTab, WorktreeDiffTab } from '../types';
+import { FileHistoryTabHost } from './FileHistoryTabHost';
+import type { CommitDiffTab, FileHistoryTab, WorktreeDiffTab } from '../types';
 
 interface WorktreeDiffTabHostProps {
   tab: WorktreeDiffTab;
@@ -38,4 +39,14 @@ export function CommitDiffTabHost({ tab, isActive, onClose }: CommitDiffTabHostP
       files={tab.files}
     />
   );
+}
+
+interface FileHistoryViewTabHostProps {
+  tab: FileHistoryTab;
+  isActive: boolean;
+  onClose: () => void;
+}
+
+export function FileHistoryViewTabHost({ tab, isActive, onClose }: FileHistoryViewTabHostProps) {
+  return <FileHistoryTabHost tab={tab} isActive={isActive} onClose={onClose} />;
 }
