@@ -17,6 +17,7 @@ import { EyeIcon } from './documentViewer/controls';
 import { resolveViewerSkin } from './documentViewer/viewerSkin';
 import { StatusDot } from './StatusDot';
 import type { ThemePresetId, WorkspaceTab } from '../types';
+import { isMermaidPreviewFilePath, isSvgPreviewFilePath } from '../utils/documentPreview';
 
 type FileViewerTab = Extract<WorkspaceTab, { kind: 'file-viewer' }>;
 
@@ -181,7 +182,9 @@ function CloseTabIcon() {
 
 function FileTabLeading({ tab }: { tab: FileViewerTab }) {
   const markdownFile = isMarkdownFilePath(tab.filePath);
-  if (markdownFile && tab.mode === 'preview') {
+  const mermaidFile = isMermaidPreviewFilePath(tab.filePath);
+  const svgFile = isSvgPreviewFilePath(tab.filePath);
+  if ((markdownFile || mermaidFile || svgFile) && tab.mode === 'preview') {
     return (
       <span className="inline-flex h-3.5 w-3.5 items-center justify-center text-[var(--accent)]" aria-hidden="true">
         <EyeIcon />
@@ -229,11 +232,18 @@ function getLanguageBadgeMeta(tab: Exclude<WorkspaceTab, { kind: 'terminal' }>):
   family: DocumentLanguageFamily;
 } {
   if (tab.kind === 'file-viewer') {
-    if (isMarkdownFilePath(tab.filePath) && tab.mode === 'preview') {
+    if (
+      (isMarkdownFilePath(tab.filePath) || isMermaidPreviewFilePath(tab.filePath) || isSvgPreviewFilePath(tab.filePath))
+      && tab.mode === 'preview'
+    ) {
       return {
         label: 'PREVIEW',
-        title: 'Markdown Preview',
-        family: 'docs',
+        title: isSvgPreviewFilePath(tab.filePath)
+          ? 'SVG Preview'
+          : isMermaidPreviewFilePath(tab.filePath)
+            ? 'Mermaid Preview'
+            : 'Markdown Preview',
+        family: isSvgPreviewFilePath(tab.filePath) ? 'image' : 'docs',
       };
     }
 

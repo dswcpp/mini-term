@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { FileContentResult } from '../../types';
+import type { DocumentPreviewResult } from '../../types';
 
 interface DocumentContentState {
-  result: FileContentResult | null;
+  result: DocumentPreviewResult | null;
   loading: boolean;
   refreshing: boolean;
   error: string;
+  version: number;
 }
 
 const INITIAL_STATE: DocumentContentState = {
@@ -14,6 +15,7 @@ const INITIAL_STATE: DocumentContentState = {
   loading: false,
   refreshing: false,
   error: '',
+  version: 0,
 };
 
 export function useDocumentContent(filePath: string, enabled: boolean) {
@@ -29,20 +31,22 @@ export function useDocumentContent(filePath: string, enabled: boolean) {
       loading: !silent,
       refreshing: silent,
       error: '',
+      version: current.version,
     }));
 
     try {
-      const result = await invoke<FileContentResult>('read_file_content', { path: filePath });
+      const result = await invoke<DocumentPreviewResult>('read_document_preview', { path: filePath });
       if (requestVersionRef.current !== requestVersion) {
         return false;
       }
 
-      setState({
+      setState((current) => ({
         result,
         loading: false,
         refreshing: false,
         error: '',
-      });
+        version: current.version + 1,
+      }));
       return true;
     } catch (reason) {
       if (requestVersionRef.current !== requestVersion) {
@@ -54,6 +58,7 @@ export function useDocumentContent(filePath: string, enabled: boolean) {
         loading: false,
         refreshing: false,
         error: String(reason),
+        version: current.version,
       }));
       return false;
     }

@@ -4,6 +4,7 @@ use crate::agent_core::task_runtime::{mark_approval_executed, request_or_validat
 use crate::agent_core::workspace_context::validate_task_working_directory;
 use crate::config::{load_config_from_path, ShellConfig};
 use crate::host_control::call_host_control;
+use crate::mcp::tools::action_support::approval_pending_value;
 use serde_json::{json, Value};
 
 fn resolve_shell(
@@ -26,13 +27,6 @@ fn resolve_shell(
             .ok_or_else(|| "no shells are configured".to_string())?,
     };
     Ok(selected)
-}
-
-fn approval_pending_value(result: crate::agent_core::models::PendingApprovalResult) -> Value {
-    json!({
-        "approvalRequired": result.approval_required,
-        "request": result.request,
-    })
 }
 
 pub fn get_pty_detail_tool(args: Value) -> Result<Value, String> {
@@ -170,7 +164,7 @@ pub fn kill_pty_tool(args: Value) -> Result<Value, String> {
         format!("PTY: {pty_id}"),
     ) {
         Ok(approval) => approval,
-        Err(pending) => return Ok(approval_pending_value(pending)),
+        Err(pending) => return Ok(approval_pending_value("kill_pty", pending)),
     };
 
     let result = call_host_control("kill_pty", json!({ "ptyId": pty_id }))?;

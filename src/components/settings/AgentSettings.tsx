@@ -493,6 +493,8 @@ export function AgentSettings({ mode = 'agent' }: AgentSettingsProps) {
     }
   }, [embeddedToolArgs, selectedEmbeddedTool]);
 
+  const selectedEmbeddedToolDefinition = embeddedTools.find((tool) => tool.name === selectedEmbeddedTool);
+
   const handleTaskInjectionPatch = useCallback(
     async (taskInjection: AgentPoliciesConfig['taskInjection']) => {
       try {
@@ -1344,7 +1346,18 @@ export function AgentSettings({ mode = 'agent' }: AgentSettingsProps) {
                   </div>
 
                   <div className="rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm text-[var(--text-secondary)]">
-                    {embeddedTools.find((tool) => tool.name === selectedEmbeddedTool)?.description ?? '当前未选择 tool'}
+                    <div>{selectedEmbeddedToolDefinition?.description ?? '当前未选择 tool'}</div>
+                    {selectedEmbeddedToolDefinition ? (
+                      <div className="mt-2 text-xs text-[var(--text-muted)]">
+                        {[
+                          `authority=${selectedEmbeddedToolDefinition.authorityScope ?? 'n/a'}`,
+                          `kind=${selectedEmbeddedToolDefinition.executionKind ?? 'n/a'}`,
+                          `risk=${selectedEmbeddedToolDefinition.riskLevel ?? 'n/a'}`,
+                          `degrade=${selectedEmbeddedToolDefinition.degradationMode ?? 'n/a'}`,
+                          `idempotency=${selectedEmbeddedToolDefinition.idempotency ?? 'n/a'}`,
+                        ].join(' | ')}
+                      </div>
+                    ) : null}
                   </div>
 
                   <label className="block space-y-2">
@@ -1359,7 +1372,12 @@ export function AgentSettings({ mode = 'agent' }: AgentSettingsProps) {
 
                   <ReadonlyBlock
                     label="Tool 列表摘要"
-                    value={embeddedTools.map((tool) => `${tool.name} | ${tool.group} | ${tool.stability}`).join('\n')}
+                    value={embeddedTools
+                      .map(
+                        (tool) =>
+                          `${tool.name} | ${tool.group} | ${tool.authorityScope ?? 'n/a'} | ${tool.executionKind ?? 'n/a'} | ${tool.riskLevel ?? 'n/a'}`,
+                      )
+                      .join('\n')}
                     rows={8}
                   />
 

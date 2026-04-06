@@ -55,6 +55,11 @@ export default defineConfig(async () => ({
     watch: { ignored: ["**/src-tauri/**"] },
   },
   build: {
+    // Main-path bundles are now well below 500 kB. The remaining larger chunks
+    // are feature-isolated lazy bundles such as Mermaid/Shiki diagram or
+    // language packs, so we raise the warning threshold to avoid noisy false
+    // positives during normal builds.
+    chunkSizeWarningLimit: 700,
     rollupOptions: {
       output: {
         manualChunks: getManualChunk,

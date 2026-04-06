@@ -3,23 +3,17 @@ use crate::agent_core::{
     models::{ApprovalDecision, ApprovalRiskLevel, StartTaskInput, TaskStatusDetail, TaskSummary},
     task_runtime::{
         get_task_status, list_attention_tasks, mark_approval_executed,
-        request_or_validate_approval, request_task_close, resume_session, send_task_input,
-        start_task,
+        request_or_validate_approval, request_task_close, resume_session, save_task_plan,
+        send_task_input, start_task,
     },
     workspace_context::{resolve_workspace_path_for_write, validate_workspace_command_target},
 };
 use crate::fs::write_text_file;
+use crate::mcp::tools::action_support::approval_pending_value;
 use serde_json::{json, Value};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
-
-fn approval_pending_value(result: crate::agent_core::models::PendingApprovalResult) -> Value {
-    json!({
-        "approvalRequired": result.approval_required,
-        "request": result.request,
-    })
-}
 
 fn parse_approval_decision(value: &str) -> Option<ApprovalDecision> {
     match value {
@@ -59,7 +53,9 @@ fn is_transient_task_startup_failure(detail: &TaskStatusDetail) -> bool {
         && (detail
             .recent_output_excerpt
             .contains("before producing terminal output")
-            || detail.recent_output_excerpt.contains("Task startup failed:")
+            || detail
+                .recent_output_excerpt
+                .contains("Task startup failed:")
             || detail.recent_output_excerpt.contains("0xC0000142")
             || detail.recent_output_excerpt.contains("-1073741502"))
 }
@@ -141,6 +137,22 @@ pub fn get_task_status_tool(args: Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("taskId is required")?;
     serde_json::to_value(get_task_status(task_id)?).map_err(|err| err.to_string())
+}
+
+pub fn save_task_plan_tool(args: Value) -> Result<Value, String> {
+    let object = args.as_object().cloned().unwrap_or_default();
+    let task_id = object
+        .get("taskId")
+        .and_then(Value::as_str)
+        .ok_or("taskId is required")?;
+    let markdown = object
+        .get("markdown")
+        .and_then(Value::as_str)
+        .ok_or("markdown is required")?;
+    let title = object.get("title").and_then(Value::as_str);
+    let file_name = object.get("fileName").and_then(Value::as_str);
+    serde_json::to_value(save_task_plan(task_id, markdown, title, file_name)?)
+        .map_err(|err| err.to_string())
 }
 
 pub fn list_attention_tasks_tool(_: Value) -> Result<Value, String> {
@@ -247,7 +259,7 @@ pub fn write_file_tool(args: Value) -> Result<Value, String> {
         ),
     ) {
         Ok(approval) => approval,
-        Err(pending) => return Ok(approval_pending_value(pending)),
+        Err(pending) => return Ok(approval_pending_value("write_file", pending)),
     };
 
     write_text_file(resolved_path.requested_path.clone(), content.to_string())?;
@@ -273,6 +285,7 @@ pub fn close_task_tool(args: Value) -> Result<Value, String> {
             .map_err(|err| err.to_string())
     } else {
         Ok(approval_pending_value(
+            "close_task",
             crate::agent_core::models::PendingApprovalResult {
                 approval_required: result.approval_required,
                 request: result
@@ -307,7 +320,7 @@ pub fn run_workspace_command_tool(args: Value) -> Result<Value, String> {
         ),
     ) {
         Ok(approval) => approval,
-        Err(pending) => return Ok(approval_pending_value(pending)),
+        Err(pending) => return Ok(approval_pending_value("run_workspace_command", pending)),
     };
 
     let result = run_workspace_command(&validated.workspace_path, &validated.command)?;
@@ -441,17 +454,19 @@ done
                 context_preset: TaskContextPreset::Light,
                 changed_files: Vec::new(),
                 prompt_preview: "prompt".into(),
-                last_output_excerpt: "Task process exited with code -1073741502 before producing terminal output".into(),
+                last_output_excerpt:
+                    "Task process exited with code -1073741502 before producing terminal output"
+                        .into(),
                 injection_profile_id: None,
                 injection_preset: None,
                 policy_summary: None,
                 termination_cause: None,
             },
             recent_output_excerpt:
-                "Task process exited with code -1073741502 before producing terminal output"
-                    .into(),
+                "Task process exited with code -1073741502 before producing terminal output".into(),
             diff_summary: Vec::new(),
             log_path: "D:/code/mini-term/task.log".into(),
+            artifacts: Vec::new(),
         };
         assert!(is_transient_task_startup_failure(&detail));
     }
@@ -509,6 +524,7 @@ done
             recent_output_excerpt: "output".into(),
             diff_summary: Vec::new(),
             log_path: "D:/logs/sample.log".into(),
+            artifacts: Vec::new(),
         }
     }
 
@@ -569,6 +585,33 @@ done
 
         let value = list_attention_tasks_tool(json!({})).unwrap();
         assert_eq!(value.as_array().map(|items| items.len()), Some(1));
+    }
+
+    #[test]
+    fn save_task_plan_requires_task_id_and_markdown() {
+        let _harness = TestHarness::new("save-task-plan-validation");
+        let missing_task_id = save_task_plan_tool(json!({ "markdown": "# Plan" })).unwrap_err();
+        assert_eq!(missing_task_id, "taskId is required");
+
+        let missing_markdown = save_task_plan_tool(json!({ "taskId": "task-1" })).unwrap_err();
+        assert_eq!(missing_markdown, "markdown is required");
+    }
+
+    #[test]
+    fn save_task_plan_tool_returns_updated_detail() {
+        let harness = TestHarness::new("save-task-plan-tool");
+        upsert_task_detail(sample_task("task-1", &harness.workspace_path())).unwrap();
+
+        let value = save_task_plan_tool(json!({
+            "taskId": "task-1",
+            "markdown": "# Plan",
+            "title": "Execution Plan"
+        }))
+        .unwrap();
+
+        assert_eq!(value["summary"]["taskId"], "task-1");
+        assert_eq!(value["artifacts"][0]["kind"], "plan");
+        assert_eq!(value["artifacts"][0]["title"], "Execution Plan");
     }
 
     #[test]

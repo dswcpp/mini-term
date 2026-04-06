@@ -3,7 +3,13 @@ const WINDOWS_DRIVE_RE = /^[a-z]:[\\/]/i;
 const UNC_PATH_RE = /^[/\\]{2}/;
 
 export function normalizePathSeparators(path: string) {
-  return path.replace(/\\/g, '/');
+  const normalized = path.replace(/\\/g, '/');
+
+  if (normalized.startsWith('//')) {
+    return `//${normalized.replace(/^\/+/, '').replace(/\/{2,}/g, '/')}`;
+  }
+
+  return normalized.replace(/\/{2,}/g, '/');
 }
 
 export function isAbsoluteLocalPath(path: string) {

@@ -5,7 +5,12 @@ import { useAppStore, selectWorkspaceConfig } from '../store';
 import { subscribeProjectGitDirty } from '../runtime/workspaceRuntime';
 import { showContextMenu } from '../utils/contextMenu';
 import { formatRelativeTime } from '../utils/timeFormat';
-import type { GitRepoInfo, GitCommitInfo, CommitFileInfo, WorkspaceRootConfig } from '../types';
+import type { GitRepoInfo, GitCommitInfo, CommitFileInfo, WorkspaceConfig, WorkspaceRootConfig } from '../types';
+
+interface GitHistoryProps {
+  workspaceId: string | null | undefined;
+  isVisible?: boolean;
+}
 
 interface RepoState {
   commits: GitCommitInfo[];
@@ -18,10 +23,16 @@ interface RootRepoGroup {
   repos: GitRepoInfo[];
 }
 
-export function GitHistory() {
-  const activeWorkspaceId = useAppStore((s) => s.activeWorkspaceId);
-  const openCommitDiff = useAppStore((s) => s.openCommitDiff);
-  const workspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
+function buildWorkspaceHistoryKey(workspace: WorkspaceConfig) {
+  return [
+    workspace.id,
+    ...workspace.roots.map((root) => `${root.id}:${root.path}`),
+  ].join('|');
+}
+
+export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
+  const openCommitDiff = useAppStore((state) => state.openCommitDiff);
+  const workspace = useAppStore(selectWorkspaceConfig(workspaceId));
 
   const [reposByRoot, setReposByRoot] = useState<Map<string, GitRepoInfo[]>>(new Map());
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
@@ -29,12 +40,27 @@ export function GitHistory() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const repoStatesRef = useRef(repoStates);
+  const expandedReposRef = useRef(expandedRepos);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initializedRef = useRef(false);
+  const initializedWorkspaceKeyRef = useRef<string | null>(null);
+
   repoStatesRef.current = repoStates;
+  expandedReposRef.current = expandedRepos;
 
-  const loadRepos = useCallback(() => {
-    if (!workspace) return;
+  const clearRefreshTimer = useCallback(() => {
+    if (refreshTimerRef.current) {
+      clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
+  }, []);
 
-    void Promise.all(
+  const loadRepos = useCallback(async () => {
+    if (!workspace) {
+      return;
+    }
+
+    const entries = await Promise.all(
       workspace.roots.map(async (root) => {
         try {
           const repos = await invoke<GitRepoInfo[]>('discover_git_repos', { projectPath: root.path });
@@ -43,54 +69,108 @@ export function GitHistory() {
           return [root.id, [] as GitRepoInfo[]] as const;
         }
       }),
-    ).then((entries) => {
-      setReposByRoot(new Map(entries));
+    );
+
+    const liveRepoPaths = new Set(entries.flatMap(([, repos]) => repos.map((repo) => repo.path)));
+    setReposByRoot(new Map(entries));
+    setExpandedRepos((prev) => {
+      const next = new Set(Array.from(prev).filter((repoPath) => liveRepoPaths.has(repoPath)));
+      return next.size === prev.size ? prev : next;
+    });
+    setRepoStates((prev) => {
+      let changed = false;
+      const next = new Map<string, RepoState>();
+      for (const [repoPath, state] of prev) {
+        if (!liveRepoPaths.has(repoPath)) {
+          changed = true;
+          continue;
+        }
+        next.set(repoPath, state);
+      }
+      return changed ? next : prev;
     });
   }, [workspace]);
 
-  useEffect(() => {
-    loadRepos();
-  }, [loadRepos]);
+  const loadCommits = useCallback(async (repoPath: string, beforeCommit?: string) => {
+    const existing = repoStatesRef.current.get(repoPath);
+    if (existing?.loading) {
+      return;
+    }
 
-  const loadCommits = useCallback(
-    async (repoPath: string, beforeCommit?: string) => {
-      const existing = repoStatesRef.current.get(repoPath);
-      if (existing?.loading) return;
+    setRepoStates((prev) => {
+      const next = new Map(prev);
+      const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
+      next.set(repoPath, { ...current, loading: true });
+      return next;
+    });
+
+    try {
+      const commits = await invoke<GitCommitInfo[]>('get_git_log', {
+        repoPath,
+        beforeCommit: beforeCommit ?? null,
+        limit: 30,
+      });
 
       setRepoStates((prev) => {
         const next = new Map(prev);
         const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
-        next.set(repoPath, { ...current, loading: true });
+        next.set(repoPath, {
+          commits: beforeCommit ? [...current.commits, ...commits].slice(-120) : commits,
+          loading: false,
+          hasMore: commits.length >= 30,
+        });
         return next;
       });
+    } catch {
+      setRepoStates((prev) => {
+        const next = new Map(prev);
+        const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
+        next.set(repoPath, { ...current, loading: false });
+        return next;
+      });
+    }
+  }, []);
 
-      try {
-        const commits = await invoke<GitCommitInfo[]>('get_git_log', {
-          repoPath,
-          beforeCommit: beforeCommit ?? null,
-          limit: 30,
-        });
-        setRepoStates((prev) => {
-          const next = new Map(prev);
-          const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
-          next.set(repoPath, {
-            commits: beforeCommit ? [...current.commits, ...commits].slice(-120) : commits,
-            loading: false,
-            hasMore: commits.length >= 30,
-          });
-          return next;
-        });
-      } catch {
-        setRepoStates((prev) => {
-          const next = new Map(prev);
-          const current = next.get(repoPath) ?? { commits: [], loading: false, hasMore: true };
-          next.set(repoPath, { ...current, loading: false });
-          return next;
-        });
+  useEffect(() => {
+    if (!workspace) {
+      initializedRef.current = false;
+      initializedWorkspaceKeyRef.current = null;
+      clearRefreshTimer();
+      setReposByRoot(new Map());
+      setExpandedRepos(new Set());
+      setRepoStates(new Map());
+      return;
+    }
+
+    if (!isVisible) {
+      clearRefreshTimer();
+      return;
+    }
+
+    const nextWorkspaceKey = buildWorkspaceHistoryKey(workspace);
+    const shouldReset = !initializedRef.current || initializedWorkspaceKeyRef.current !== nextWorkspaceKey;
+
+    initializedRef.current = true;
+    initializedWorkspaceKeyRef.current = nextWorkspaceKey;
+
+    if (shouldReset) {
+      setReposByRoot(new Map());
+      setExpandedRepos(new Set());
+      setRepoStates(new Map());
+      scrollRef.current?.scrollTo({ top: 0 });
+    }
+
+    void loadRepos();
+    if (!shouldReset) {
+      for (const repoPath of expandedReposRef.current) {
+        void loadCommits(repoPath);
       }
-    },
-    [],
-  );
+    }
+  }, [clearRefreshTimer, isVisible, loadCommits, loadRepos, workspace]);
+
+  useEffect(() => () => {
+    clearRefreshTimer();
+  }, [clearRefreshTimer]);
 
   const toggleRepo = useCallback(
     (repoPath: string) => {
@@ -110,13 +190,14 @@ export function GitHistory() {
     [loadCommits],
   );
 
-  const expandedReposRef = useRef(expandedRepos);
-  expandedReposRef.current = expandedRepos;
-
   const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (el.scrollTop + el.clientHeight < el.scrollHeight - 50) return;
+    const element = scrollRef.current;
+    if (!element) {
+      return;
+    }
+    if (element.scrollTop + element.clientHeight < element.scrollHeight - 50) {
+      return;
+    }
 
     for (const repoPath of expandedReposRef.current) {
       const state = repoStatesRef.current.get(repoPath);
@@ -128,29 +209,35 @@ export function GitHistory() {
     }
   }, [loadCommits]);
 
-  const handleViewDiff = useCallback(async (repoPath: string, commit: GitCommitInfo) => {
-    if (!workspace) return;
-    try {
-      const files = await invoke<CommitFileInfo[]>('get_commit_files', {
-        repoPath,
-        commitHash: commit.hash,
-      });
-      openCommitDiff({
-        workspaceId: workspace.id,
-        repoPath,
-        commitHash: commit.hash,
-        commitMessage: commit.message,
-        files,
-      });
-    } catch (error) {
-      console.error('get_commit_files failed:', error);
-    }
-  }, [openCommitDiff, workspace]);
+  const handleViewDiff = useCallback(
+    async (repoPath: string, commit: GitCommitInfo) => {
+      if (!workspace) {
+        return;
+      }
+
+      try {
+        const files = await invoke<CommitFileInfo[]>('get_commit_files', {
+          repoPath,
+          commitHash: commit.hash,
+        });
+        openCommitDiff({
+          workspaceId: workspace.id,
+          repoPath,
+          commitHash: commit.hash,
+          commitMessage: commit.message,
+          files,
+        });
+      } catch (error) {
+        console.error('get_commit_files failed:', error);
+      }
+    },
+    [openCommitDiff, workspace],
+  );
 
   const handleCommitContextMenu = useCallback(
-    (e: React.MouseEvent, repoPath: string, commit: GitCommitInfo) => {
-      e.preventDefault();
-      showContextMenu(e.clientX, e.clientY, [
+    (event: React.MouseEvent, repoPath: string, commit: GitCommitInfo) => {
+      event.preventDefault();
+      showContextMenu(event.clientX, event.clientY, [
         {
           label: 'Copy Commit Hash',
           onClick: () => writeText(commit.hash),
@@ -167,19 +254,18 @@ export function GitHistory() {
     [handleViewDiff],
   );
 
-  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const debouncedRefresh = useCallback(() => {
-    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    clearRefreshTimer();
     refreshTimerRef.current = setTimeout(() => {
-      loadRepos();
+      void loadRepos();
       for (const repoPath of expandedReposRef.current) {
         void loadCommits(repoPath);
       }
     }, 500);
-  }, [loadCommits, loadRepos]);
+  }, [clearRefreshTimer, loadCommits, loadRepos]);
 
   useEffect(() => {
-    if (!workspace) {
+    if (!workspace || !isVisible) {
       return;
     }
 
@@ -187,10 +273,13 @@ export function GitHistory() {
     return () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe());
     };
-  }, [debouncedRefresh, workspace]);
+  }, [debouncedRefresh, isVisible, workspace]);
 
   const repoGroups = useMemo<RootRepoGroup[]>(() => {
-    if (!workspace) return [];
+    if (!workspace) {
+      return [];
+    }
+
     return workspace.roots.map((root) => ({
       root,
       repos: reposByRoot.get(root.id) ?? [],
@@ -208,20 +297,20 @@ export function GitHistory() {
   return (
     <div className="flex h-full flex-col border-t border-[var(--border-subtle)] bg-[var(--bg-surface)]">
       <div className="flex flex-shrink-0 items-center justify-between px-3 pt-3 pb-1.5">
-        <span className="text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)] select-none">
+        <span className="select-none text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
           Git History
         </span>
         <button
           className="text-sm text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
           onClick={() => {
-            loadRepos();
-            for (const repoPath of expandedRepos) {
+            void loadRepos();
+            for (const repoPath of expandedReposRef.current) {
               void loadCommits(repoPath);
             }
           }}
           title="Refresh"
         >
-          ↻
+          R
         </button>
       </div>
 
@@ -240,6 +329,7 @@ export function GitHistory() {
                 group.repos.map((repo) => {
                   const isExpanded = expandedRepos.has(repo.path);
                   const state = repoStates.get(repo.path);
+
                   return (
                     <div key={repo.path}>
                       <div
@@ -250,7 +340,7 @@ export function GitHistory() {
                           className="w-3 text-center text-[13px] text-[var(--text-muted)] transition-transform duration-150"
                           style={{ transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)', display: 'inline-block' }}
                         >
-                          ▾
+                          {'>'}
                         </span>
                         <span className="truncate font-medium">{repo.name}</span>
                       </div>
@@ -269,16 +359,16 @@ export function GitHistory() {
                               <div className="truncate text-sm text-[var(--text-primary)]">{commit.message}</div>
                               <div className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
                                 <span>{commit.author}</span>
-                                <span>·</span>
+                                <span>|</span>
                                 <span>{formatRelativeTime(commit.timestamp)}</span>
-                                <span>·</span>
+                                <span>|</span>
                                 <span className="font-mono">{commit.shortHash}</span>
                               </div>
                             </div>
                           ))}
 
                           {state?.loading ? (
-                            <div className="py-2 text-center text-xs text-[var(--text-muted)]">Loading…</div>
+                            <div className="py-2 text-center text-xs text-[var(--text-muted)]">Loading...</div>
                           ) : null}
                           {state && !state.loading && state.commits.length === 0 ? (
                             <div className="py-2 text-center text-xs text-[var(--text-muted)]">No commits</div>

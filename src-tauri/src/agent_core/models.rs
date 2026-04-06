@@ -73,6 +73,24 @@ pub enum ApprovalDecision {
     Executed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskArtifactKind {
+    Plan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifact {
+    pub artifact_id: String,
+    pub kind: TaskArtifactKind,
+    pub title: String,
+    pub path: String,
+    pub mime_type: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskSummary {
@@ -111,6 +129,8 @@ pub struct TaskStatusDetail {
     pub recent_output_excerpt: String,
     pub diff_summary: Vec<GitFileStatus>,
     pub log_path: String,
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

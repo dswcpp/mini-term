@@ -52,7 +52,7 @@ import type {
   WorkspaceTab,
 } from './types';
 import { createEmptyCompletionUsage, recordCompletionUsage } from './utils/terminalCompletion/usage';
-import { isMarkdownFilePath } from './utils/markdownPreview';
+import { normalizePreviewModeForFile } from './utils/documentPreview';
 import { areSplitNodesEquivalent } from './utils/splitLayout';
 import { disposeTerminalBySession } from './utils/terminalCache';
 
@@ -140,7 +140,7 @@ function isAgentTaskPanelTab(tab: WorkspaceTab): tab is AgentTaskPanelTab {
 }
 
 function normalizeFileViewerMode(filePath: string, mode?: PreviewMode): PreviewMode {
-  return mode === 'preview' && isMarkdownFilePath(filePath) ? 'preview' : 'source';
+  return normalizePreviewModeForFile(filePath, mode);
 }
 
 function getHighestStatusFromEntries(entries: Iterable<PaneRuntimeState>): PaneStatus {

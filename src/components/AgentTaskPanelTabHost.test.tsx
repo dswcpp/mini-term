@@ -38,6 +38,15 @@ function createTaskDetail(
   workspaceId: string,
   workspaceName: string,
   status: string = 'running',
+  artifacts: Array<{
+    artifactId: string;
+    kind: 'plan';
+    title: string;
+    path: string;
+    mimeType: string;
+    createdAt: number;
+    updatedAt: number;
+  }> = [],
 ) {
   return {
     summary: {
@@ -67,6 +76,7 @@ function createTaskDetail(
     recentOutputExcerpt: 'Recent output',
     diffSummary: [],
     logPath: `D:/logs/${taskId}.log`,
+    artifacts,
   };
 }
 
@@ -221,6 +231,46 @@ describe('AgentTaskPanelTabHost', () => {
       await screen.findByText('已创建关闭审批，请先在 Inbox 中批准后再重试。'),
     ).not.toBeNull();
   });
+
+  it('renders a saved plan artifact and opens it in the file viewer', async () => {
+    const planTask = createTaskDetail(
+      'task-1',
+      'workspace-1',
+      'mini-term',
+      'running',
+      [
+        {
+          artifactId: 'artifact-1',
+          kind: 'plan',
+          title: 'Execution Plan',
+          path: 'D:/Users/test/AppData/Roaming/mini-term/agent_state/tasks/task-1/artifacts/plan.md',
+          mimeType: 'text/markdown',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ],
+    );
+    listAgentTasks.mockResolvedValue([planTask]);
+    getAgentTaskStatus.mockResolvedValue(planTask);
+
+    render(<TaskPanelHarness />);
+
+    expect(await screen.findByText('Execution Plan')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Plan Document' }));
+
+    await waitFor(() => {
+      const workspaceState = useAppStore.getState().workspaceStates.get('workspace-1');
+      expect(
+        workspaceState?.tabs.some(
+          (tab) =>
+            tab.kind === 'file-viewer'
+            && tab.filePath
+              === 'D:/Users/test/AppData/Roaming/mini-term/agent_state/tasks/task-1/artifacts/plan.md',
+        ),
+      ).toBe(true);
+    });
+  });
+
   it('retries close with an approved request id after inbox approval', async () => {
     closeAgentTask
       .mockResolvedValueOnce({

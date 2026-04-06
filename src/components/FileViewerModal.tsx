@@ -1,4 +1,8 @@
-import { DocumentViewerDialog } from './documentViewer/DocumentViewerDialog';
+import { Suspense, lazy } from 'react';
+
+const LazyDocumentViewerDialog = lazy(() => import('./documentViewer/DocumentViewerDialog').then((module) => ({
+  default: module.DocumentViewerDialog,
+})));
 
 interface FileViewerModalProps {
   open: boolean;
@@ -14,11 +18,18 @@ export function FileViewerModal({
   initialPreview = false,
 }: FileViewerModalProps) {
   return (
-    <DocumentViewerDialog
-      open={open}
-      onClose={onClose}
-      filePath={filePath}
-      initialMode={initialPreview ? 'preview' : 'source'}
-    />
+    <Suspense fallback={open ? (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-[var(--text-muted)]">
+        Loading file viewer...
+      </div>
+    ) : null}
+    >
+      <LazyDocumentViewerDialog
+        open={open}
+        onClose={onClose}
+        filePath={filePath}
+        initialMode={initialPreview ? 'preview' : undefined}
+      />
+    </Suspense>
   );
 }

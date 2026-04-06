@@ -121,6 +121,7 @@ export function AgentTaskPanelTabHost({
   isActive,
 }: AgentTaskPanelTabHostProps) {
   const setActiveWorkspace = useAppStore((state) => state.setActiveWorkspace);
+  const openFileViewer = useAppStore((state) => state.openFileViewer);
   const openWorktreeDiff = useAppStore((state) => state.openWorktreeDiff);
   const setAgentTaskPanelSelection = useAppStore(
     (state) => state.setAgentTaskPanelSelection,
@@ -269,6 +270,17 @@ export function AgentTaskPanelTabHost({
     );
   }, [openWorktreeDiff, selectedTask, setActiveWorkspace]);
 
+  const openPlan = useCallback(() => {
+    const artifact = selectedTask?.artifacts.find((item) => item.kind === 'plan');
+    if (!selectedTask || !artifact) {
+      return;
+    }
+    setActiveWorkspace(selectedTask.summary.workspaceId);
+    openFileViewer(selectedTask.summary.workspaceId, artifact.path, {
+      initialMode: 'preview',
+    });
+  }, [openFileViewer, selectedTask, setActiveWorkspace]);
+
   const handleSendInput = useCallback(async () => {
     if (!selectedTask || !inputValue.trim()) {
       return;
@@ -340,6 +352,7 @@ export function AgentTaskPanelTabHost({
     (selectedTask && selectedTask.summary.taskId === tab.selectedTaskId
       ? selectedTask.summary
       : null);
+  const planArtifact = selectedTask?.artifacts.find((artifact) => artifact.kind === 'plan');
   const canSendInput = selectedSummary?.status === 'running';
 
   return (
@@ -601,6 +614,36 @@ export function AgentTaskPanelTabHost({
                       selectedSummary.lastOutputExcerpt ||
                       '暂无输出'}
                   </pre>
+                </div>
+
+                <div className="mb-4">
+                  <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                    Plan Document
+                  </div>
+                  {!planArtifact ? (
+                    <div className="mt-1 text-[11px] text-[var(--text-muted)]">
+                      No saved plan document yet
+                    </div>
+                  ) : (
+                    <div className="mt-1 rounded bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-5 text-[var(--text-secondary)]">
+                      <div className="font-medium text-[var(--text-primary)]">
+                        {planArtifact.title}
+                      </div>
+                      <div className="mt-1 text-[var(--text-muted)]">
+                        Updated {formatRelativeTime(planArtifact.updatedAt)}
+                      </div>
+                      <div className="mt-1 break-all text-[var(--text-muted)]">
+                        {planArtifact.path}
+                      </div>
+                      <button
+                        type="button"
+                        className="mt-2 rounded-[var(--radius-sm)] border border-[var(--accent)]/40 bg-[var(--accent-subtle)] px-2.5 py-1 text-[11px] text-[var(--accent)]"
+                        onClick={openPlan}
+                      >
+                        Open Plan Document
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <div>

@@ -1,12 +1,17 @@
 use crate::agent_core::data_dir::{app_data_dir, ensure_parent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 
 const RUNTIME_STATE_FILE: &str = "runtime_mcp_state.json";
 const MAX_RECENT_EVENTS: usize = 200;
@@ -15,19 +20,29 @@ const MAX_OUTPUT_TAIL_CHARS: usize = 64 * 1024;
 const MAX_OUTPUT_SUMMARY_CHARS: usize = 120;
 const MAX_STARTUP_OUTPUT_CHARS: usize = 64 * 1024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-
-fn state_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 
 fn heartbeat_started() -> &'static OnceLock<()> {
     static STARTED: OnceLock<()> = OnceLock::new();
     &STARTED
 }
 
+fn runtime_store_registry() -> &'static Mutex<HashMap<PathBuf, Arc<RuntimeStateStore>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<RuntimeStateStore>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn runtime_state_path() -> PathBuf {
     app_data_dir().join(RUNTIME_STATE_FILE)
+}
+
+struct RuntimeStateStore {
+    path: PathBuf,
+    state: Mutex<RuntimeMcpState>,
+    dirty: AtomicBool,
+    flush_started: OnceLock<()>,
+    #[cfg(test)]
+    write_count: AtomicUsize,
 }
 
 fn display_path(path: &str) -> String {
@@ -224,6 +239,12 @@ pub struct RuntimeWatcherSnapshot {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeFsEventRecord {
+    pub path: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeEvent {
@@ -263,35 +284,197 @@ impl Default for RuntimeMcpState {
     }
 }
 
-fn load_state_unlocked() -> RuntimeMcpState {
-    let path = runtime_state_path();
+fn load_state_from_path(path: &Path) -> RuntimeMcpState {
     match fs::read_to_string(path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => RuntimeMcpState::default(),
     }
 }
 
-fn save_state_unlocked(state: &RuntimeMcpState) -> Result<(), String> {
-    let path = runtime_state_path();
-    ensure_parent(&path)?;
-    let json = serde_json::to_string_pretty(state).map_err(|err| err.to_string())?;
+fn save_state_to_path(path: &Path, state: &RuntimeMcpState) -> Result<(), String> {
+    ensure_parent(path)?;
+    let json = serde_json::to_vec_pretty(state).map_err(|err| err.to_string())?;
     let temp_path = path.with_extension("json.tmp");
     fs::write(&temp_path, json).map_err(|err| err.to_string())?;
-    fs::rename(&temp_path, &path)
+    fs::rename(&temp_path, path)
         .or_else(|_| {
-            let _ = fs::remove_file(&path);
-            fs::rename(&temp_path, &path)
+            let _ = fs::remove_file(path);
+            fs::rename(&temp_path, path)
         })
         .map_err(|err| err.to_string())
 }
 
+impl RuntimeStateStore {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            state: Mutex::new(load_state_from_path(&path)),
+            path,
+            dirty: AtomicBool::new(false),
+            flush_started: OnceLock::new(),
+            #[cfg(test)]
+            write_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> RuntimeMcpState {
+        self.state.lock().unwrap().clone()
+    }
+
+    fn mutate(&self, mutator: impl FnOnce(&mut RuntimeMcpState)) {
+        let mut state = self.state.lock().unwrap();
+        mutator(&mut state);
+        prune_stale_ptys(&mut state);
+        state.updated_at = now_timestamp_ms();
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn replace_for_tests(&self, state: RuntimeMcpState) -> Result<(), String> {
+        {
+            let mut current = self.state.lock().unwrap();
+            *current = state;
+            prune_stale_ptys(&mut current);
+            current.updated_at = now_timestamp_ms();
+        }
+        self.dirty.store(true, Ordering::Release);
+        self.flush_now()
+    }
+
+    fn flush_now(&self) -> Result<(), String> {
+        if !self.dirty.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+
+        let snapshot = self.snapshot();
+        match save_state_to_path(&self.path, &snapshot) {
+            Ok(()) => {
+                #[cfg(test)]
+                self.write_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(err) => {
+                self.dirty.store(true, Ordering::Release);
+                Err(err)
+            }
+        }
+    }
+
+    fn ensure_flush_thread(self: &Arc<Self>) {
+        if self.flush_started.set(()).is_err() {
+            return;
+        }
+
+        let store = Arc::clone(self);
+        thread::spawn(move || loop {
+            thread::sleep(FLUSH_INTERVAL);
+            if store.dirty.load(Ordering::Acquire) {
+                let _ = store.flush_now();
+            }
+        });
+    }
+}
+
+fn runtime_store_for_path(path: PathBuf) -> Arc<RuntimeStateStore> {
+    let store = {
+        let mut registry = runtime_store_registry().lock().unwrap();
+        registry
+            .entry(path.clone())
+            .or_insert_with(|| Arc::new(RuntimeStateStore::new(path)))
+            .clone()
+    };
+    store.ensure_flush_thread();
+    store
+}
+
+fn runtime_store() -> Arc<RuntimeStateStore> {
+    runtime_store_for_path(runtime_state_path())
+}
+
+fn mutate_state_with_store(
+    store: &Arc<RuntimeStateStore>,
+    mutator: impl FnOnce(&mut RuntimeMcpState),
+) -> Result<(), String> {
+    store.mutate(mutator);
+    Ok(())
+}
+
 fn mutate_state(mutator: impl FnOnce(&mut RuntimeMcpState)) -> Result<(), String> {
-    let _guard = state_lock().lock().unwrap();
-    let mut state = load_state_unlocked();
-    mutator(&mut state);
-    prune_stale_ptys(&mut state);
-    state.updated_at = now_timestamp_ms();
-    save_state_unlocked(&state)
+    let store = runtime_store();
+    mutate_state_with_store(&store, mutator)
+}
+
+pub(crate) fn runtime_state_path_for_current_thread() -> PathBuf {
+    runtime_state_path()
+}
+
+pub(crate) fn record_fs_event_batch_for_path(
+    runtime_path: PathBuf,
+    project_path: &str,
+    events: &[RuntimeFsEventRecord],
+) -> Result<(), String> {
+    let store = runtime_store_for_path(runtime_path);
+    if events.is_empty() {
+        return Ok(());
+    }
+
+    mutate_state_with_store(&store, |state| {
+        let project_path = display_path(project_path);
+        let mut kind_counts = BTreeMap::<String, usize>::new();
+        let sample_paths = events
+            .iter()
+            .take(5)
+            .map(|event| {
+                *kind_counts.entry(event.kind.clone()).or_default() += 1;
+                display_path(&event.path)
+            })
+            .collect::<Vec<_>>();
+
+        for event in events.iter().skip(5) {
+            *kind_counts.entry(event.kind.clone()).or_default() += 1;
+        }
+
+        let summary = if events.len() == 1 {
+            format!("FS change detected at {}.", sample_paths[0])
+        } else {
+            format!(
+                "FS change batch detected at {} paths under {}.",
+                events.len(),
+                project_path
+            )
+        };
+
+        push_event(
+            state,
+            "fs-change",
+            summary,
+            Some(json!({
+                "projectPath": project_path,
+                "count": events.len(),
+                "samplePaths": sample_paths,
+                "kindCounts": kind_counts,
+            })),
+        );
+    })
+}
+
+pub(crate) fn update_host_heartbeat_for_path(
+    runtime_path: PathBuf,
+    app_version: &str,
+) -> Result<(), String> {
+    let store = runtime_store_for_path(runtime_path);
+    mutate_state_with_store(&store, |state| {
+        let host = state.host.get_or_insert(RuntimeHostInfo {
+            app_version: app_version.to_string(),
+            desktop_pid: std::process::id(),
+            transport_mode: "app-data-snapshot".to_string(),
+            last_heartbeat_at: now_timestamp_ms(),
+            host_control: None,
+        });
+        host.app_version = app_version.to_string();
+        host.desktop_pid = std::process::id();
+        host.transport_mode = "app-data-snapshot".to_string();
+        host.last_heartbeat_at = now_timestamp_ms();
+    })
 }
 
 fn push_event(
@@ -318,8 +501,7 @@ fn find_pty_mut(state: &mut RuntimeMcpState, pty_id: u32) -> Option<&mut Runtime
 }
 
 pub fn load_runtime_state() -> RuntimeMcpState {
-    let _guard = state_lock().lock().unwrap();
-    load_state_unlocked()
+    runtime_store().snapshot()
 }
 
 pub fn initialize_runtime_host(app_version: &str) -> Result<(), String> {
@@ -351,20 +533,9 @@ pub fn start_runtime_heartbeat(app_version: String) {
         return;
     }
 
+    let runtime_path = runtime_state_path_for_current_thread();
     thread::spawn(move || loop {
-        let _ = mutate_state(|state| {
-            let host = state.host.get_or_insert(RuntimeHostInfo {
-                app_version: app_version.clone(),
-                desktop_pid: std::process::id(),
-                transport_mode: "app-data-snapshot".to_string(),
-                last_heartbeat_at: now_timestamp_ms(),
-                host_control: None,
-            });
-            host.app_version = app_version.clone();
-            host.desktop_pid = std::process::id();
-            host.transport_mode = "app-data-snapshot".to_string();
-            host.last_heartbeat_at = now_timestamp_ms();
-        });
+        let _ = update_host_heartbeat_for_path(runtime_path.clone(), &app_version);
         thread::sleep(HEARTBEAT_INTERVAL);
     });
 }
@@ -474,13 +645,15 @@ pub fn append_pty_output(pty_id: u32, data: &str) -> Result<(), String> {
             item.last_output_at = Some(now_timestamp_ms());
             item.updated_at = now_timestamp_ms();
             let clean = strip_ansi(data);
-            let combined = format!("{}{}", item.output_preview, clean);
-            item.output_preview = truncate_recent_chars(&combined, MAX_OUTPUT_PREVIEW_CHARS);
-            let output_tail = format!("{}{}", item.output_tail, clean);
-            item.output_tail = truncate_recent_chars(&output_tail, MAX_OUTPUT_TAIL_CHARS);
+            item.output_preview.push_str(&clean);
+            item.output_preview =
+                truncate_recent_chars(&item.output_preview, MAX_OUTPUT_PREVIEW_CHARS);
+            item.output_tail.push_str(&clean);
+            item.output_tail = truncate_recent_chars(&item.output_tail, MAX_OUTPUT_TAIL_CHARS);
             if item.startup_output.chars().count() < MAX_STARTUP_OUTPUT_CHARS {
-                let combined_startup = format!("{}{}", item.startup_output, clean);
-                item.startup_output = truncate_chars(&combined_startup, MAX_STARTUP_OUTPUT_CHARS);
+                item.startup_output.push_str(&clean);
+                item.startup_output =
+                    truncate_chars(&item.startup_output, MAX_STARTUP_OUTPUT_CHARS);
             }
             // Advance phase from 'starting' to 'running' on first real output.
             if item.phase == "starting" {
@@ -650,27 +823,37 @@ pub fn unregister_fs_watch(watch_path: &str) -> Result<(), String> {
     })
 }
 
+#[allow(dead_code)]
 pub fn record_fs_event(project_path: &str, path: &str, kind: &str) -> Result<(), String> {
-    mutate_state(|state| {
-        let project_path = display_path(project_path);
-        let path = display_path(path);
-        push_event(
-            state,
-            "fs-change",
-            format!("FS change detected at {}.", path),
-            Some(json!({
-                "projectPath": project_path,
-                "path": path,
-                "kind": kind,
-            })),
-        );
-    })
+    record_fs_event_batch(
+        project_path,
+        &[RuntimeFsEventRecord {
+            path: path.to_string(),
+            kind: kind.to_string(),
+        }],
+    )
+}
+
+pub fn record_fs_event_batch(
+    project_path: &str,
+    events: &[RuntimeFsEventRecord],
+) -> Result<(), String> {
+    record_fs_event_batch_for_path(runtime_state_path(), project_path, events)
 }
 
 #[cfg(test)]
 pub fn write_runtime_state_for_tests(state: RuntimeMcpState) {
-    let _guard = state_lock().lock().unwrap();
-    save_state_unlocked(&state).unwrap();
+    runtime_store().replace_for_tests(state).unwrap();
+}
+
+#[cfg(test)]
+fn flush_runtime_state_for_tests() {
+    runtime_store().flush_now().unwrap();
+}
+
+#[cfg(test)]
+fn runtime_write_count_for_tests() -> usize {
+    runtime_store().write_count.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -797,6 +980,84 @@ mod tests {
         assert!(kinds.contains(&"fs-watch-started"));
         assert!(kinds.contains(&"fs-change"));
         assert!(kinds.contains(&"fs-watch-stopped"));
+    }
+
+    #[test]
+    fn runtime_updates_flush_lazily() {
+        let harness = TestHarness::new("runtime-lazy-flush");
+        initialize_runtime_host("test-version").expect("host init should succeed");
+        flush_runtime_state_for_tests();
+        let baseline_writes = runtime_write_count_for_tests();
+
+        register_pty(
+            31,
+            "session-31",
+            "powershell",
+            "powershell",
+            &harness.workspace_path(),
+            "human",
+            "starting",
+        )
+        .expect("register pty should succeed");
+        for chunk in ["hello", " ", "runtime", " ", "buffer"] {
+            append_pty_output(31, chunk).expect("output append should succeed");
+        }
+        update_pty_status(31, "running").expect("status update should succeed");
+
+        assert_eq!(runtime_write_count_for_tests(), baseline_writes);
+        let state = load_runtime_state();
+        let pty = state
+            .ptys
+            .iter()
+            .find(|item| item.pty_id == 31)
+            .expect("pty should be present in memory");
+        assert_eq!(pty.output_tail, "hello runtime buffer");
+
+        flush_runtime_state_for_tests();
+        assert!(runtime_write_count_for_tests() > baseline_writes);
+
+        let persisted = load_state_from_path(&runtime_state_path());
+        let persisted_pty = persisted
+            .ptys
+            .into_iter()
+            .find(|item| item.pty_id == 31)
+            .expect("pty should be persisted");
+        assert_eq!(persisted_pty.output_tail, "hello runtime buffer");
+    }
+
+    #[test]
+    fn record_fs_event_batch_summarizes_multiple_paths() {
+        let harness = TestHarness::new("runtime-fs-batch");
+        initialize_runtime_host("test-version").expect("host init should succeed");
+
+        record_fs_event_batch(
+            &harness.workspace_path(),
+            &[
+                RuntimeFsEventRecord {
+                    path: format!("{}\\src\\main.rs", harness.workspace_path()),
+                    kind: "Modify(File(Data(Any)))".to_string(),
+                },
+                RuntimeFsEventRecord {
+                    path: format!("{}\\src\\lib.rs", harness.workspace_path()),
+                    kind: "Modify(File(Data(Any)))".to_string(),
+                },
+            ],
+        )
+        .expect("batch should succeed");
+
+        let state = load_runtime_state();
+        let event = state
+            .recent_events
+            .iter()
+            .rev()
+            .find(|event| event.kind == "fs-change")
+            .expect("fs batch event should exist");
+        assert!(event.summary.contains("2 paths"));
+        let payload = event
+            .payload_preview
+            .as_ref()
+            .expect("payload preview should exist");
+        assert_eq!(payload.get("count").and_then(Value::as_u64), Some(2));
     }
 
     #[test]
@@ -956,14 +1217,14 @@ mod tests {
         // Manually backdate the exited PTY so it looks stale.
         let stale_ts = now_timestamp_ms().saturating_sub(6 * 60 * 1_000);
         {
-            let _guard = state_lock().lock().unwrap();
-            let mut state = load_state_unlocked();
+            let store = runtime_store();
+            let mut state = store.snapshot();
             for pty in &mut state.ptys {
                 if pty.pty_id == 40 {
                     pty.updated_at = stale_ts;
                 }
             }
-            save_state_unlocked(&state).unwrap();
+            store.replace_for_tests(state).unwrap();
         }
 
         // Trigger any mutation so prune_stale_ptys runs.

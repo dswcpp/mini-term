@@ -1,4 +1,4 @@
-import { useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAppStore, genId, saveLayoutToConfig, selectWorkspaceState } from '../store';
 import {
   closeManagedTerminalSession,
@@ -9,8 +9,6 @@ import { createTerminalPane } from '../utils/session';
 import { TabBar } from './TabBar';
 import { TerminalTabHost } from './TerminalTabHost';
 import { DocumentTabHost } from './DocumentTabHost';
-import { CommitDiffTabHost, FileHistoryViewTabHost, WorktreeDiffTabHost } from './DiffTabHost';
-import { AgentTaskPanelTabHost } from './AgentTaskPanelTabHost';
 import {
   collectPaneIds,
   findPane,
@@ -22,6 +20,19 @@ import { showContextMenu } from '../utils/contextMenu';
 import { showPrompt } from '../utils/prompt';
 import { areSplitNodesEquivalent } from '../utils/splitLayout';
 import type { AgentTaskPanelTab, PaneState, ShellConfig, SplitNode, TerminalTab, WorkspaceTab } from '../types';
+
+const LazyCommitDiffTabHost = lazy(() => import('./DiffTabHost').then((module) => ({
+  default: module.CommitDiffTabHost,
+})));
+const LazyFileHistoryViewTabHost = lazy(() => import('./DiffTabHost').then((module) => ({
+  default: module.FileHistoryViewTabHost,
+})));
+const LazyWorktreeDiffTabHost = lazy(() => import('./DiffTabHost').then((module) => ({
+  default: module.WorktreeDiffTabHost,
+})));
+const LazyAgentTaskPanelTabHost = lazy(() => import('./AgentTaskPanelTabHost').then((module) => ({
+  default: module.AgentTaskPanelTabHost,
+})));
 
 interface Props {
   workspaceId: string;
@@ -54,6 +65,14 @@ function getFirstPane(node: SplitNode): PaneState {
   return getFirstPane(node.children[0]);
 }
 
+function DeferredTabFallback({ label }: { label: string }) {
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center text-[var(--text-muted)]">
+      {label}
+    </div>
+  );
+}
+
 export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSettings }: Props) {
   const availableShells = useAppStore((state) => state.config.availableShells);
   const defaultShell = useAppStore((state) => state.config.defaultShell);
@@ -66,6 +85,47 @@ export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSett
   const updatePaneSessionBinding = useAppStore((state) => state.updatePaneSessionBinding);
   const setTabCustomTitle = useAppStore((state) => state.setTabCustomTitle);
   const ps = useAppStore(selectWorkspaceState(workspaceId));
+  const [activatedDeferredTabIds, setActivatedDeferredTabIds] = useState<Set<string>>(() => new Set());
+  const tabIdsSignature = ps?.tabs.map((tab) => tab.id).join('|') ?? '';
+
+  useEffect(() => {
+    if (!isVisible || !ps?.activeTabId) {
+      return;
+    }
+
+    setActivatedDeferredTabIds((previous) => {
+      if (previous.has(ps.activeTabId)) {
+        return previous;
+      }
+
+      const next = new Set(previous);
+      next.add(ps.activeTabId);
+      return next;
+    });
+  }, [isVisible, ps?.activeTabId]);
+
+  useEffect(() => {
+    setActivatedDeferredTabIds((previous) => {
+      if (previous.size === 0) {
+        return previous;
+      }
+
+      const next = new Set<string>();
+      const liveTabIds = new Set(ps?.tabs.map((tab) => tab.id) ?? []);
+      let changed = false;
+
+      previous.forEach((tabId) => {
+        if (liveTabIds.has(tabId)) {
+          next.add(tabId);
+          return;
+        }
+
+        changed = true;
+      });
+
+      return changed ? next : previous;
+    });
+  }, [tabIdsSignature]);
 
   const handleCloseTab = useCallback(
     async (tabId: string) => {
@@ -321,6 +381,7 @@ export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSett
       <div className="relative flex-1 overflow-hidden">
         {ps?.tabs.map((tab) => {
           const tabIsActive = isVisible && tab.id === ps.activeTabId;
+          const shouldRenderDeferredTab = tabIsActive || activatedDeferredTabIds.has(tab.id);
 
           return (
             <div
@@ -353,7 +414,7 @@ export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSett
                   }
                   onLayoutChange={(updatedNode) => handleLayoutChange(tab.id, updatedNode)}
                 />
-              ) : tab.kind === 'file-viewer' ? (
+              ) : !shouldRenderDeferredTab ? null : tab.kind === 'file-viewer' ? (
                 <DocumentTabHost
                   tab={tab}
                   workspaceId={workspaceId}
@@ -364,35 +425,43 @@ export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSett
                   }}
                 />
               ) : tab.kind === 'worktree-diff' ? (
-                <WorktreeDiffTabHost
-                  tab={tab}
-                  isActive={tabIsActive}
-                  onClose={() => {
-                    void handleCloseTab(tab.id);
-                  }}
-                />
+                <Suspense fallback={<DeferredTabFallback label="Loading worktree diff..." />}>
+                  <LazyWorktreeDiffTabHost
+                    tab={tab}
+                    isActive={tabIsActive}
+                    onClose={() => {
+                      void handleCloseTab(tab.id);
+                    }}
+                  />
+                </Suspense>
               ) : tab.kind === 'file-history' ? (
-                <FileHistoryViewTabHost
-                  tab={tab}
-                  isActive={tabIsActive}
-                  onClose={() => {
-                    void handleCloseTab(tab.id);
-                  }}
-                />
+                <Suspense fallback={<DeferredTabFallback label="Loading file history..." />}>
+                  <LazyFileHistoryViewTabHost
+                    tab={tab}
+                    isActive={tabIsActive}
+                    onClose={() => {
+                      void handleCloseTab(tab.id);
+                    }}
+                  />
+                </Suspense>
               ) : isAgentTaskPanelTab(tab) ? (
-                <AgentTaskPanelTabHost
-                  tab={tab}
-                  workspaceId={workspaceId}
-                  isActive={tabIsActive}
-                />
+                <Suspense fallback={<DeferredTabFallback label="Loading task panel..." />}>
+                  <LazyAgentTaskPanelTabHost
+                    tab={tab}
+                    workspaceId={workspaceId}
+                    isActive={tabIsActive}
+                  />
+                </Suspense>
               ) : (
-                <CommitDiffTabHost
-                  tab={tab}
-                  isActive={tabIsActive}
-                  onClose={() => {
-                    void handleCloseTab(tab.id);
-                  }}
-                />
+                <Suspense fallback={<DeferredTabFallback label="Loading commit diff..." />}>
+                  <LazyCommitDiffTabHost
+                    tab={tab}
+                    isActive={tabIsActive}
+                    onClose={() => {
+                      void handleCloseTab(tab.id);
+                    }}
+                  />
+                </Suspense>
               )}
             </div>
           );

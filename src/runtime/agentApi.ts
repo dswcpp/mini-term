@@ -57,3 +57,17 @@ export async function closeAgentTask(
 export async function resumeAgentTask(taskId: string): Promise<AgentTaskStatusDetail> {
   return invoke<AgentTaskStatusDetail>('resume_agent_task', { taskId });
 }
+
+export async function saveAgentTaskPlan(
+  taskId: string,
+  markdown: string,
+  title?: string,
+  fileName?: string,
+): Promise<AgentTaskStatusDetail> {
+  return invoke<AgentTaskStatusDetail>('save_agent_task_plan', {
+    taskId,
+    markdown,
+    title,
+    fileName,
+  });
+}

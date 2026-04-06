@@ -338,7 +338,7 @@ fn resolve_usage_scope(
 
 #[derive(Clone)]
 pub struct PtyManager {
-    instances: Arc<Mutex<HashMap<u32, PtyInstance>>>,
+    instances: Arc<Mutex<HashMap<u32, Arc<Mutex<PtyInstance>>>>>,
     next_id: Arc<Mutex<u32>>,
     session_id_by_pty: Arc<Mutex<HashMap<u32, String>>>,
     pty_id_by_session: Arc<Mutex<HashMap<String, u32>>>,
@@ -494,6 +494,10 @@ impl PtyManager {
 
     pub fn get_pty_ids(&self) -> Vec<u32> {
         self.instances.lock().unwrap().keys().copied().collect()
+    }
+
+    fn get_instance(&self, pty_id: u32) -> Option<Arc<Mutex<PtyInstance>>> {
+        self.instances.lock().unwrap().get(&pty_id).cloned()
     }
 
     pub fn has_recent_output(&self, pty_id: u32, within: Duration) -> bool {
@@ -822,8 +826,10 @@ fn create_pty_internal(
 
                     let exit_code = {
                         let mut instances = instances_clone.lock().unwrap();
-                        if let Some(mut inst) = instances.remove(&pty_id_for_reader) {
-                            inst.child
+                        if let Some(inst) = instances.remove(&pty_id_for_reader) {
+                            inst.lock()
+                                .unwrap()
+                                .child
                                 .try_wait()
                                 .ok()
                                 .flatten()
@@ -909,11 +915,11 @@ fn create_pty_internal(
         let mut instances = state.instances.lock().unwrap();
         instances.insert(
             pty_id,
-            PtyInstance {
+            Arc::new(Mutex::new(PtyInstance {
                 writer,
                 master,
                 child,
-            },
+            })),
         );
     }
     state
@@ -972,15 +978,14 @@ fn write_pty_internal(
     pty_id: u32,
     data: String,
 ) -> Result<(), String> {
-    {
-        let mut instances = state.instances.lock().unwrap();
-        let instance = instances.get_mut(&pty_id).ok_or("PTY not found")?;
-        instance
-            .writer
-            .write_all(data.as_bytes())
-            .map_err(|error| error.to_string())?;
-        instance.writer.flush().map_err(|error| error.to_string())?;
-    }
+    let instance = state.get_instance(pty_id).ok_or("PTY not found")?;
+    let mut instance = instance.lock().unwrap();
+    instance
+        .writer
+        .write_all(data.as_bytes())
+        .map_err(|error| error.to_string())?;
+    instance.writer.flush().map_err(|error| error.to_string())?;
+    drop(instance);
 
     let tracked = state.track_input(pty_id, &data);
     if !tracked.commands.is_empty() {
@@ -1058,8 +1063,8 @@ fn resize_pty_internal(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let instances = state.instances.lock().unwrap();
-    let instance = instances.get(&pty_id).ok_or("PTY not found")?;
+    let instance = state.get_instance(pty_id).ok_or("PTY not found")?;
+    let instance = instance.lock().unwrap();
     instance
         .master
         .resize(PtySize {
@@ -1075,8 +1080,8 @@ fn resize_pty_internal(
 
 fn kill_pty_internal(state: &PtyManager, pty_id: u32) -> Result<(), String> {
     let session_id = state.get_session_id(pty_id);
-    if let Some(mut instance) = state.instances.lock().unwrap().remove(&pty_id) {
-        let _ = instance.child.kill();
+    if let Some(instance) = state.instances.lock().unwrap().remove(&pty_id) {
+        let _ = instance.lock().unwrap().child.kill();
     } else {
         return Err("PTY not found".to_string());
     }
@@ -1305,7 +1310,12 @@ pub fn take_terminal_startup_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Error;
+    use portable_pty::{ExitStatus, MasterPty, PtySize};
     use std::fs;
+    use std::io;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_temp_dir(label: &str) -> PathBuf {
@@ -1316,6 +1326,160 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mini-term-{label}-{unique}"));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[derive(Debug, Default)]
+    struct DummyWriter;
+
+    impl Write for DummyWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct ResizeBlocker {
+        entered: Arc<(StdMutex<bool>, Condvar)>,
+        release: Arc<(StdMutex<bool>, Condvar)>,
+    }
+
+    impl ResizeBlocker {
+        fn new() -> Self {
+            Self {
+                entered: Arc::new((StdMutex::new(false), Condvar::new())),
+                release: Arc::new((StdMutex::new(false), Condvar::new())),
+            }
+        }
+
+        fn wait_until_entered(&self) {
+            let (lock, cvar) = &*self.entered;
+            let mut entered = lock.lock().unwrap();
+            while !*entered {
+                entered = cvar.wait(entered).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            let (lock, cvar) = &*self.release;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockMaster {
+        blocker: Option<ResizeBlocker>,
+    }
+
+    impl MasterPty for MockMaster {
+        fn resize(&self, _size: PtySize) -> Result<(), Error> {
+            if let Some(blocker) = &self.blocker {
+                let (entered_lock, entered_cvar) = &*blocker.entered;
+                *entered_lock.lock().unwrap() = true;
+                entered_cvar.notify_all();
+
+                let (release_lock, release_cvar) = &*blocker.release;
+                let mut released = release_lock.lock().unwrap();
+                while !*released {
+                    released = release_cvar.wait(released).unwrap();
+                }
+            }
+            Ok(())
+        }
+
+        fn get_size(&self) -> Result<PtySize, Error> {
+            Ok(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+        }
+
+        fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>, Error> {
+            Ok(Box::new(io::empty()))
+        }
+
+        fn take_writer(&self) -> Result<Box<dyn Write + Send>, Error> {
+            Ok(Box::new(DummyWriter))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockChildKiller {
+        killed: Arc<AtomicBool>,
+    }
+
+    impl portable_pty::ChildKiller for MockChildKiller {
+        fn kill(&mut self) -> io::Result<()> {
+            self.killed.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockChild {
+        killer: MockChildKiller,
+        exit_code: u32,
+    }
+
+    impl portable_pty::ChildKiller for MockChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.killer.kill()
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            self.killer.clone_killer()
+        }
+    }
+
+    impl portable_pty::Child for MockChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(Some(ExitStatus::with_exit_code(self.exit_code)))
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(self.exit_code))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(1)
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    fn insert_mock_instance(
+        state: &PtyManager,
+        pty_id: u32,
+        blocker: Option<ResizeBlocker>,
+    ) -> Arc<AtomicBool> {
+        let killed = Arc::new(AtomicBool::new(false));
+        state.instances.lock().unwrap().insert(
+            pty_id,
+            Arc::new(Mutex::new(PtyInstance {
+                writer: Box::new(DummyWriter),
+                master: Box::new(MockMaster { blocker }),
+                child: Box::new(MockChild {
+                    killer: MockChildKiller {
+                        killed: Arc::clone(&killed),
+                    },
+                    exit_code: 0,
+                }),
+            })),
+        );
+        killed
     }
 
     #[test]
@@ -1597,5 +1761,26 @@ mod tests {
 
         assert_eq!(scope, Some(normalize_path_string(&root)));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resize_on_one_pty_does_not_block_kill_on_another() {
+        let state = PtyManager::new();
+        let blocker = ResizeBlocker::new();
+        let _ = insert_mock_instance(&state, 1, Some(blocker.clone()));
+        let killed = insert_mock_instance(&state, 2, None);
+
+        let state_for_resize = state.clone();
+        let resize_thread = std::thread::spawn(move || {
+            resize_pty_internal(&state_for_resize, 1, 120, 40).expect("resize should succeed");
+        });
+
+        blocker.wait_until_entered();
+        kill_pty_internal(&state, 2).expect("kill should succeed");
+        assert!(killed.load(Ordering::Acquire));
+        assert!(state.get_instance(2).is_none());
+
+        blocker.release();
+        resize_thread.join().expect("resize thread should complete");
     }
 }

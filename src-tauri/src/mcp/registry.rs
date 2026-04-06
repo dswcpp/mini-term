@@ -180,6 +180,17 @@ fn start_task_schema() -> Value {
 fn task_id_schema() -> Value {
     schema(json!({ "taskId": { "type": "string" } }), &["taskId"])
 }
+fn save_task_plan_schema() -> Value {
+    schema(
+        json!({
+            "taskId": { "type": "string" },
+            "markdown": { "type": "string" },
+            "title": { "type": "string" },
+            "fileName": { "type": "string" }
+        }),
+        &["taskId", "markdown"],
+    )
+}
 fn approval_list_schema() -> Value {
     schema(
         json!({
@@ -669,6 +680,19 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
         "Inspect a task's current state."
     ),
     tool!(
+        "save_task_plan",
+        "Persist a task plan document.",
+        save_task_plan_schema,
+        tasks::save_task_plan_tool,
+        "task-management",
+        false,
+        false,
+        false,
+        false,
+        false,
+        "Store a durable Markdown plan document for a tracked task."
+    ),
+    tool!(
         "list_attention_tasks",
         "List tasks needing attention.",
         empty_schema,
@@ -847,6 +871,130 @@ pub fn tool_definitions() -> Vec<Value> {
     tool_definitions_with_meta()
 }
 
+fn authority_scope_for(tool: &ToolDefinition) -> &'static str {
+    match tool.group {
+        "core-runtime" => "control-plane",
+        "runtime-observation" => {
+            if tool.requires_host_connection {
+                "host-control"
+            } else {
+                "snapshot"
+            }
+        }
+        "pty-control" | "ui-control" => "host-control",
+        "task-management" => "task-runtime",
+        "legacy-compat" => "filesystem-compat",
+        _ => "control-plane",
+    }
+}
+
+fn risk_level_for(tool: &ToolDefinition) -> &'static str {
+    if tool.requires_confirmation {
+        return "high";
+    }
+
+    match tool.name {
+        "create_pty"
+        | "write_pty"
+        | "resize_pty"
+        | "set_config_fields"
+        | "create_tab"
+        | "split_pane"
+        | "notify_user"
+        | "start_task"
+        | "save_task_plan"
+        | "send_task_input"
+        | "decide_approval_request" => "medium",
+        _ if tool.read_only => "low",
+        _ => "medium",
+    }
+}
+
+fn idempotency_for(tool: &ToolDefinition) -> &'static str {
+    match tool.name {
+        "ping"
+        | "server_info"
+        | "list_tools"
+        | "list_workspaces"
+        | "get_workspace_context"
+        | "get_config"
+        | "list_ptys"
+        | "get_pty_detail"
+        | "get_process_tree"
+        | "list_fs_watches"
+        | "get_recent_events"
+        | "get_ai_sessions"
+        | "get_task_status"
+        | "list_attention_tasks"
+        | "resume_session"
+        | "list_approval_requests"
+        | "read_file"
+        | "search_files"
+        | "get_git_summary"
+        | "get_diff_for_review"
+        | "list_ai_sessions"
+        | "focus_workspace"
+        | "set_config_fields" => "idempotent",
+        _ => "replay-unsafe",
+    }
+}
+
+fn execution_kind_for(tool: &ToolDefinition) -> &'static str {
+    match tool.name {
+        "start_task" => "start-long-running",
+        "set_config_fields" | "save_task_plan" | "write_file" | "run_workspace_command" => "mutate",
+        "create_pty"
+        | "write_pty"
+        | "resize_pty"
+        | "kill_pty"
+        | "focus_workspace"
+        | "create_tab"
+        | "close_tab"
+        | "split_pane"
+        | "notify_user"
+        | "send_task_input"
+        | "close_task"
+        | "decide_approval_request" => "control",
+        _ => "observe",
+    }
+}
+
+fn degradation_mode_for(tool: &ToolDefinition) -> &'static str {
+    if tool.requires_confirmation {
+        "approval-required"
+    } else if matches!(tool.name, "get_pty_detail" | "get_process_tree") {
+        "snapshot-fallback"
+    } else {
+        "fail"
+    }
+}
+
+fn state_dependencies_for(tool: &ToolDefinition) -> &'static [&'static str] {
+    match tool.name {
+        "ping" | "list_tools" => &[],
+        "server_info" => &["runtime-snapshot", "approval-store"],
+        "list_workspaces" | "get_workspace_context" | "get_config" => &["workspace-config"],
+        "list_ptys" | "list_fs_watches" | "get_recent_events" | "get_ai_sessions" => {
+            &["runtime-snapshot"]
+        }
+        "get_pty_detail" | "get_process_tree" | "create_pty" | "write_pty" | "resize_pty"
+        | "kill_pty" => &["host", "pty"],
+        "focus_workspace" | "create_tab" | "close_tab" | "split_pane" | "notify_user" => {
+            &["host", "workspace-ui"]
+        }
+        "start_task" => &["task-runtime", "workspace-config"],
+        "get_task_status" | "list_attention_tasks" | "resume_session" => &["task-runtime"],
+        "save_task_plan" | "send_task_input" | "close_task" => &["task-runtime", "approval-store"],
+        "list_approval_requests" | "decide_approval_request" => &["approval-store"],
+        "read_file" | "search_files" | "get_git_summary" | "get_diff_for_review" => {
+            &["workspace-files"]
+        }
+        "write_file" | "run_workspace_command" => &["workspace-files", "approval-store"],
+        "list_ai_sessions" => &["workspace-files"],
+        _ => &[],
+    }
+}
+
 pub fn tool_definitions_with_meta() -> Vec<Value> {
     TOOL_DEFINITIONS
         .iter()
@@ -862,6 +1010,12 @@ pub fn tool_definitions_with_meta() -> Vec<Value> {
                 "requiresHostConnection": tool.requires_host_connection,
                 "supportsDryRun": tool.supports_dry_run,
                 "supportsPagination": tool.supports_pagination,
+                "authorityScope": authority_scope_for(tool),
+                "riskLevel": risk_level_for(tool),
+                "idempotency": idempotency_for(tool),
+                "executionKind": execution_kind_for(tool),
+                "degradationMode": degradation_mode_for(tool),
+                "stateDependencies": state_dependencies_for(tool),
                 "whenToUse": tool.when_to_use,
             })
         })
@@ -879,7 +1033,7 @@ mod tests {
             .iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
-        assert_eq!(TOOL_DEFINITIONS.len(), 37);
+        assert_eq!(TOOL_DEFINITIONS.len(), 38);
         assert_eq!(
             names,
             vec![
@@ -907,6 +1061,7 @@ mod tests {
                 "notify_user",
                 "start_task",
                 "get_task_status",
+                "save_task_plan",
                 "list_attention_tasks",
                 "resume_session",
                 "send_task_input",
@@ -937,7 +1092,7 @@ mod tests {
                 ("legacy-compat", 7),
                 ("pty-control", 4),
                 ("runtime-observation", 9),
-                ("task-management", 8),
+                ("task-management", 9),
                 ("ui-control", 6),
             ])
         );
@@ -1008,6 +1163,8 @@ mod tests {
             .unwrap();
         assert_eq!(get_pty_detail["requiresHostConnection"], true);
         assert_eq!(get_pty_detail["group"], "runtime-observation");
+        assert_eq!(get_pty_detail["authorityScope"], "host-control");
+        assert_eq!(get_pty_detail["degradationMode"], "snapshot-fallback");
 
         let set_config_fields = exported
             .iter()
@@ -1015,5 +1172,18 @@ mod tests {
             .unwrap();
         assert_eq!(set_config_fields["requiresHostConnection"], false);
         assert_eq!(set_config_fields["supportsDryRun"], true);
+        assert_eq!(set_config_fields["executionKind"], "mutate");
+        assert_eq!(set_config_fields["idempotency"], "idempotent");
+
+        let close_task = exported
+            .iter()
+            .find(|tool| tool["name"] == "close_task")
+            .unwrap();
+        assert_eq!(close_task["riskLevel"], "high");
+        assert_eq!(close_task["degradationMode"], "approval-required");
+        assert_eq!(
+            close_task["stateDependencies"],
+            json!(["task-runtime", "approval-store"])
+        );
     }
 }

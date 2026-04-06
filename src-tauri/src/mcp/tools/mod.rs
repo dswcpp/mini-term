@@ -1,3 +1,4 @@
+pub mod action_support;
 pub mod files;
 pub mod git;
 pub mod pty;

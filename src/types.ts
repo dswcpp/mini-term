@@ -343,6 +343,18 @@ export interface AgentTaskSummary {
   policySummary?: string;
 }
 
+export type AgentTaskArtifactKind = 'plan';
+
+export interface AgentTaskArtifact {
+  artifactId: string;
+  kind: AgentTaskArtifactKind;
+  title: string;
+  path: string;
+  mimeType: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface AgentActionResult<T> {
   ok: boolean;
   data?: T;
@@ -355,6 +367,7 @@ export interface AgentTaskStatusDetail {
   recentOutputExcerpt: string;
   diffSummary: GitFileStatus[];
   logPath: string;
+  artifacts: AgentTaskArtifact[];
 }
 
 export interface AgentWorkspaceSummary {
@@ -510,6 +523,12 @@ export interface EmbeddedMcpToolDefinition {
   requiresHostConnection?: boolean;
   supportsDryRun: boolean;
   supportsPagination: boolean;
+  authorityScope?: string;
+  riskLevel?: string;
+  idempotency?: string;
+  executionKind?: string;
+  degradationMode?: string;
+  stateDependencies?: string[];
   whenToUse: string;
 }
 
@@ -519,13 +538,38 @@ export interface EmbeddedMcpCallError {
   retryable: boolean;
 }
 
+export interface EmbeddedMcpActionState {
+  toolName: string;
+  actionId: string;
+  phase: string;
+  replayUnsafe: boolean;
+  retryable: boolean;
+  degradationMode: string;
+}
+
+export interface EmbeddedMcpApprovalState {
+  required: boolean;
+  status?: ApprovalDecision | string;
+  request?: ApprovalRequest | null;
+}
+
+export interface EmbeddedMcpRetryHint {
+  allowed: boolean;
+  approvalRequestId?: string;
+}
+
 export interface EmbeddedMcpCallResult {
   ok: boolean;
+  status?: string;
   data?: unknown;
   error?: EmbeddedMcpCallError | null;
   meta?: Record<string, unknown>;
   requiresConfirmation?: boolean;
   confirmation?: ApprovalRequest | null;
+  approval?: EmbeddedMcpApprovalState | null;
+  action?: EmbeddedMcpActionState | null;
+  blockingReason?: string | null;
+  retry?: EmbeddedMcpRetryHint | null;
 }
 
 export interface TaskInjectionPreview {
@@ -672,6 +716,26 @@ export interface FileContentResult {
   content: string;
   isBinary: boolean;
   tooLarge: boolean;
+}
+
+export type DocumentPreviewKind =
+  | 'text'
+  | 'markdown'
+  | 'svg'
+  | 'image'
+  | 'pdf'
+  | 'docx'
+  | 'doc'
+  | 'unsupported';
+
+export interface DocumentPreviewResult {
+  kind: DocumentPreviewKind;
+  mimeType?: string;
+  textContent?: string;
+  tooLarge: boolean;
+  byteLength: number;
+  openExternallyRecommended?: boolean;
+  warning?: string;
 }
 
 export interface FileViewerOpenOptions {

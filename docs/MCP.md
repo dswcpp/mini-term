@@ -100,16 +100,44 @@ The HTTP wrapper reuses the same JSON-RPC tool handler as the stdio server.
 
 ## Tool Groups
 
-Mini-Term now exposes 37 tools across 6 fixed groups:
+Mini-Term now exposes 38 tools across 6 fixed groups:
 
 - `core-runtime` (3)
 - `runtime-observation` (9)
 - `pty-control` (4)
 - `ui-control` (6)
-- `task-management` (8)
+- `task-management` (9)
 - `legacy-compat` (7)
 
-`list_tools` includes `requiresHostConnection` so clients can distinguish snapshot-only tools from host-backed tools that need the desktop app to be online.
+`list_tools` includes control-plane capability metadata so clients can distinguish the source of truth, operational risk, and failure mode of each tool before calling it.
+
+Current metadata fields include:
+
+- `requiresHostConnection`
+- `authorityScope`
+  - `control-plane`
+  - `snapshot`
+  - `host-control`
+  - `task-runtime`
+  - `filesystem-compat`
+- `riskLevel`
+  - `low`
+  - `medium`
+  - `high`
+- `idempotency`
+  - `idempotent`
+  - `replay-unsafe`
+- `executionKind`
+  - `observe`
+  - `mutate`
+  - `control`
+  - `start-long-running`
+- `degradationMode`
+  - `fail`
+  - `snapshot-fallback`
+  - `approval-required`
+- `stateDependencies`
+  - describes which runtime subsystem a tool depends on, such as `runtime-snapshot`, `host`, `task-runtime`, `approval-store`, or `workspace-files`
 
 Host-backed tools are:
 
@@ -129,9 +157,39 @@ These tools require all of the following:
 
 1. Mini-Term desktop host has written a fresh runtime snapshot
 2. `server_info.hostConnection.status == "connected"`
-3. `server_info.hostConnection.hostControl` is present
+3. `server_info.hostConnection.controlStatus == "ready"`
+4. `server_info.hostConnection.hostControl` is present
 
 If those conditions are not met, host-backed tools should be treated as unavailable and clients should fall back to snapshot-only observation.
+
+## Runtime Authority Model
+
+`server_info` now exposes both connection health and runtime authority summary:
+
+- `hostConnection.status`
+  - `connected`
+  - `stale`
+  - `unavailable`
+- `hostConnection.controlStatus`
+  - `ready`
+  - `snapshot-only`
+  - `unavailable`
+- `runtime.stateOwner`
+  - currently `desktop-host`
+- `runtime.authorityModel`
+  - currently `desktop-host-authoritative`
+- `runtime.degradationMode`
+  - `full-control`
+  - `snapshot-only`
+  - `stale-snapshot-only`
+  - `unavailable`
+- `runtime.summary`
+  - PTY count
+  - watcher count
+  - recent event count
+  - approval counts
+
+External clients should treat `server_info` as the first authority handshake, not only as a version endpoint.
 
 ## Preferred Tool Sequence
 
@@ -145,7 +203,7 @@ For external agents, prioritize:
 6. `list_ptys`
 7. `get_recent_events`
 8. `get_config`
-9. Host-backed PTY or UI tools only when `requiresHostConnection=true` is satisfied
+9. Host-backed PTY or UI tools only when `requiresHostConnection=true` and `server_info.hostConnection.controlStatus == "ready"`
 
 Compatibility tools still exist, but they are not the default value proposition of Mini-Term MCP:
 
@@ -190,6 +248,8 @@ Current repository validation now covers:
 - Task / approval tools
   - `start_task`
   - `get_task_status`
+  - `save_task_plan`
+    - stores a Markdown plan document for a tracked task
   - `list_attention_tasks`
   - `resume_session`
   - `send_task_input`
@@ -205,10 +265,10 @@ Current repository validation now covers:
   - `run_workspace_command`
   - `list_ai_sessions`
 
-At the time of this update, repository validation includes:
+Repository validation for this surface should include:
 
-- full Rust test suite:
-  - `208 passed, 1 ignored`
+- Rust test suite:
+  - `cargo test --manifest-path src-tauri/Cargo.toml`
 - stdio smoke:
   - `cmd /c npm run test:mcp`
 - HTTP smoke:
@@ -226,7 +286,9 @@ Expected operational failure modes:
 - host-backed business errors such as `tab not found`
   - returned from host control with HTTP 200 and surfaced to the tool caller
 - approval-gated tools
-  - first call may return `approvalRequired=true`
+  - first call may return `requiresConfirmation=true`
+  - confirmation payload also includes `approval`, `action`, `blockingReason`, and `retry`
+  - handler-level pending payloads still originate from `approvalRequired=true`
   - caller must retry with `approvalRequestId` after approval
 
 ## Windows Notes

@@ -27,6 +27,13 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "../docs/AGENT_POLICY_PROMPTS.md",
+      "../docs/MCP.md",
+      "../docs/MCP_SETUP.md",
+      "../docs/skills/**/*",
+      "../scripts/install-mini-term-skills.ps1"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

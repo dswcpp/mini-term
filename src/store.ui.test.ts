@@ -178,6 +178,26 @@ describe('ui dialog store', () => {
     });
   });
 
+  it('defaults svg and document preview types to preview mode', () => {
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/docs/diagram.svg');
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/docs/guide.pdf');
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/docs/guide.docx');
+
+    const tabs = useAppStore.getState().projectStates.get('project-1')?.tabs ?? [];
+    expect(tabs[0]).toMatchObject({ filePath: 'D:/code/JavaScript/mini-term/docs/diagram.svg', mode: 'preview' });
+    expect(tabs[1]).toMatchObject({ filePath: 'D:/code/JavaScript/mini-term/docs/guide.pdf', mode: 'preview' });
+    expect(tabs[2]).toMatchObject({ filePath: 'D:/code/JavaScript/mini-term/docs/guide.docx', mode: 'preview' });
+  });
+
+  it('keeps source mode for regular code files', () => {
+    useAppStore.getState().openFileViewer('project-1', 'D:/code/JavaScript/mini-term/src/main.ts');
+
+    expect(useAppStore.getState().projectStates.get('project-1')?.tabs[0]).toMatchObject({
+      filePath: 'D:/code/JavaScript/mini-term/src/main.ts',
+      mode: 'source',
+    });
+  });
+
   it('opens worktree diff as a workspace tab', () => {
     useAppStore.getState().openWorktreeDiff('project-1', 'D:/code/JavaScript/mini-term', sampleStatus);
 

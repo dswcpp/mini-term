@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { save } from '@tauri-apps/plugin-dialog';
+import { materializeMermaidSvgForExport } from './markdownMermaid';
 
 export type MermaidExportFormat = 'svg' | 'png';
 
@@ -20,7 +21,7 @@ function normalizeSvgMarkup(svgMarkup: string) {
   const hasXmlNs = /\sxmlns=/.test(svgMarkup);
   const hasXlinkNs = /\sxmlns:xlink=/.test(svgMarkup);
 
-  let normalized = svgMarkup;
+  let normalized = materializeMermaidSvgForExport(svgMarkup);
   if (!hasXmlNs) {
     normalized = normalized.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
   }

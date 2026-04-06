@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles.css';
+import { isIgnorableWindowIssue } from './utils/runtimeErrorFilter';
 
 function formatError(error: unknown) {
   if (error instanceof Error) {
@@ -117,11 +118,24 @@ document.addEventListener('keydown', (event) => {
 });
 
 window.addEventListener('error', (event) => {
+  const candidate = event.error ?? event.message;
+  if (isIgnorableWindowIssue(candidate)) {
+    console.warn('Ignored benign window error', candidate);
+    event.preventDefault();
+    return;
+  }
+
   console.error('Unhandled window error', event.error ?? event.message);
-  renderFatal('Startup Error', event.error ?? event.message);
+  renderFatal('Startup Error', candidate);
 });
 
 window.addEventListener('unhandledrejection', (event) => {
+  if (isIgnorableWindowIssue(event.reason)) {
+    console.warn('Ignored benign promise rejection', event.reason);
+    event.preventDefault();
+    return;
+  }
+
   console.error('Unhandled promise rejection', event.reason);
   renderFatal('Unhandled Promise Rejection', event.reason);
 });

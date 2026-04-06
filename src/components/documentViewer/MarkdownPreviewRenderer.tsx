@@ -1,16 +1,13 @@
-import { isValidElement, useMemo, useState } from 'react';
+import { isValidElement, useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { ViewerLayoutMode } from './types';
 import type { PreviewRenderContext } from './types';
-import { MermaidFocusLayer } from './MermaidFocusLayer';
-import { MermaidViewport } from './MermaidViewport';
+import { MermaidDiagramBlock } from './MermaidDiagramBlock';
 import { resolveLocalPath, isExternalHref } from './path';
-import { useMermaidDiagram } from './useMermaidDiagram';
 
 function markdownNodeToString(value: ReactNode): string {
   if (Array.isArray(value)) {
@@ -23,70 +20,6 @@ function markdownNodeToString(value: ReactNode): string {
 
   return String(value);
 }
-
-let mermaidSequence = 0;
-
-function buildMermaidExportBaseName(fileName: string, diagramId: string) {
-  const stem = fileName.replace(/\.[^.]+$/, '');
-  const suffix = diagramId.split('-').pop() ?? '1';
-  return `${stem}-mermaid-${suffix}`;
-}
-
-function MermaidBlock({
-  source,
-  active,
-  layoutMode,
-  exportFileName,
-}: {
-  source: string;
-  active: boolean;
-  layoutMode: ViewerLayoutMode;
-  exportFileName: string;
-}) {
-  const [focusViewerOpen, setFocusViewerOpen] = useState(false);
-  const diagramId = useMemo(() => {
-    mermaidSequence += 1;
-    return `mini-term-mermaid-${mermaidSequence}`;
-  }, []);
-  const { svg, error, bindFunctions } = useMermaidDiagram(source, diagramId, active);
-
-  if (error) {
-    return (
-      <div className="my-5 overflow-hidden rounded-xl border border-[var(--color-error)]/40 bg-[rgba(212,96,90,0.08)]">
-        <div className="border-b border-[var(--color-error)]/30 px-4 py-2 text-xs font-medium text-[var(--color-error)]">
-          Mermaid 渲染失败
-        </div>
-        <div className="px-4 py-3 text-xs text-[var(--text-secondary)]">{error}</div>
-        <pre className="m-0 overflow-x-auto border-t border-[var(--border-default)] bg-[rgba(8,8,8,0.35)] px-4 py-3 text-[13px] text-[var(--text-primary)]">
-          <code>{source}</code>
-        </pre>
-      </div>
-    );
-  }
-
-  return (
-    <>
-      <MermaidViewport
-        svg={svg}
-        bindFunctions={bindFunctions}
-        active={active}
-        layoutMode={layoutMode}
-        testIdPrefix="mermaid"
-        onOpenFocus={active && svg ? () => setFocusViewerOpen(true) : undefined}
-        exportBaseName={buildMermaidExportBaseName(exportFileName, diagramId)}
-      />
-      <MermaidFocusLayer
-        open={focusViewerOpen && active}
-        onClose={() => setFocusViewerOpen(false)}
-        svg={svg}
-        bindFunctions={bindFunctions}
-        exportBaseName={buildMermaidExportBaseName(exportFileName, diagramId)}
-      />
-    </>
-  );
-}
-
-MermaidBlock.displayName = 'MermaidBlock';
 
 export default function MarkdownPreviewRenderer({
   active,
@@ -146,7 +79,14 @@ export default function MarkdownPreviewRenderer({
       const source = markdownNodeToString(children).replace(/\n$/, '');
 
       if (className?.includes('language-mermaid')) {
-        return <MermaidBlock source={source} active={active} layoutMode={layoutMode} exportFileName={fileName} />;
+        return (
+          <MermaidDiagramBlock
+            source={source}
+            active={active}
+            layoutMode={layoutMode}
+            exportFileName={fileName}
+          />
+        );
       }
 
       const inline = !className;
@@ -227,7 +167,7 @@ export default function MarkdownPreviewRenderer({
     ),
     pre: ({ children, ...props }) => {
       const child = Array.isArray(children) ? children[0] : children;
-      if (isValidElement(child) && child.type === MermaidBlock) {
+      if (isValidElement(child) && child.type === MermaidDiagramBlock) {
         return child;
       }
 
@@ -273,7 +213,7 @@ export default function MarkdownPreviewRenderer({
 
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-      {result.content}
+      {result.textContent ?? ''}
     </ReactMarkdown>
   );
 }

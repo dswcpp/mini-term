@@ -5,6 +5,8 @@ interface TextPreviewRendererProps extends PreviewRenderContext {
 }
 
 export function TextPreviewRenderer({ result, testId }: TextPreviewRendererProps) {
+  const content = result.textContent ?? '';
+
   return (
     <div
       data-testid={testId}
@@ -20,7 +22,7 @@ export function TextPreviewRenderer({ result, testId }: TextPreviewRendererProps
           fontFamily: 'var(--viewer-code-font)',
         }}
       >
-        {result.content.split('\n').map((line, index) => (
+        {content.split('\n').map((line, index) => (
           <div
             key={index}
             data-source-line={index + 1}

@@ -4,14 +4,8 @@ use crate::agent_core::task_runtime::{mark_approval_executed, request_or_validat
 use crate::agent_core::workspace_context::validate_task_working_directory;
 use crate::config::load_config_from_path;
 use crate::host_control::call_host_control;
+use crate::mcp::tools::action_support::approval_pending_value;
 use serde_json::{json, Value};
-
-fn approval_pending_value(result: crate::agent_core::models::PendingApprovalResult) -> Value {
-    json!({
-        "approvalRequired": result.approval_required,
-        "request": result.request,
-    })
-}
 
 fn workspace_exists(workspace_id: &str) -> Result<(), String> {
     let config = load_config_from_path(&config_path());
@@ -95,7 +89,7 @@ pub fn close_tab_tool(args: Value) -> Result<Value, String> {
         format!("Workspace: {workspace_id}\nTab: {tab_id}"),
     ) {
         Ok(approval) => approval,
-        Err(pending) => return Ok(approval_pending_value(pending)),
+        Err(pending) => return Ok(approval_pending_value("close_tab", pending)),
     };
 
     let result = call_host_control(

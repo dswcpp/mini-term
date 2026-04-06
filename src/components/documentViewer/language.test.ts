@@ -13,6 +13,13 @@ describe('resolveDocumentLanguage', () => {
     expect(resolveDocumentLanguage('D:/code/app/build.ps1')).toMatchObject({ family: 'shell', languageId: 'powershell', badge: 'SH' });
     expect(resolveDocumentLanguage('D:/code/app/config.toml')).toMatchObject({ family: 'data', languageId: 'toml', badge: 'DATA' });
     expect(resolveDocumentLanguage('D:/code/app/README.md')).toMatchObject({ family: 'docs', languageId: 'markdown', badge: 'MD' });
+    expect(resolveDocumentLanguage('D:/code/app/flow.mmd')).toMatchObject({ family: 'docs', languageId: 'mermaid', badge: 'MMD' });
+    expect(resolveDocumentLanguage('D:/code/app/sequence.mermaid')).toMatchObject({ family: 'docs', languageId: 'mermaid', badge: 'MMD' });
+    expect(resolveDocumentLanguage('D:/code/app/diagram.svg')).toMatchObject({ family: 'image', languageId: 'svg', badge: 'SVG' });
+    expect(resolveDocumentLanguage('D:/code/app/logo.png')).toMatchObject({ family: 'image', languageId: 'image', badge: 'IMG' });
+    expect(resolveDocumentLanguage('D:/code/app/guide.pdf')).toMatchObject({ family: 'document', languageId: 'pdf', badge: 'PDF' });
+    expect(resolveDocumentLanguage('D:/code/app/spec.docx')).toMatchObject({ family: 'document', languageId: 'docx', badge: 'DOC' });
+    expect(resolveDocumentLanguage('D:/code/app/legacy.doc')).toMatchObject({ family: 'document', languageId: 'doc', badge: 'DOC' });
     expect(resolveDocumentLanguage('D:/code/app/forms/MainWindow.ui')).toMatchObject({ family: 'data', languageId: 'xml', badge: 'DATA' });
     expect(resolveDocumentLanguage('D:/code/app/project.pro')).toMatchObject({ family: 'generic', languageId: 'generic', badge: 'TXT' });
   });

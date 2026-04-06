@@ -41,6 +41,13 @@ describe('TabBar', () => {
               },
               {
                 kind: 'file-viewer',
+                id: 'file-mermaid',
+                filePath: 'D:/code/JavaScript/mini-term/docs/flow.mmd',
+                mode: 'preview',
+                status: 'idle',
+              },
+              {
+                kind: 'file-viewer',
                 id: 'file-text',
                 filePath: 'D:/code/JavaScript/mini-term/src/main.ts',
                 mode: 'source',
@@ -98,12 +105,16 @@ describe('TabBar', () => {
 
     const previewTab = screen.getByTestId('workspace-tab-file-preview');
     const sourceTab = screen.getByTestId('workspace-tab-file-source');
+    const mermaidTab = screen.getByTestId('workspace-tab-file-mermaid');
 
     expect(previewTab.textContent).toContain('README.md');
     expect(within(previewTab).getByText('PREVIEW')).not.toBeNull();
 
     expect(sourceTab.textContent).toContain('guide.md');
     expect(within(sourceTab).getByText('MD')).not.toBeNull();
+
+    expect(mermaidTab.textContent).toContain('flow.mmd');
+    expect(within(mermaidTab).getByText('PREVIEW')).not.toBeNull();
   });
 
   it('shows relative path context for file and worktree tabs', () => {

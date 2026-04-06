@@ -8,6 +8,8 @@ export type DocumentLanguageFamily =
   | 'web'
   | 'data'
   | 'docs'
+  | 'image'
+  | 'document'
   | 'generic';
 
 export type DocumentLanguageId =
@@ -32,6 +34,12 @@ export type DocumentLanguageId =
   | 'toml'
   | 'xml'
   | 'markdown'
+  | 'mermaid'
+  | 'svg'
+  | 'image'
+  | 'pdf'
+  | 'docx'
+  | 'doc'
   | 'generic';
 
 export type ViewerVariant =
@@ -43,6 +51,7 @@ export type ViewerVariant =
   | 'terminal'
   | 'grid'
   | 'docs'
+  | 'media'
   | 'neutral';
 
 export interface DocumentLanguageInfo {
@@ -350,6 +359,110 @@ const LANGUAGE_BY_EXTENSION: Record<string, DocumentLanguageInfo> = {
     displayName: 'Markdown',
     badge: 'MD',
     highlighterKey: 'markdown',
+    viewerVariant: 'docs',
+  },
+  '.mmd': {
+    languageId: 'mermaid',
+    family: 'docs',
+    displayName: 'Mermaid',
+    badge: 'MMD',
+    highlighterKey: 'text',
+    viewerVariant: 'docs',
+  },
+  '.mermaid': {
+    languageId: 'mermaid',
+    family: 'docs',
+    displayName: 'Mermaid',
+    badge: 'MMD',
+    highlighterKey: 'text',
+    viewerVariant: 'docs',
+  },
+  '.svg': {
+    languageId: 'svg',
+    family: 'image',
+    displayName: 'SVG',
+    badge: 'SVG',
+    highlighterKey: 'xml',
+    viewerVariant: 'media',
+  },
+  '.png': {
+    languageId: 'image',
+    family: 'image',
+    displayName: 'Image',
+    badge: 'IMG',
+    highlighterKey: 'text',
+    viewerVariant: 'media',
+  },
+  '.jpg': {
+    languageId: 'image',
+    family: 'image',
+    displayName: 'Image',
+    badge: 'IMG',
+    highlighterKey: 'text',
+    viewerVariant: 'media',
+  },
+  '.jpeg': {
+    languageId: 'image',
+    family: 'image',
+    displayName: 'Image',
+    badge: 'IMG',
+    highlighterKey: 'text',
+    viewerVariant: 'media',
+  },
+  '.gif': {
+    languageId: 'image',
+    family: 'image',
+    displayName: 'Image',
+    badge: 'IMG',
+    highlighterKey: 'text',
+    viewerVariant: 'media',
+  },
+  '.webp': {
+    languageId: 'image',
+    family: 'image',
+    displayName: 'Image',
+    badge: 'IMG',
+    highlighterKey: 'text',
+    viewerVariant: 'media',
+  },
+  '.bmp': {
+    languageId: 'image',
+    family: 'image',
+    displayName: 'Image',
+    badge: 'IMG',
+    highlighterKey: 'text',
+    viewerVariant: 'media',
+  },
+  '.ico': {
+    languageId: 'image',
+    family: 'image',
+    displayName: 'Icon',
+    badge: 'IMG',
+    highlighterKey: 'text',
+    viewerVariant: 'media',
+  },
+  '.pdf': {
+    languageId: 'pdf',
+    family: 'document',
+    displayName: 'PDF',
+    badge: 'PDF',
+    highlighterKey: 'text',
+    viewerVariant: 'docs',
+  },
+  '.docx': {
+    languageId: 'docx',
+    family: 'document',
+    displayName: 'DOCX',
+    badge: 'DOC',
+    highlighterKey: 'text',
+    viewerVariant: 'docs',
+  },
+  '.doc': {
+    languageId: 'doc',
+    family: 'document',
+    displayName: 'DOC',
+    badge: 'DOC',
+    highlighterKey: 'text',
     viewerVariant: 'docs',
   },
 };

@@ -410,32 +410,54 @@ function setupWorkspace(root) {
     ],
   );
 
-  const shimPath = path.join(root, 'agent-shim.js');
+  const shimPath = path.join(root, process.platform === 'win32' ? 'agent-shim.ps1' : 'agent-shim.js');
   fs.writeFileSync(
     shimPath,
-    [
-      "const target = process.argv[2] || '';",
-      "console.log(`READY:${target}`);",
-      "console.log('TITLE:');",
-      "let buffer = '';",
-      "process.stdin.setEncoding('utf8');",
-      'process.stdin.resume();',
-      'setInterval(() => {}, 1000);',
-      "process.stdin.on('data', (chunk) => {",
-      "  buffer += chunk;",
-      "  const normalized = buffer.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n');",
-      "  const lines = normalized.split('\\n');",
-      "  buffer = lines.pop() ?? '';",
-      '  for (const line of lines) {',
-      "    if (line === 'exit') {",
-      "      console.log('BYE');",
-      '      process.exit(0);',
-      '    }',
-      "    console.log(line.length === 0 ? 'ECHO:<ENTER>' : `ECHO:${line}`);",
-      '  }',
-      '});',
-      '',
-    ].join('\n'),
+    (
+      process.platform === 'win32'
+        ? [
+            'param([string]$target)',
+            'Write-Output "READY:$target"',
+            "Write-Output 'TITLE:'",
+            'while ($true) {',
+            '  $line = [Console]::In.ReadLine()',
+            '  if ($null -eq $line) { break }',
+            "  if ($line -eq 'exit') {",
+            "    Write-Output 'BYE'",
+            '    exit 0',
+            '  }',
+            '  if ($line.Length -eq 0) {',
+            "    Write-Output 'ECHO:<ENTER>'",
+            '  } else {',
+            '    Write-Output "ECHO:$line"',
+            '  }',
+            '}',
+            '',
+          ]
+        : [
+            "const target = process.argv[2] || '';",
+            "console.log(`READY:${target}`);",
+            "console.log('TITLE:');",
+            "let buffer = '';",
+            "process.stdin.setEncoding('utf8');",
+            'process.stdin.resume();',
+            'setInterval(() => {}, 1000);',
+            "process.stdin.on('data', (chunk) => {",
+            "  buffer += chunk;",
+            "  const normalized = buffer.replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n');",
+            "  const lines = normalized.split('\\n');",
+            "  buffer = lines.pop() ?? '';",
+            '  for (const line of lines) {',
+            "    if (line === 'exit') {",
+            "      console.log('BYE');",
+            '      process.exit(0);',
+            '    }',
+            "    console.log(line.length === 0 ? 'ECHO:<ENTER>' : `ECHO:${line}`);",
+            '  }',
+            '});',
+            '',
+          ]
+    ).join('\n'),
   );
 
   return { dataDir, homeDir, workspaceRoot, shimPath };
@@ -642,8 +664,9 @@ async function main() {
     await client.initialize();
 
     const protocolList = await client.request('tools/list');
-    assert.ok(protocolList.result.tools.length >= 37);
+    assert.ok(protocolList.result.tools.length >= 38);
     assert.ok(protocolList.result.tools.some((tool) => tool.name === 'get_pty_detail'));
+    assert.ok(protocolList.result.tools.some((tool) => tool.name === 'save_task_plan'));
     completed.push('protocol.tools/list');
 
     const ping = await client.callTool('ping');
@@ -869,6 +892,15 @@ async function main() {
     const resumed = await client.callTool('resume_session', { taskId });
     assert.equal(resumed.data.summary.taskId, taskId);
     completed.push('resume_session');
+
+    const savedPlan = await client.callTool('save_task_plan', {
+      taskId,
+      markdown: '# Smoke Plan\n\n1. Inspect\n2. Verify\n',
+      title: 'Smoke Plan',
+    });
+    assert.equal(savedPlan.data.summary.taskId, taskId);
+    assert.equal(savedPlan.data.artifacts[0].kind, 'plan');
+    completed.push('save_task_plan');
 
     const taskInput = await client.callTool('send_task_input', { taskId, input: 'hello smoke' });
     assert.equal(taskInput.data.taskId, taskId);

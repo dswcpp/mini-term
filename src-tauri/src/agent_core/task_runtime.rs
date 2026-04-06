@@ -1,12 +1,12 @@
 use super::approval::{
     create_approval_request, get_approval, get_approval_by_key, set_approval_status,
 };
-use super::data_dir::logs_dir;
+use super::data_dir::{ensure_parent, logs_dir, task_artifacts_dir};
 use super::git_context::get_git_summary;
 use super::models::{
     AgentActionResult, ApprovalDecision, ApprovalRequest, ApprovalRiskLevel, PendingApprovalResult,
-    StartTaskInput, TaskAttentionState, TaskContextPreset, TaskStatusDetail, TaskSummary,
-    TaskTarget, TaskTerminationCause,
+    StartTaskInput, TaskArtifact, TaskArtifactKind, TaskAttentionState, TaskContextPreset,
+    TaskStatusDetail, TaskSummary, TaskTarget, TaskTerminationCause,
 };
 use super::task_store::{get_task_detail, list_task_details, update_task, upsert_task_detail};
 use super::workspace_context::{get_workspace_context, validate_task_working_directory};
@@ -435,6 +435,42 @@ fn log_path(task_id: &str) -> PathBuf {
     logs_dir().join(format!("{task_id}.log"))
 }
 
+fn task_plan_path(task_id: &str, file_name: &str) -> PathBuf {
+    task_artifacts_dir(task_id).join(file_name)
+}
+
+fn sanitize_artifact_file_name(file_name: Option<&str>) -> String {
+    let trimmed = file_name.unwrap_or("plan.md").trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains(['/', '\\', ':'])
+        || trimmed
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
+        return "plan.md".to_string();
+    }
+    trimmed.to_string()
+}
+
+fn write_text_file_atomically(path: &Path, content: &str) -> Result<(), String> {
+    ensure_parent(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    let tmp_path = path.with_file_name(format!(".{file_name}.{}.tmp", Uuid::now_v7()));
+    fs::write(&tmp_path, content).map_err(|err| err.to_string())?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|err| err.to_string())?;
+    }
+    fs::rename(&tmp_path, path).map_err(|err| {
+        let _ = fs::remove_file(&tmp_path);
+        err.to_string()
+    })
+}
+
 fn is_terminal_task(detail: &TaskStatusDetail) -> bool {
     detail.summary.termination_cause.is_some()
         || matches!(detail.summary.status.as_str(), "error" | "exited")
@@ -508,6 +544,7 @@ fn initialize_task_record(
         recent_output_excerpt: String::new(),
         diff_summary: Vec::new(),
         log_path: log_path(&task_id).to_string_lossy().to_string(),
+        artifacts: Vec::new(),
     }
 }
 
@@ -859,6 +896,56 @@ pub fn resume_session(task_id: &str) -> Result<TaskStatusDetail, String> {
     get_task_status(task_id)
 }
 
+pub fn save_task_plan(
+    task_id: &str,
+    markdown: &str,
+    title: Option<&str>,
+    file_name: Option<&str>,
+) -> Result<TaskStatusDetail, String> {
+    if markdown.trim().is_empty() {
+        return Err("markdown is required".to_string());
+    }
+    if get_task_detail(task_id).is_none() {
+        return Err(format!("task not found: {task_id}"));
+    }
+
+    let normalized_file_name = sanitize_artifact_file_name(file_name);
+    let path = task_plan_path(task_id, &normalized_file_name);
+    write_text_file_atomically(&path, markdown)?;
+
+    let now = now_timestamp_ms();
+    let title = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Plan Document")
+        .to_string();
+    let path_string = path.to_string_lossy().to_string();
+    let updated = update_task(task_id, |detail| {
+        if let Some(existing) = detail
+            .artifacts
+            .iter_mut()
+            .find(|artifact| artifact.kind == TaskArtifactKind::Plan)
+        {
+            existing.title = title.clone();
+            existing.path = path_string.clone();
+            existing.mime_type = "text/markdown".to_string();
+            existing.updated_at = now;
+        } else {
+            detail.artifacts.push(TaskArtifact {
+                artifact_id: generate_id("artifact"),
+                kind: TaskArtifactKind::Plan,
+                title: title.clone(),
+                path: path_string.clone(),
+                mime_type: "text/markdown".to_string(),
+                created_at: now,
+                updated_at: now,
+            });
+        }
+    })?;
+
+    updated.ok_or_else(|| format!("task not found: {task_id}"))
+}
+
 pub fn request_or_validate_approval(
     request_id: Option<&str>,
     tool_name: &str,
@@ -991,6 +1078,7 @@ mod tests {
             recent_output_excerpt: String::new(),
             diff_summary: Vec::new(),
             log_path: log_path(task_id).to_string_lossy().to_string(),
+            artifacts: Vec::new(),
         }
     }
 
@@ -1116,6 +1204,73 @@ mod tests {
             updated.termination_cause,
             Some(TaskTerminationCause::ManualClose)
         );
+    }
+
+    #[test]
+    fn save_task_plan_creates_and_persists_plan_artifact() {
+        let harness = TestHarness::new("save-task-plan-create");
+        upsert_task_detail(sample_task("task-plan", &harness.workspace_path())).unwrap();
+
+        let detail = save_task_plan(
+            "task-plan",
+            "# Plan\n\n1. Review\n2. Implement",
+            Some("Execution Plan"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(detail.artifacts.len(), 1);
+        assert_eq!(detail.artifacts[0].kind, TaskArtifactKind::Plan);
+        assert_eq!(detail.artifacts[0].title, "Execution Plan");
+        assert!(detail.artifacts[0].path.ends_with("plan.md"));
+        assert_eq!(
+            std::fs::read_to_string(task_plan_path("task-plan", "plan.md")).unwrap(),
+            "# Plan\n\n1. Review\n2. Implement"
+        );
+    }
+
+    #[test]
+    fn save_task_plan_overwrites_existing_plan_artifact() {
+        let harness = TestHarness::new("save-task-plan-update");
+        upsert_task_detail(sample_task("task-plan-update", &harness.workspace_path())).unwrap();
+
+        let first = save_task_plan(
+            "task-plan-update",
+            "# First",
+            Some("Plan"),
+            Some("nested/plan.md"),
+        )
+        .unwrap();
+        let first_artifact = first.artifacts[0].clone();
+
+        std::thread::sleep(Duration::from_millis(2));
+        let second = save_task_plan(
+            "task-plan-update",
+            "# Second",
+            Some("Updated Plan"),
+            Some("plan.md"),
+        )
+        .unwrap();
+
+        assert_eq!(second.artifacts.len(), 1);
+        assert_eq!(second.artifacts[0].artifact_id, first_artifact.artifact_id);
+        assert_eq!(second.artifacts[0].title, "Updated Plan");
+        assert!(second.artifacts[0].updated_at >= first_artifact.updated_at);
+        assert_eq!(
+            std::fs::read_to_string(task_plan_path("task-plan-update", "plan.md")).unwrap(),
+            "# Second"
+        );
+    }
+
+    #[test]
+    fn save_task_plan_rejects_missing_task_and_empty_markdown() {
+        let _harness = TestHarness::new("save-task-plan-errors");
+        let missing = save_task_plan("missing-task", "# Plan", None, None).unwrap_err();
+        assert_eq!(missing, "task not found: missing-task");
+
+        upsert_task_detail(sample_task("task-empty-plan", "D:/code/mini-term")).unwrap();
+        let empty = save_task_plan("task-empty-plan", "   ", None, None).unwrap_err();
+        assert_eq!(empty, "markdown is required");
     }
 
     #[test]

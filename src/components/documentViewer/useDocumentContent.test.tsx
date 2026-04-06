@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { useDocumentContent } from './useDocumentContent';
+import type { DocumentPreviewResult } from '../../types';
 
 const invokeMock = vi.fn();
 
@@ -32,7 +33,7 @@ function HookHarness({
       <div data-testid="loading">{state.loading ? 'true' : 'false'}</div>
       <div data-testid="refreshing">{state.refreshing ? 'true' : 'false'}</div>
       <div data-testid="error">{state.error}</div>
-      <div data-testid="content">{state.result?.content ?? ''}</div>
+      <div data-testid="content">{state.result?.textContent ?? ''}</div>
       <button
         type="button"
         data-testid="silent-reload"
@@ -51,8 +52,17 @@ describe('useDocumentContent', () => {
     invokeMock.mockReset();
   });
 
+  function previewResult(textContent: string): DocumentPreviewResult {
+    return {
+      kind: 'markdown',
+      textContent,
+      tooLarge: false,
+      byteLength: textContent.length,
+    };
+  }
+
   it('shows loading during the initial fetch', async () => {
-    const deferred = createDeferred<{ content: string; isBinary: boolean; tooLarge: boolean }>();
+    const deferred = createDeferred<DocumentPreviewResult>();
     invokeMock.mockReturnValueOnce(deferred.promise);
 
     render(<HookHarness filePath="D:/code/JavaScript/mini-term/README.md" />);
@@ -61,11 +71,7 @@ describe('useDocumentContent', () => {
     expect(screen.getByTestId('content').textContent).toBe('');
 
     await act(async () => {
-      deferred.resolve({
-        content: '# Title',
-        isBinary: false,
-        tooLarge: false,
-      });
+      deferred.resolve(previewResult('# Title'));
     });
 
     await waitFor(() => {
@@ -75,13 +81,9 @@ describe('useDocumentContent', () => {
   });
 
   it('keeps previous content visible during silent reload and marks refreshing', async () => {
-    const deferred = createDeferred<{ content: string; isBinary: boolean; tooLarge: boolean }>();
+    const deferred = createDeferred<DocumentPreviewResult>();
     invokeMock
-      .mockResolvedValueOnce({
-        content: '# Old',
-        isBinary: false,
-        tooLarge: false,
-      })
+      .mockResolvedValueOnce(previewResult('# Old'))
       .mockReturnValueOnce(deferred.promise);
 
     render(<HookHarness filePath="D:/code/JavaScript/mini-term/README.md" />);
@@ -97,11 +99,7 @@ describe('useDocumentContent', () => {
     expect(screen.getByTestId('loading').textContent).toBe('false');
 
     await act(async () => {
-      deferred.resolve({
-        content: '# New',
-        isBinary: false,
-        tooLarge: false,
-      });
+      deferred.resolve(previewResult('# New'));
     });
 
     await waitFor(() => {
@@ -112,11 +110,7 @@ describe('useDocumentContent', () => {
 
   it('preserves previous content and exposes the error when silent reload fails', async () => {
     invokeMock
-      .mockResolvedValueOnce({
-        content: '# Stable',
-        isBinary: false,
-        tooLarge: false,
-      })
+      .mockResolvedValueOnce(previewResult('# Stable'))
       .mockRejectedValueOnce(new Error('read failed'));
 
     render(<HookHarness filePath="D:/code/JavaScript/mini-term/README.md" />);

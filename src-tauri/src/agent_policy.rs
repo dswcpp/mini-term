@@ -277,6 +277,7 @@ Mini-Term is both:
 ## When To Use Task Tools
 - Use `start_task` when work should be tracked by Mini-Term.
 - Use `get_task_status`, `list_attention_tasks`, and `list_approval_requests` to monitor execution and approvals.
+- Use `save_task_plan` when a tracked task produces a durable Markdown plan document.
 - Use `send_task_input` to continue a live tracked task instead of creating a duplicate.
 
 ## When To Stop For Approval
@@ -409,6 +410,7 @@ Mini-Term is the local workspace host and MCP control plane for context, tracked
 
 ## When To Use Task Tools
 - Use `start_task` when execution should be tracked and recoverable.
+- Use `save_task_plan` when task output should be preserved as a reusable plan document.
 - Use `send_task_input` to continue live tracked tasks.
 - Use `resume_session` when you need current tracked task state.
 
@@ -700,7 +702,7 @@ fn default_tool_usage_policy() -> ToolUsagePolicy {
             "list_ptys/get_pty_detail/get_process_tree".into(),
             "read_file/search_files".into(),
             "get_git_summary/get_diff_for_review".into(),
-            "start_task/get_task_status/send_task_input/close_task".into(),
+            "start_task/get_task_status/save_task_plan/send_task_input/close_task".into(),
         ],
         approval_tools: vec![
             "kill_pty".into(),
@@ -724,6 +726,7 @@ fn default_tool_usage_policy() -> ToolUsagePolicy {
         task_tools: vec![
             "start_task".into(),
             "get_task_status".into(),
+            "save_task_plan".into(),
             "list_attention_tasks".into(),
             "resume_session".into(),
             "send_task_input".into(),

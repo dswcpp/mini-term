@@ -3,7 +3,12 @@ import { selectWorkspaceConfig, useAppStore } from '../../store';
 import { useAutoRefreshFeedback } from '../../hooks/useAutoRefreshFeedback';
 import { useWorkspaceAutoRefresh } from '../../hooks/useWorkspaceAutoRefresh';
 import type { PreviewMode } from '../../types';
-import { isMarkdownFilePath } from '../../utils/markdownPreview';
+import {
+  isMermaidPreviewFilePath,
+  isSvgPreviewFilePath,
+  normalizePreviewModeForFile,
+  supportsModeToggle,
+} from '../../utils/documentPreview';
 import { getWorkspaceMatch } from '../../utils/workspace';
 import { AutoRefreshFeedbackBadge } from '../AutoRefreshFeedback';
 import { OverlaySurface } from '../OverlaySurface';
@@ -33,18 +38,18 @@ export function DocumentViewerDialog({
   open,
   onClose,
   filePath,
-  initialMode = 'source',
+  initialMode,
 }: DocumentViewerDialogProps) {
   const themePreset = useAppStore((state) => state.config.theme.preset);
   const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
   const activeWorkspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
-  const [previewMode, setPreviewMode] = useState<PreviewMode>(initialMode);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(() => normalizePreviewModeForFile(filePath, initialMode));
   const [maximized, setMaximized] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const fullscreenHostRef = useRef<HTMLDivElement | null>(null);
 
   const projectPath = activeWorkspace ? getWorkspaceMatch(activeWorkspace, filePath)?.root.path : undefined;
-  const { result, loading, error, reload } = useDocumentContent(filePath, open);
+  const { result, loading, error, reload, version } = useDocumentContent(filePath, open);
   const { feedback, clearFeedback, showRefreshing, showSuccess, showError } = useAutoRefreshFeedback();
   const fileName = useMemo(
     () => filePath.replace(/\\/g, '/').split('/').pop() ?? filePath,
@@ -53,8 +58,12 @@ export function DocumentViewerDialog({
   const language = useMemo(() => resolveDocumentLanguage(filePath), [filePath]);
   const skin = useMemo(() => resolveViewerSkin(language.family, themePreset), [language.family, themePreset]);
   const viewerStyle = useMemo(() => toViewerCssVars(skin), [skin]);
-  const markdownFile = useMemo(() => isMarkdownFilePath(filePath), [filePath]);
-  const previewReady = markdownFile && !!result && !result.isBinary && !result.tooLarge && !error;
+  const previewToggleEnabled = useMemo(() => supportsModeToggle(filePath), [filePath]);
+  const previewKindLabel = useMemo(() => (
+    isSvgPreviewFilePath(filePath) ? 'SVG' : isMermaidPreviewFilePath(filePath) ? 'Mermaid' : 'Markdown'
+  ), [filePath]);
+  const previewToggleInteractive = previewToggleEnabled && !error;
+  const resolvedMode = normalizePreviewModeForFile(filePath, previewMode);
   const layoutMode: ViewerLayoutMode = isFullscreen ? 'fullscreen' : maximized ? 'maximized' : 'windowed';
 
   useWorkspaceAutoRefresh({
@@ -74,10 +83,10 @@ export function DocumentViewerDialog({
   });
 
   useEffect(() => {
-    setPreviewMode(initialMode === 'preview' && markdownFile ? 'preview' : 'source');
+    setPreviewMode(normalizePreviewModeForFile(filePath, initialMode));
     setMaximized(false);
     clearFeedback();
-  }, [clearFeedback, filePath, initialMode, markdownFile, open]);
+  }, [clearFeedback, filePath, initialMode, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -103,7 +112,7 @@ export function DocumentViewerDialog({
   if (!open) return null;
 
   const handleTogglePreview = () => {
-    if (!previewReady) return;
+    if (!previewToggleInteractive) return;
     setPreviewMode((value) => (value === 'preview' ? 'source' : 'preview'));
   };
 
@@ -150,33 +159,18 @@ export function DocumentViewerDialog({
       return null;
     }
 
-    if (result.isBinary) {
-      return (
-        <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-          Binary file, preview is not available.
-        </div>
-      );
-    }
-
-    if (result.tooLarge) {
-      return (
-        <div className="flex h-full items-center justify-center text-[var(--text-muted)]">
-          File is too large to preview.
-        </div>
-      );
-    }
-
     const context = {
       filePath,
       fileName,
-      mode: previewMode,
+      mode: resolvedMode,
       layoutMode,
       active: true,
+      contentVersion: version,
       result,
       language,
       skin,
     };
-    const renderer = resolvePreviewRenderer(context, previewMode);
+    const renderer = resolvePreviewRenderer(context, resolvedMode);
 
     return renderer.render(context);
   };
@@ -229,17 +223,17 @@ export function DocumentViewerDialog({
               backgroundColor: 'var(--viewer-accent-subtle)',
             }}
           >
-            {previewMode === 'preview' ? 'PREVIEW' : language.badge}
+            {resolvedMode === 'preview' && previewToggleEnabled ? 'PREVIEW' : language.badge}
           </span>
         </div>
         <div className="ml-1 flex items-center gap-px">
           <AutoRefreshFeedbackBadge feedback={feedback} testId="dialog-document-refresh-feedback" />
-          {markdownFile && (
+          {previewToggleEnabled && (
             <ToolbarButton
-              active={previewMode === 'preview'}
-              disabled={!previewReady}
+              active={resolvedMode === 'preview'}
+              disabled={!previewToggleInteractive}
               compact
-              label={previewMode === 'preview' ? 'Close Markdown preview' : 'Open Markdown preview'}
+              label={resolvedMode === 'preview' ? `Close ${previewKindLabel} preview` : `Open ${previewKindLabel} preview`}
               onClick={handleTogglePreview}
               testId="file-viewer-preview-toggle"
             >

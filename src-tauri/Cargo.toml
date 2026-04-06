@@ -35,6 +35,7 @@ pathdiff = "0.2"
 uuid = { version = "1", features = ["v7"] }
 sha2 = "0.10"
 toml = "0.8"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -42,3 +43,6 @@ windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+anyhow = "1"

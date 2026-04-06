@@ -51,11 +51,13 @@ export function MermaidFocusLayer({
       >
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--border-default)] px-5 py-4">
           <div>
-            <div className="text-base font-medium text-[var(--accent)]">Mermaid 独立查看</div>
-            <div className="text-sm text-[var(--text-secondary)]">聚焦查看单个图表，便于大图阅读</div>
+            <div className="text-base font-medium text-[var(--accent)]">Mermaid Focus View</div>
+            <div className="text-sm text-[var(--text-secondary)]">
+              Dedicated diagram view for large Mermaid flows and detailed inspection.
+            </div>
           </div>
           <ToolbarButton
-            label="关闭 Mermaid 独立查看"
+            label="Close Mermaid focus view"
             onClick={onClose}
             testId="mermaid-focus-close"
           >

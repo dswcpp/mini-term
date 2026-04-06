@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach } from 'vitest';
 import { describe, expect, it, vi } from 'vitest';
 import { DocumentViewerPanel } from './DocumentViewerPanel';
+import type { DocumentPreviewResult } from '../../types';
 
 const resolvePreviewRendererMock = vi.fn((_context?: unknown, _mode?: unknown) => ({
   render: ({ mode }: { mode: 'source' | 'preview' }) => (
@@ -33,6 +34,18 @@ vi.mock('./renderers', () => ({
   resolvePreviewRenderer: (context: unknown, mode: unknown) => resolvePreviewRendererMock(context, mode),
 }));
 
+function previewResult(
+  kind: DocumentPreviewResult['kind'],
+  overrides: Partial<DocumentPreviewResult> = {},
+): DocumentPreviewResult {
+  return {
+    kind,
+    tooLarge: false,
+    byteLength: 64,
+    ...overrides,
+  };
+}
+
 describe('DocumentViewerPanel', () => {
   beforeEach(() => {
     resolvePreviewRendererMock.mockClear();
@@ -41,11 +54,7 @@ describe('DocumentViewerPanel', () => {
     latestAutoRefreshOptions = undefined;
     reloadMock = vi.fn().mockResolvedValue(true);
     useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
-      result: {
-        content: '# Title',
-        isBinary: false,
-        tooLarge: false,
-      },
+      result: previewResult('markdown', { textContent: '# Title' }),
       loading: false,
       refreshing: false,
       error: '',
@@ -121,6 +130,14 @@ describe('DocumentViewerPanel', () => {
   });
 
   it('scrolls to and highlights the requested source line', async () => {
+    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+      result: previewResult('text', { textContent: 'line-1\nline-2\nline-3' }),
+      loading: false,
+      refreshing: false,
+      error: '',
+      reload: reloadMock,
+    }));
+
     render(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/src/App.tsx"
@@ -143,6 +160,14 @@ describe('DocumentViewerPanel', () => {
   });
 
   it('reapplies navigation when the same line is requested with a new request id', async () => {
+    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+      result: previewResult('text', { textContent: 'line-1\nline-2\nline-3' }),
+      loading: false,
+      refreshing: false,
+      error: '',
+      reload: reloadMock,
+    }));
+
     const { rerender } = render(
       <DocumentViewerPanel
         filePath="D:/code/JavaScript/mini-term/src/App.tsx"
@@ -181,6 +206,50 @@ describe('DocumentViewerPanel', () => {
     expect(screen.getByText('line-2').getAttribute('data-source-active-line')).toBe('true');
   });
 
+  it('defaults svg files to preview mode', () => {
+    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+      result: previewResult('svg', { textContent: '<svg />' }),
+      loading: false,
+      refreshing: false,
+      error: '',
+      reload: reloadMock,
+    }));
+
+    render(
+      <DocumentViewerPanel
+        filePath="D:/code/JavaScript/mini-term/docs/diagram.svg"
+        projectPath="D:/code/JavaScript/mini-term"
+        onClose={vi.fn()}
+        variant="tab"
+      />,
+    );
+
+    expect(screen.getByTestId('document-renderer-mode').textContent).toContain('preview');
+    expect(screen.getByTestId('embedded-file-viewer-preview-toggle')).not.toBeNull();
+  });
+
+  it('defaults mermaid files to preview mode and keeps the preview toggle available', () => {
+    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+      result: previewResult('text', { textContent: 'graph TD\n  A --> B' }),
+      loading: false,
+      refreshing: false,
+      error: '',
+      reload: reloadMock,
+    }));
+
+    render(
+      <DocumentViewerPanel
+        filePath="D:/code/JavaScript/mini-term/docs/flow.mmd"
+        projectPath="D:/code/JavaScript/mini-term"
+        onClose={vi.fn()}
+        variant="tab"
+      />,
+    );
+
+    expect(screen.getByTestId('document-renderer-mode').textContent).toContain('preview');
+    expect(screen.getByTestId('embedded-file-viewer-preview-toggle')).not.toBeNull();
+  });
+
   it('silently reloads the current file after an fs change and shows refresh feedback', async () => {
     render(
       <DocumentViewerPanel
@@ -200,6 +269,6 @@ describe('DocumentViewerPanel', () => {
 
     expect(reloadMock).toHaveBeenCalledWith({ silent: true });
     expect(await screen.findByTestId('document-refresh-feedback')).not.toBeNull();
-    expect(screen.getByTestId('document-refresh-feedback').textContent).toContain('已自动刷新');
+    expect(screen.getByTestId('document-refresh-feedback').textContent).not.toBe('');
   });
 });

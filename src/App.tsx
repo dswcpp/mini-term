@@ -1,6 +1,8 @@
 import {
+  Suspense,
   useCallback,
   useEffect,
+  lazy,
   useRef,
   useState,
   type CSSProperties,
@@ -25,7 +27,6 @@ import {
 import { TerminalArea } from './components/TerminalArea';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import { FileTree } from './components/FileTree';
-import { GitHistory } from './components/GitHistory';
 import { GlobalNoticeHost } from './components/GlobalNoticeHost';
 import { WorkspaceDialogHost } from './components/WorkspaceDialogHost';
 import { useHostControlBridge } from './hooks/useHostControlBridge';
@@ -42,6 +43,10 @@ const tauriAvailable = isTauriRuntime();
 const appWindow = tauriAvailable ? getCurrentWindow() : null;
 const dragRegionStyle = { WebkitAppRegion: 'drag' } as CSSProperties;
 const noDragRegionStyle = { WebkitAppRegion: 'no-drag' } as CSSProperties;
+const GIT_HISTORY_ACTIVATION_SIZE = 72;
+const LazyGitHistory = lazy(() => import('./components/GitHistory').then((module) => ({
+  default: module.GitHistory,
+})));
 
 function TitleBarButton({
   title,
@@ -65,6 +70,22 @@ function TitleBarButton({
     >
       {children}
     </button>
+  );
+}
+
+function DeferredPaneFallback({ label }: { label: string }) {
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center bg-[var(--bg-surface)] text-sm text-[var(--text-muted)]">
+      {label}
+    </div>
+  );
+}
+
+function GitHistoryCollapsedState() {
+  return (
+    <div className="flex h-full items-center justify-center bg-[var(--bg-surface)] px-3 text-[11px] uppercase tracking-[0.12em] text-[var(--text-muted)]">
+      Expand to load Git history
+    </div>
   );
 }
 
@@ -101,6 +122,7 @@ function TauriApp() {
   const [isFocused, setIsFocused] = useState(true);
   const [currentVersion, setCurrentVersion] = useState('');
   const [updateInfo, setUpdateInfo] = useState<ReleaseInfo | null>(null);
+  const [activatedWorkspaceIds, setActivatedWorkspaceIds] = useState<Set<string>>(() => new Set());
 
   const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
   const workspaces = useAppStore((state) => state.config.workspaces);
@@ -113,6 +135,10 @@ function TauriApp() {
   const activeWorkspaceName =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.name ?? 'Workspace';
   const resolvedTheme = resolveTheme(themeConfig);
+  const workspaceIdsSignature = workspaces.map((workspace) => workspace.id).join('|');
+  const [gitHistoryEnabled, setGitHistoryEnabled] = useState(
+    () => (middleColumnSizes?.[1] ?? 200) > GIT_HISTORY_ACTIVATION_SIZE,
+  );
 
   useSessionRuntimeBridge();
   useHostControlBridge();
@@ -249,6 +275,50 @@ function TauriApp() {
     prevWorkspaceRef.current = activeWorkspaceId;
   }, [activeWorkspaceId]);
 
+  useEffect(() => {
+    const nextEnabled = (middleColumnSizes?.[1] ?? 200) > GIT_HISTORY_ACTIVATION_SIZE;
+    setGitHistoryEnabled((previous) => (previous === nextEnabled ? previous : nextEnabled));
+  }, [middleColumnSizes]);
+
+  useEffect(() => {
+    if (!activeWorkspaceId) {
+      return;
+    }
+
+    setActivatedWorkspaceIds((previous) => {
+      if (previous.has(activeWorkspaceId)) {
+        return previous;
+      }
+
+      const next = new Set(previous);
+      next.add(activeWorkspaceId);
+      return next;
+    });
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    setActivatedWorkspaceIds((previous) => {
+      if (previous.size === 0) {
+        return previous;
+      }
+
+      const liveWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+      const next = new Set<string>();
+      let changed = false;
+
+      previous.forEach((workspaceId) => {
+        if (liveWorkspaceIds.has(workspaceId)) {
+          next.add(workspaceId);
+          return;
+        }
+
+        changed = true;
+      });
+
+      return changed ? next : previous;
+    });
+  }, [workspaceIdsSignature]);
+
   const saveLayoutTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const saveLayoutSizes = useCallback(
     (sizes: number[]) => {
@@ -275,6 +345,15 @@ function TauriApp() {
       }, 500);
     },
     [setConfig],
+  );
+
+  const handleMiddleColumnLayoutChange = useCallback(
+    (sizes: number[]) => {
+      saveMiddleColumnSizes(sizes);
+      const nextEnabled = (sizes[1] ?? 0) > GIT_HISTORY_ACTIVATION_SIZE;
+      setGitHistoryEnabled((previous) => (previous === nextEnabled ? previous : nextEnabled));
+    },
+    [saveMiddleColumnSizes],
   );
 
   useEffect(() => {
@@ -579,13 +658,65 @@ function TauriApp() {
               <Allotment
                 vertical
                 defaultSizes={middleColumnSizes ?? [300, 200]}
-                onChange={saveMiddleColumnSizes}
+                onChange={handleMiddleColumnLayoutChange}
               >
                 <Allotment.Pane minSize={150}>
-                  <FileTree key={activeWorkspaceId} />
+                  <div className="relative h-full">
+                    {workspaces.length === 0 ? (
+                      <FileTree workspaceId={activeWorkspaceId} isVisible />
+                    ) : (
+                      workspaces.map((workspace) => {
+                        const workspaceIsActive = workspace.id === activeWorkspaceId;
+                        const shouldRenderWorkspace = workspaceIsActive || activatedWorkspaceIds.has(workspace.id);
+                        if (!shouldRenderWorkspace) {
+                          return null;
+                        }
+
+                        return (
+                          <div
+                            key={workspace.id}
+                            className="absolute inset-0"
+                            style={{ display: workspaceIsActive ? 'block' : 'none' }}
+                          >
+                            <FileTree workspaceId={workspace.id} isVisible={workspaceIsActive} />
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 </Allotment.Pane>
                 <Allotment.Pane minSize={36}>
-                  <GitHistory key={activeWorkspaceId} />
+                  {gitHistoryEnabled ? (
+                    <div className="relative h-full">
+                      {workspaces.length === 0 ? (
+                        <Suspense fallback={<DeferredPaneFallback label="Loading Git history..." />}>
+                          <LazyGitHistory workspaceId={activeWorkspaceId} isVisible />
+                        </Suspense>
+                      ) : (
+                        workspaces.map((workspace) => {
+                          const workspaceIsActive = workspace.id === activeWorkspaceId;
+                          const shouldRenderWorkspace = workspaceIsActive || activatedWorkspaceIds.has(workspace.id);
+                          if (!shouldRenderWorkspace) {
+                            return null;
+                          }
+
+                          return (
+                            <div
+                              key={workspace.id}
+                              className="absolute inset-0"
+                              style={{ display: workspaceIsActive ? 'block' : 'none' }}
+                            >
+                              <Suspense fallback={<DeferredPaneFallback label="Loading Git history..." />}>
+                                <LazyGitHistory workspaceId={workspace.id} isVisible={workspaceIsActive} />
+                              </Suspense>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  ) : (
+                    <GitHistoryCollapsedState />
+                  )}
                 </Allotment.Pane>
               </Allotment>
             </Allotment.Pane>
@@ -594,19 +725,24 @@ function TauriApp() {
               <div className="relative h-full">
                 {workspaces.map((workspace) => {
                   const primaryRootPath = getWorkspacePrimaryRootPath(workspace);
+                  const workspaceIsActive = workspace.id === activeWorkspaceId;
+                  const shouldRenderWorkspace = workspaceIsActive || activatedWorkspaceIds.has(workspace.id);
                   if (!primaryRootPath) {
+                    return null;
+                  }
+                  if (!shouldRenderWorkspace) {
                     return null;
                   }
                   return (
                   <div
                     key={workspace.id}
                     className="absolute inset-0"
-                    style={{ display: workspace.id === activeWorkspaceId ? 'block' : 'none' }}
+                    style={{ display: workspaceIsActive ? 'block' : 'none' }}
                   >
                     <TerminalArea
                       workspaceId={workspace.id}
                       workspacePath={primaryRootPath}
-                      isVisible={workspace.id === activeWorkspaceId}
+                      isVisible={workspaceIsActive}
                       onOpenSettings={() => openSettings()}
                     />
                   </div>

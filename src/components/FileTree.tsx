@@ -2,23 +2,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
-import {
-  toggleExpandedDir,
-  useAppStore,
-  selectWorkspaceConfig,
-} from '../store';
-import {
-  retainProjectTreeWatch,
-  subscribeProjectFs,
-  subscribeProjectGitDirty,
-} from '../runtime/workspaceRuntime';
-import type { FileEntry, GitFileHistoryResult, GitFileStatus, WorkspaceRootConfig } from '../types';
+import { toggleExpandedDir, useAppStore, selectWorkspaceConfig } from '../store';
+import { retainProjectTreeWatch, subscribeProjectFs, subscribeProjectGitDirty } from '../runtime/workspaceRuntime';
+import type {
+  FileEntry,
+  GitFileHistoryResult,
+  GitFileStatus,
+  WorkspaceConfig,
+  WorkspaceRootConfig,
+} from '../types';
 import { showContextMenu } from '../utils/contextMenu';
+import { buildDirectoryStatusIndex } from '../utils/gitStatusDirectoryIndex';
+import { collectAffectedLoadedDirectories } from '../utils/fileTreeRefresh';
 import { isMarkdownFilePath } from '../utils/markdownPreview';
 import { showPrompt } from '../utils/prompt';
 
 const ROW_HEIGHT = 26;
 const OVERSCAN_ROWS = 10;
+
+interface FileTreeProps {
+  workspaceId: string | null | undefined;
+  isVisible?: boolean;
+}
 
 interface VisibleTreeNode {
   entry: FileEntry;
@@ -47,16 +52,6 @@ function getRelativePath(targetPath: string, rootPath: string) {
   return normalizedTarget.slice(normalizedRoot.length + 1).replace(/\//g, separator);
 }
 
-function isPathAffected(changedPath: string, directoryPath: string) {
-  const normalizedChangedPath = normalizePath(changedPath);
-  const normalizedDirectoryPath = normalizePath(directoryPath);
-  return (
-    normalizedChangedPath === normalizedDirectoryPath ||
-    normalizedChangedPath.startsWith(`${normalizedDirectoryPath}/`) ||
-    normalizedDirectoryPath.startsWith(`${normalizedChangedPath}/`)
-  );
-}
-
 function belongsToRoot(path: string, rootPath: string) {
   const normalizedRoot = normalizePath(rootPath);
   const normalizedPath = normalizePath(path);
@@ -68,28 +63,6 @@ function getPathDetail(path: string) {
   const segments = normalized.split('/');
   segments.pop();
   return segments.join('/');
-}
-
-function getBestDirectoryStatusLabel(directoryPath: string, gitStatusMap: Map<string, GitFileStatus>) {
-  const normalizedDirectory = normalizePath(directoryPath);
-  const prefix = normalizedDirectory === '.' ? '' : `${normalizedDirectory}/`;
-  const priority: Record<string, number> = { C: 6, D: 5, M: 4, A: 3, R: 2, '?': 1 };
-
-  let bestLabel = '';
-  let bestPriority = 0;
-  for (const [path, status] of gitStatusMap) {
-    if (prefix && !path.startsWith(prefix)) {
-      continue;
-    }
-
-    const currentPriority = priority[status.statusLabel] ?? 0;
-    if (currentPriority > bestPriority) {
-      bestPriority = currentPriority;
-      bestLabel = status.statusLabel;
-    }
-  }
-
-  return bestLabel;
 }
 
 function flattenEntries(
@@ -130,13 +103,39 @@ function flattenEntries(
   walk(entriesByDirectory.get(root.path) ?? [], 1);
 }
 
-export function FileTree() {
-  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+function collectRootDirectoryPaths(rootPath: string, expandedPaths: Iterable<string>) {
+  const directoryPaths = new Set<string>([rootPath]);
+  for (const path of expandedPaths) {
+    if (belongsToRoot(path, rootPath)) {
+      directoryPaths.add(path);
+    }
+  }
+  return Array.from(directoryPaths);
+}
+
+function buildInitialExpandedPaths(workspace: WorkspaceConfig) {
+  const expanded = new Set<string>();
+  for (const root of workspace.roots) {
+    expanded.add(root.path);
+    const persisted = workspace.expandedDirsByRoot?.[root.id] ?? [];
+    persisted.forEach((path) => expanded.add(path));
+  }
+  return expanded;
+}
+
+function buildWorkspaceTreeKey(workspace: WorkspaceConfig) {
+  return [
+    workspace.id,
+    ...workspace.roots.map((root) => `${root.id}:${normalizePath(root.path)}`),
+  ].join('|');
+}
+
+export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
   const openFileViewer = useAppStore((state) => state.openFileViewer);
   const openWorktreeDiff = useAppStore((state) => state.openWorktreeDiff);
   const openFileHistory = useAppStore((state) => state.openFileHistory);
   const createTerminalTab = useAppStore((state) => state.createTerminalTab);
-  const workspace = useAppStore(selectWorkspaceConfig(activeWorkspaceId));
+  const workspace = useAppStore(selectWorkspaceConfig(workspaceId));
 
   const [entriesByDirectory, setEntriesByDirectory] = useState<Map<string, FileEntry[]>>(new Map());
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
@@ -146,22 +145,75 @@ export function FileTree() {
 
   const listRef = useRef<HTMLDivElement | null>(null);
   const expandedPathsRef = useRef(expandedPaths);
-  expandedPathsRef.current = expandedPaths;
+  const directoryLoadRequestsRef = useRef<Map<string, Promise<FileEntry[]>>>(new Map());
+  const scrollTopRef = useRef(scrollTop);
+  const scrollFrameRef = useRef<number | null>(null);
+  const initializedRef = useRef(false);
+  const initializedWorkspaceKeyRef = useRef<string | null>(null);
 
-  const loadDirectory = useCallback(
+  expandedPathsRef.current = expandedPaths;
+  scrollTopRef.current = scrollTop;
+
+  const requestDirectoryEntries = useCallback(
     async (rootPath: string, directoryPath: string) => {
-      const entries = await invoke<FileEntry[]>('list_directory', {
+      const requestKey = `${normalizePath(rootPath)}::${normalizePath(directoryPath)}`;
+      const existingRequest = directoryLoadRequestsRef.current.get(requestKey);
+      if (existingRequest) {
+        return existingRequest;
+      }
+
+      const request = invoke<FileEntry[]>('list_directory', {
         projectRoot: rootPath,
         path: directoryPath,
+      }).finally(() => {
+        directoryLoadRequestsRef.current.delete(requestKey);
       });
+
+      directoryLoadRequestsRef.current.set(requestKey, request);
+      return request;
+    },
+    [],
+  );
+
+  const loadDirectories = useCallback(
+    async (rootPath: string, directoryPaths: Iterable<string>) => {
+      const uniqueDirectoryPaths = Array.from(new Set(directoryPaths)).filter((path) => belongsToRoot(path, rootPath));
+      if (uniqueDirectoryPaths.length === 0) {
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        uniqueDirectoryPaths.map(
+          async (directoryPath) => [directoryPath, await requestDirectoryEntries(rootPath, directoryPath)] as const,
+        ),
+      );
+
+      const successfulResults = results
+        .filter(
+          (result): result is PromiseFulfilledResult<readonly [string, FileEntry[]]> => result.status === 'fulfilled',
+        )
+        .map((result) => result.value);
+
+      if (successfulResults.length === 0) {
+        return;
+      }
 
       setEntriesByDirectory((prev) => {
         const next = new Map(prev);
-        next.set(directoryPath, entries);
+        for (const [directoryPath, entries] of successfulResults) {
+          next.set(directoryPath, entries);
+        }
         return next;
       });
     },
-    [],
+    [requestDirectoryEntries],
+  );
+
+  const loadDirectory = useCallback(
+    async (rootPath: string, directoryPath: string) => {
+      await loadDirectories(rootPath, [directoryPath]);
+    },
+    [loadDirectories],
   );
 
   const loadGitStatus = useCallback(async (root: WorkspaceRootConfig) => {
@@ -185,36 +237,57 @@ export function FileTree() {
     }
   }, []);
 
+  const clearPendingScrollFrame = useCallback(() => {
+    if (scrollFrameRef.current !== null) {
+      cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!workspace) {
+      initializedRef.current = false;
+      initializedWorkspaceKeyRef.current = null;
+      directoryLoadRequestsRef.current.clear();
+      clearPendingScrollFrame();
+      scrollTopRef.current = 0;
       setEntriesByDirectory(new Map());
       setExpandedPaths(new Set());
       setGitStatusByRoot(new Map());
+      setScrollTop(0);
       return;
     }
 
-    const initialExpanded = new Set<string>();
-    for (const root of workspace.roots) {
-      initialExpanded.add(root.path);
-      const persisted = workspace.expandedDirsByRoot?.[root.id] ?? [];
-      persisted.forEach((path) => initialExpanded.add(path));
+    if (!isVisible) {
+      return;
     }
 
-    setExpandedPaths(initialExpanded);
-    setEntriesByDirectory(new Map());
-    setGitStatusByRoot(new Map());
+    const nextWorkspaceKey = buildWorkspaceTreeKey(workspace);
+    const shouldReset = !initializedRef.current || initializedWorkspaceKeyRef.current !== nextWorkspaceKey;
+    const expandedToLoad = shouldReset ? buildInitialExpandedPaths(workspace) : new Set(expandedPathsRef.current);
+
+    initializedRef.current = true;
+    initializedWorkspaceKeyRef.current = nextWorkspaceKey;
+
+    if (shouldReset) {
+      directoryLoadRequestsRef.current.clear();
+      clearPendingScrollFrame();
+      scrollTopRef.current = 0;
+      setExpandedPaths(expandedToLoad);
+      setEntriesByDirectory(new Map());
+      setGitStatusByRoot(new Map());
+      setScrollTop(0);
+      listRef.current?.scrollTo({ top: 0 });
+    }
 
     for (const root of workspace.roots) {
-      void loadDirectory(root.path, root.path);
+      void loadDirectories(root.path, collectRootDirectoryPaths(root.path, expandedToLoad));
       void loadGitStatus(root);
-      for (const path of workspace.expandedDirsByRoot?.[root.id] ?? []) {
-        void loadDirectory(root.path, path);
-      }
     }
-  }, [loadDirectory, loadGitStatus, workspace]);
+  }, [clearPendingScrollFrame, isVisible, loadDirectories, loadGitStatus, workspace]);
 
   useEffect(() => {
-    if (!workspace) {
+    if (!workspace || !isVisible) {
       return;
     }
 
@@ -222,13 +295,13 @@ export function FileTree() {
     for (const root of workspace.roots) {
       const releaseWatch = retainProjectTreeWatch(root.path);
       const unsubscribeFs = subscribeProjectFs(root.path, (events) => {
-        const loadedDirectories = new Set<string>(
-          [root.path, ...expandedPathsRef.current].filter((path) => belongsToRoot(path, root.path)),
+        const affectedDirectories = collectAffectedLoadedDirectories(
+          root.path,
+          collectRootDirectoryPaths(root.path, expandedPathsRef.current),
+          events,
         );
-        for (const directoryPath of loadedDirectories) {
-          if (events.some((event) => isPathAffected(event.path, directoryPath))) {
-            void loadDirectory(root.path, directoryPath);
-          }
+        if (affectedDirectories.length > 0) {
+          void loadDirectories(root.path, affectedDirectories);
         }
       });
       const unsubscribeGitDirty = subscribeProjectGitDirty(root.path, () => {
@@ -244,11 +317,11 @@ export function FileTree() {
     return () => {
       disposers.forEach((dispose) => dispose());
     };
-  }, [loadDirectory, loadGitStatus, workspace]);
+  }, [isVisible, loadDirectories, loadGitStatus, workspace]);
 
   useEffect(() => {
     const element = listRef.current;
-    if (!element) {
+    if (!workspace || !isVisible || !element) {
       return;
     }
 
@@ -259,8 +332,27 @@ export function FileTree() {
 
     observer.observe(element);
     setViewportHeight(element.clientHeight);
-    return () => observer.disconnect();
-  }, [workspace?.id]);
+    return () => {
+      observer.disconnect();
+      clearPendingScrollFrame();
+    };
+  }, [clearPendingScrollFrame, isVisible, workspace?.id]);
+
+  const handleScroll = useCallback((nextScrollTop: number) => {
+    if (scrollTopRef.current === nextScrollTop && scrollFrameRef.current === null) {
+      return;
+    }
+
+    scrollTopRef.current = nextScrollTop;
+    if (scrollFrameRef.current !== null) {
+      return;
+    }
+
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      setScrollTop((previous) => (previous === scrollTopRef.current ? previous : scrollTopRef.current));
+    });
+  }, []);
 
   const visibleNodes = useMemo(() => {
     if (!workspace) {
@@ -274,12 +366,25 @@ export function FileTree() {
     return output;
   }, [entriesByDirectory, expandedPaths, workspace]);
 
+  const directoryStatusByRoot = useMemo(() => {
+    const next = new Map<string, Map<string, string>>();
+    for (const [rootId, gitStatusMap] of gitStatusByRoot) {
+      next.set(
+        rootId,
+        buildDirectoryStatusIndex(
+          Array.from(gitStatusMap, ([path, status]) => ({
+            path,
+            statusLabel: status.statusLabel,
+          })),
+        ),
+      );
+    }
+    return next;
+  }, [gitStatusByRoot]);
+
   const visibleRange = useMemo(() => {
     const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN_ROWS);
-    const end = Math.min(
-      visibleNodes.length,
-      Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN_ROWS,
-    );
+    const end = Math.min(visibleNodes.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN_ROWS);
     return { start, end };
   }, [scrollTop, viewportHeight, visibleNodes.length]);
 
@@ -293,7 +398,7 @@ export function FileTree() {
         return;
       }
       openFileViewer(workspace.id, filePath, {
-        initialMode: options?.initialPreview ? 'preview' : 'source',
+        initialMode: options?.initialPreview ? 'preview' : undefined,
       });
     },
     [openFileViewer, workspace],
@@ -317,21 +422,21 @@ export function FileTree() {
 
       if (entry.ignored) {
         return {
-          label: '查看修改历史（已忽略）',
+          label: 'View History (Ignored)',
           disabled: true,
         };
       }
 
       if (gitStatus?.status === 'untracked') {
         return {
-          label: '查看修改历史（未纳入 Git）',
+          label: 'View History (Untracked)',
           disabled: true,
         };
       }
 
       if (gitStatus?.status === 'added') {
         return {
-          label: '查看修改历史（尚无提交记录）',
+          label: 'View History (No commits yet)',
           disabled: true,
         };
       }
@@ -346,19 +451,19 @@ export function FileTree() {
 
         if (result.entries.length === 0) {
           return {
-            label: '查看修改历史（暂无提交记录）',
+            label: 'View History (No commits yet)',
             disabled: true,
           };
         }
 
         return {
-          label: '查看修改历史',
+          label: 'View History',
           disabled: false,
           onClick: () => openFileHistory(workspace.id, root.path, entry.path),
         };
       } catch {
         return {
-          label: '查看修改历史（不在 Git 仓库中）',
+          label: 'View History (Not in Git repo)',
           disabled: true,
         };
       }
@@ -387,8 +492,11 @@ export function FileTree() {
       const nextExpanded = !expandedPaths.has(entry.path);
       setExpandedPaths((prev) => {
         const next = new Set(prev);
-        if (nextExpanded) next.add(entry.path);
-        else next.delete(entry.path);
+        if (nextExpanded) {
+          next.add(entry.path);
+        } else {
+          next.delete(entry.path);
+        }
         return next;
       });
       toggleExpandedDir(workspace.id, root.id, entry.path, nextExpanded);
@@ -414,8 +522,6 @@ export function FileTree() {
       const normalizedRelativePath = normalizePath(relativePath);
       const gitStatus = gitStatusByRoot.get(root.id)?.get(normalizedRelativePath);
       const separator = root.path.includes('/') ? '/' : '\\';
-      const clientX = event.clientX;
-      const clientY = event.clientY;
       const items: Parameters<typeof showContextMenu>[2] = [];
 
       if (!entry.isDir) {
@@ -425,6 +531,7 @@ export function FileTree() {
             onClick: () => handleOpenFile(entry.path, { initialPreview: true }),
           });
         }
+
         items.push(
           {
             label: 'Open In App',
@@ -505,7 +612,7 @@ export function FileTree() {
         );
       }
 
-      showContextMenu(clientX, clientY, items);
+      showContextMenu(event.clientX, event.clientY, items);
     },
     [
       createTerminalTab,
@@ -535,7 +642,7 @@ export function FileTree() {
       <div
         ref={listRef}
         className="flex-1 overflow-auto px-1"
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        onScroll={(event) => handleScroll(event.currentTarget.scrollTop)}
       >
         {visibleNodes.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
@@ -548,18 +655,19 @@ export function FileTree() {
                 const relativePath = normalizePath(getRelativePath(node.entry.path, node.root.path));
                 const gitStatus = gitStatusByRoot.get(node.root.id)?.get(relativePath);
                 const directoryStatusLabel = node.entry.isDir
-                  ? getBestDirectoryStatusLabel(relativePath, gitStatusByRoot.get(node.root.id) ?? new Map())
+                  ? directoryStatusByRoot.get(node.root.id)?.get(relativePath)
                   : undefined;
                 const statusLabel = gitStatus?.statusLabel ?? directoryStatusLabel;
-                const statusTone = statusLabel === 'M'
-                  ? 'text-[var(--color-warning)]'
-                  : statusLabel === 'A' || statusLabel === '?'
-                    ? 'text-[var(--color-success)]'
-                    : statusLabel === 'D' || statusLabel === 'C'
-                      ? 'text-[var(--color-error)]'
-                      : statusLabel === 'R'
-                        ? 'text-[var(--color-info)]'
-                        : 'text-[var(--text-muted)]';
+                const statusTone =
+                  statusLabel === 'M'
+                    ? 'text-[var(--color-warning)]'
+                    : statusLabel === 'A' || statusLabel === '?'
+                      ? 'text-[var(--color-success)]'
+                      : statusLabel === 'D' || statusLabel === 'C'
+                        ? 'text-[var(--color-error)]'
+                        : statusLabel === 'R'
+                          ? 'text-[var(--color-info)]'
+                          : 'text-[var(--text-muted)]';
 
                 return (
                   <div
@@ -595,10 +703,10 @@ export function FileTree() {
                           display: 'inline-block',
                         }}
                       >
-                        ▾
+                        {'>'}
                       </span>
                     ) : (
-                      <span className="w-3 text-center text-xs text-[var(--text-muted)]">•</span>
+                      <span className="w-3 text-center text-xs text-[var(--text-muted)]">-</span>
                     )}
                     <span className="truncate">
                       {node.isRoot ? `${node.entry.name} (${node.root.role})` : node.entry.name}

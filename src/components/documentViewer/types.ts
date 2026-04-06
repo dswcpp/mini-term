@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { FileContentResult, PreviewMode } from '../../types';
+import type { DocumentPreviewResult, PreviewMode } from '../../types';
 import type { DocumentLanguageInfo } from './language';
 import type { ViewerSkinTokens } from './viewerSkin';
 
@@ -12,13 +12,14 @@ export interface PreviewRenderContext {
   mode: PreviewMode;
   layoutMode: ViewerLayoutMode;
   active: boolean;
-  result: FileContentResult;
+  contentVersion: number;
+  result: DocumentPreviewResult;
   language: DocumentLanguageInfo;
   skin: ViewerSkinTokens;
 }
 
 export interface PreviewRenderer {
-  id: 'code' | 'markdown';
-  supports: (filePath: string, result: FileContentResult) => boolean;
+  id: 'code' | 'markdown' | 'mermaid' | 'svg' | 'image' | 'pdf' | 'docx' | 'doc' | 'unsupported';
+  supports: (filePath: string, result: DocumentPreviewResult) => boolean;
   render: (context: PreviewRenderContext) => ReactNode;
 }

@@ -11,6 +11,7 @@ function getShikiTheme(themePreset: ThemePresetId) {
 
 export default function CodePreviewRenderer(context: PreviewRenderContext) {
   const { active, fileName, language, result } = context;
+  const content = result.textContent ?? '';
   const themePreset = useAppStore((state) => state.config.theme.preset);
   const [highlightedHtml, setHighlightedHtml] = useState('');
   const [highlightError, setHighlightError] = useState('');
@@ -39,7 +40,7 @@ export default function CodePreviewRenderer(context: PreviewRenderContext) {
       };
     }
 
-    void highlightCodeToHtml(result.content, language.highlighterKey, shikiTheme)
+    void highlightCodeToHtml(content, language.highlighterKey, shikiTheme)
       .then((html) => {
         if (!cancelled) {
           setHighlightedHtml(html);
@@ -54,7 +55,7 @@ export default function CodePreviewRenderer(context: PreviewRenderContext) {
     return () => {
       cancelled = true;
     };
-  }, [active, canHighlight, language.highlighterKey, result.content, shikiTheme]);
+  }, [active, canHighlight, content, language.highlighterKey, shikiTheme]);
 
   useEffect(() => {
     if (!highlightedHtml || !highlightedHostRef.current) {

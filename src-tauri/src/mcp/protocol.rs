@@ -50,13 +50,31 @@ fn tool_success_envelope(tool_name: &str, data: Value) -> Value {
 }
 
 fn tool_confirmation_envelope(tool_name: &str, result: Value) -> Value {
+    let confirmation = result
+        .get("approval")
+        .and_then(|value| value.get("request"))
+        .cloned()
+        .or_else(|| result.get("request").cloned())
+        .unwrap_or(Value::Null);
+
     json!({
         "ok": false,
+        "status": result
+            .get("status")
+            .cloned()
+            .unwrap_or_else(|| json!("approval-pending")),
         "data": Value::Null,
         "error": Value::Null,
         "meta": tool_meta(tool_name, None),
         "requiresConfirmation": true,
-        "confirmation": result.get("request").cloned().unwrap_or(Value::Null),
+        "confirmation": confirmation.clone(),
+        "approval": result.get("approval").cloned().unwrap_or_else(|| json!({
+            "required": true,
+            "request": confirmation,
+        })),
+        "action": result.get("action").cloned().unwrap_or(Value::Null),
+        "blockingReason": result.get("blockingReason").cloned().unwrap_or(Value::Null),
+        "retry": result.get("retry").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -409,7 +427,7 @@ mod tests {
             .as_array()
             .map(|items| items.len())
             .unwrap_or(0);
-        assert_eq!(count, 37, "expected exactly 37 tools, got {count}");
+        assert_eq!(count, 38, "expected exactly 38 tools, got {count}");
         let names = response["result"]["tools"]
             .as_array()
             .unwrap()
@@ -449,6 +467,8 @@ mod tests {
             .find(|item| item["name"] == "get_pty_detail")
             .expect("get_pty_detail tool should be listed");
         assert_eq!(get_pty_detail["requiresHostConnection"], true);
+        assert_eq!(get_pty_detail["authorityScope"], "host-control");
+        assert_eq!(get_pty_detail["degradationMode"], "snapshot-fallback");
         let set_config_fields = response["result"]["tools"]
             .as_array()
             .unwrap()
@@ -457,6 +477,7 @@ mod tests {
             .expect("set_config_fields tool should be listed");
         assert_eq!(set_config_fields["group"], "ui-control");
         assert_eq!(set_config_fields["requiresHostConnection"], false);
+        assert_eq!(set_config_fields["executionKind"], "mutate");
     }
 
     #[test]
@@ -503,6 +524,49 @@ mod tests {
             "ok"
         );
         assert_eq!(response["result"]["isError"], false);
+    }
+
+    #[test]
+    fn confirmation_envelope_keeps_control_plane_action_fields() {
+        let harness = TestHarness::new("protocol-confirmation-envelope");
+        let response = handle_json_rpc_request(json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "write_file",
+                "arguments": {
+                    "path": format!("{}/notes.txt", harness.workspace_path()),
+                    "content": "hello"
+                }
+            }
+        }));
+
+        assert_eq!(response["result"]["structuredContent"]["ok"], false);
+        assert_eq!(
+            response["result"]["structuredContent"]["status"],
+            "approval-pending"
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["requiresConfirmation"],
+            true
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["approval"]["required"],
+            true
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["action"]["toolName"],
+            "write_file"
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["action"]["degradationMode"],
+            "approval-required"
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["retry"]["allowed"],
+            true
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ import {
   shouldActivateTerminalFileLink,
   type TerminalFileLinkMatch,
 } from '../../utils/terminalFileLinks';
+import { getDefaultPreviewMode } from '../../utils/documentPreview';
 import type { WorkspaceRootConfig } from '../../types';
 import '@xterm/xterm/css/xterm.css';
 
@@ -122,7 +123,7 @@ export const TerminalViewport = memo(function TerminalViewport({
 
       const nextRequestId = ++terminalFileNavigationRequestId;
       useAppStore.getState().openFileViewer(currentWorkspaceId, resolved.path, {
-        initialMode: 'source',
+        initialMode: getDefaultPreviewMode(resolved.path),
         ...(resolved.line
           ? {
               navigationTarget: {

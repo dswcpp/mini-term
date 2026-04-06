@@ -1,12 +1,15 @@
-﻿import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import type { SettingsPage } from '../types';
 import { OverlaySurface } from './OverlaySurface';
 import { AboutSettings } from './settings/AboutSettings';
-import { AgentSettings } from './settings/AgentSettings';
 import { ShortcutsSettings } from './settings/ShortcutsSettings';
 import { SystemSettings } from './settings/SystemSettings';
 import { TerminalSettings } from './settings/TerminalSettings';
 import { ThemeSettings } from './settings/ThemeSettings';
+
+const LazyAgentSettings = lazy(() => import('./settings/AgentSettings').then((module) => ({
+  default: module.AgentSettings,
+})));
 
 interface Props {
   open: boolean;
@@ -23,6 +26,14 @@ const MENU_ITEMS: { key: SettingsPage; label: string }[] = [
   { key: 'shortcuts', label: '快捷键' },
   { key: 'about', label: '关于' },
 ];
+
+function SettingsSectionFallback() {
+  return (
+    <div className="flex min-h-[320px] items-center justify-center text-sm text-[var(--text-muted)]">
+      Loading settings section...
+    </div>
+  );
+}
 
 export function SettingsModal({ open, onClose, initialPage = 'terminal' }: Props) {
   const [activePage, setActivePage] = useState<SettingsPage>(initialPage);
@@ -88,8 +99,16 @@ export function SettingsModal({ open, onClose, initialPage = 'terminal' }: Props
           {activePage === 'terminal' ? <TerminalSettings /> : null}
           {activePage === 'theme' ? <ThemeSettings /> : null}
           {activePage === 'system' ? <SystemSettings /> : null}
-          {activePage === 'agent' ? <AgentSettings mode="agent" /> : null}
-          {activePage === 'mcp' ? <AgentSettings mode="mcp" /> : null}
+          {activePage === 'agent' ? (
+            <Suspense fallback={<SettingsSectionFallback />}>
+              <LazyAgentSettings mode="agent" />
+            </Suspense>
+          ) : null}
+          {activePage === 'mcp' ? (
+            <Suspense fallback={<SettingsSectionFallback />}>
+              <LazyAgentSettings mode="mcp" />
+            </Suspense>
+          ) : null}
           {activePage === 'shortcuts' ? <ShortcutsSettings /> : null}
           {activePage === 'about' ? <AboutSettings /> : null}
         </div>

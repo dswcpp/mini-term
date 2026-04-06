@@ -649,9 +649,11 @@ mod tests {
 
         let value = server_info_tool(json!({})).unwrap();
         assert_eq!(value["appVersion"], "9.9.9-host");
-        assert_eq!(value["hostConnection"]["status"], "unavailable");
+        assert_eq!(value["hostConnection"]["status"], "stale");
+        assert_eq!(value["hostConnection"]["controlStatus"], "snapshot-only");
         assert_eq!(value["hostConnection"]["mode"], "app-data-snapshot");
-        assert_eq!(value["diagnostics"][0]["code"], "HOST_UNAVAILABLE");
+        assert_eq!(value["runtime"]["degradationMode"], "stale-snapshot-only");
+        assert_eq!(value["diagnostics"][0]["code"], "HOST_STALE");
     }
 
     #[test]

@@ -15,24 +15,24 @@ describe('WorkspaceDialogHost', () => {
     }));
   });
 
-  it('renders settings dialog and closes it on escape', () => {
+  it('renders settings dialog and closes it on escape', async () => {
     useAppStore.getState().openSettings('theme');
 
     render(<WorkspaceDialogHost />);
 
-    expect(screen.getByTestId('settings-modal')).not.toBeNull();
+    expect(await screen.findByTestId('settings-modal')).not.toBeNull();
 
     fireEvent.keyDown(window, { key: 'Escape' });
 
     expect(useAppStore.getState().ui.activeDialog).toBeNull();
   });
 
-  it('closes the current dialog when the backdrop is clicked', () => {
+  it('closes the current dialog when the backdrop is clicked', async () => {
     useAppStore.getState().openSettings();
 
     render(<WorkspaceDialogHost />);
 
-    fireEvent.click(screen.getByTestId('overlay-surface-backdrop'));
+    fireEvent.click(await screen.findByTestId('overlay-surface-backdrop'));
 
     expect(useAppStore.getState().ui.activeDialog).toBeNull();
   });

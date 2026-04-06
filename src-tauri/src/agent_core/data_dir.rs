@@ -58,6 +58,15 @@ pub fn logs_dir() -> PathBuf {
     path
 }
 
+pub fn task_artifacts_dir(task_id: &str) -> PathBuf {
+    let path = agent_state_dir()
+        .join("tasks")
+        .join(task_id)
+        .join("artifacts");
+    fs::create_dir_all(&path).ok();
+    path
+}
+
 pub fn tasks_path() -> PathBuf {
     agent_state_dir().join("tasks.json")
 }

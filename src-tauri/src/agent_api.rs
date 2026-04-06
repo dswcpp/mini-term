@@ -4,8 +4,8 @@ use crate::agent_core::{
         AgentActionResult, ApprovalDecision, ApprovalRequest, StartTaskInput, TaskContextPreset,
     },
     task_runtime::{
-        get_task_status, list_attention_tasks, request_task_close, resume_session, send_task_input,
-        start_task,
+        get_task_status, list_attention_tasks, request_task_close, resume_session, save_task_plan,
+        send_task_input, start_task,
     },
     task_store::list_task_details,
     workspace_context::{get_workspace_context, list_workspaces},
@@ -94,6 +94,22 @@ pub fn close_agent_task(
 #[tauri::command]
 pub fn resume_agent_task(task_id: String) -> Result<serde_json::Value, String> {
     serde_json::to_value(resume_session(&task_id)?).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn save_agent_task_plan(
+    task_id: String,
+    markdown: String,
+    title: Option<String>,
+    file_name: Option<String>,
+) -> Result<serde_json::Value, String> {
+    serde_json::to_value(save_task_plan(
+        &task_id,
+        &markdown,
+        title.as_deref(),
+        file_name.as_deref(),
+    )?)
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

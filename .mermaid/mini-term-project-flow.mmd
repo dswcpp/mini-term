@@ -1,0 +1,81 @@
+flowchart TB
+  user["User / Operator"]
+  external["External MCP Clients<br/>Codex / Claude / Cursor / Generic"]
+
+  subgraph desktop["Mini-Term Desktop App"]
+    ui["React UI"]
+    store["Zustand Store"]
+    workspace["Workspace / Tabs / Split Layout"]
+    viewers["Document Viewer / Git / Settings / Agent Inbox"]
+    tauri["Tauri Commands + Events"]
+
+    ui --> store
+    store --> workspace
+    store --> viewers
+    workspace --> tauri
+    viewers --> tauri
+    tauri --> store
+  end
+
+  subgraph host["Rust + Tauri Host"]
+    lib["lib.rs<br/>App bootstrap + command registration"]
+    pty["pty.rs<br/>PTY lifecycle + IO tracking"]
+    process["process_monitor.rs<br/>AI process detection + status polling"]
+    fs["fs.rs<br/>File tree + watchers + previews"]
+    config["config.rs<br/>AppConfig persistence"]
+    agent["agent_core/*<br/>task runtime + approvals + task store"]
+    runtime["runtime_mcp.rs<br/>runtime snapshot persistence"]
+    mcpHost["host_control.rs / mcp_host.rs<br/>host-backed PTY + UI control"]
+
+    lib --> pty
+    lib --> fs
+    lib --> config
+    lib --> agent
+    lib --> mcpHost
+    pty --> process
+    pty --> runtime
+    fs --> runtime
+    agent --> runtime
+    mcpHost --> runtime
+  end
+
+  subgraph mcp["Mini-Term MCP Surface"]
+    transports["mini-term-mcp / mini-term-mcp-http"]
+    registry["mcp/*<br/>registry + handlers + tool groups"]
+    tools["core-runtime / runtime-observation / pty-control<br/>ui-control / task-management / legacy-compat"]
+
+    transports --> registry
+    registry --> tools
+    registry --> runtime
+    registry --> mcpHost
+  end
+
+  subgraph tasks["Tracked Task Loop"]
+    inbox["AgentInbox / Tasks Tab"]
+    taskApi["start_task / get_task_status / send_task_input / approvals"]
+    cli["Codex / Claude task sessions"]
+
+    inbox --> taskApi
+    taskApi --> agent
+    agent --> cli
+    cli --> pty
+  end
+
+  subgraph ptyFlow["PTY Runtime Flow"]
+    input["xterm.onData / drag path / task input"]
+    writer["invoke('write_pty')"]
+    reader["pty-output / pty-exit / pty-status-change"]
+    term["xterm.js terminal view"]
+
+    input --> writer
+    writer --> pty
+    pty --> reader
+    reader --> term
+    term --> store
+  end
+
+  user --> ui
+  user --> inbox
+  external --> transports
+  runtime --> transports
+  mcpHost --> ui
