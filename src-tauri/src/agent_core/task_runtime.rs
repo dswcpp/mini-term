@@ -10,8 +10,13 @@ use super::models::{
 };
 use super::task_store::{get_task_detail, list_task_details, update_task, upsert_task_detail};
 use super::workspace_context::{get_workspace_context, validate_task_working_directory};
+use crate::agent_backends::{
+    default_backend_for_target, find_agent_backend, AgentBackendDescriptor,
+};
 use crate::agent_policy::build_injected_prompt;
+use crate::runtime_mcp::record_runtime_event;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, PtySize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -68,6 +73,36 @@ fn build_task_title(input: &StartTaskInput) -> String {
         .clone()
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| format!("{} task", input.target.as_str()))
+}
+
+fn resolve_task_backend(input: &StartTaskInput) -> Result<AgentBackendDescriptor, String> {
+    let requested_backend_id = input
+        .backend_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let backend = if let Some(backend_id) = requested_backend_id {
+        find_agent_backend(backend_id)
+            .ok_or_else(|| format!("unknown agent backend: {backend_id}"))?
+    } else {
+        default_backend_for_target(&input.target).ok_or_else(|| {
+            format!(
+                "no backend registered for target: {}",
+                input.target.as_str()
+            )
+        })?
+    };
+
+    if backend.target != input.target.clone() {
+        return Err(format!(
+            "backend {} does not support target {}",
+            backend.backend_id,
+            input.target.as_str()
+        ));
+    }
+
+    Ok(backend)
 }
 
 fn build_prompt_with_context(input: &StartTaskInput) -> Result<String, String> {
@@ -285,8 +320,13 @@ fn resolve_codex_windows_launch() -> (CommandBuilder, String) {
     (wrap_windows_command(&resolved), resolved)
 }
 
-fn command_for(target: &TaskTarget, prompt: &str, cwd: &str, title: &str) -> LaunchCommand {
-    if let Some(mut command) = shim_command_for(target) {
+fn command_for(
+    backend: &AgentBackendDescriptor,
+    prompt: &str,
+    cwd: &str,
+    title: &str,
+) -> LaunchCommand {
+    if let Some(mut command) = shim_command_for(&backend.target) {
         command.cwd(cwd);
         return LaunchCommand {
             builder: command,
@@ -296,14 +336,14 @@ fn command_for(target: &TaskTarget, prompt: &str, cwd: &str, title: &str) -> Lau
                     .ok()
                     .or_else(|| std::env::var("MINI_TERM_TEST_AGENT_SHIM").ok())
                     .unwrap_or_else(|| "<shim>".to_string()),
-                target.as_str()
+                backend.backend_id
             ),
             initial_input: None,
         };
     }
 
-    let (mut command, display, initial_input) = match target {
-        TaskTarget::Codex => {
+    let (mut command, display, initial_input) = match backend.backend_id.as_str() {
+        "codex-cli" => {
             #[cfg(windows)]
             let (mut builder, launch_prefix) = resolve_codex_windows_launch();
             #[cfg(not(windows))]
@@ -339,7 +379,7 @@ fn command_for(target: &TaskTarget, prompt: &str, cwd: &str, title: &str) -> Lau
             };
             (builder, display, initial_input)
         }
-        TaskTarget::Claude => {
+        "claude-cli" => {
             #[cfg(windows)]
             let (mut builder, launch_prefix) = resolve_claude_windows_launch();
             #[cfg(not(windows))]
@@ -374,6 +414,9 @@ fn command_for(target: &TaskTarget, prompt: &str, cwd: &str, title: &str) -> Lau
                 None
             };
             (builder, display, initial_input)
+        }
+        other => {
+            panic!("unsupported builtin backend: {other}");
         }
     };
     command.cwd(cwd);
@@ -482,6 +525,7 @@ fn running_task_exists(task_id: &str) -> bool {
 
 fn initialize_task_record(
     input: &StartTaskInput,
+    backend: &AgentBackendDescriptor,
     workspace_name: String,
     workspace_root_path: String,
     cwd: String,
@@ -502,6 +546,15 @@ fn initialize_task_record(
         workspace_name,
         workspace_root_path,
         target: input.target.clone(),
+        role: input.role.clone(),
+        parent_task_id: input
+            .parent_task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        backend_id: Some(backend.backend_id.clone()),
+        backend_display_name: Some(backend.display_name.clone()),
         title: build_task_title(input),
         status: "starting".to_string(),
         attention_state: TaskAttentionState::Running,
@@ -666,14 +719,32 @@ fn approval_matches_action(request: &ApprovalRequest, tool_name: &str, approval_
     request.tool_name == tool_name && request.approval_key.as_deref() == Some(approval_key)
 }
 
+fn task_event_payload(summary: &TaskSummary) -> serde_json::Value {
+    json!({
+        "taskId": summary.task_id.clone(),
+        "workspaceId": summary.workspace_id.clone(),
+        "workspaceName": summary.workspace_name.clone(),
+        "target": summary.target.clone(),
+        "role": summary.role.clone(),
+        "backendId": summary.backend_id.clone(),
+        "backendDisplayName": summary.backend_display_name.clone(),
+        "parentTaskId": summary.parent_task_id.clone(),
+        "status": summary.status.clone(),
+        "attentionState": summary.attention_state.clone(),
+        "cwd": summary.cwd.clone(),
+    })
+}
+
 pub fn start_task(input: StartTaskInput) -> Result<TaskSummary, String> {
     let validated = validate_task_working_directory(&input.workspace_id, input.cwd.as_deref())?;
     let workspace_name = validated.workspace_name.clone();
     let workspace_root_path = validated.workspace_root_path.clone();
     let cwd = validated.cwd.clone();
+    let backend = resolve_task_backend(&input)?;
     let prompt = build_prompt_with_context(&input)?;
     let initial_detail = initialize_task_record(
         &input,
+        &backend,
         workspace_name,
         workspace_root_path.clone(),
         cwd.clone(),
@@ -696,7 +767,7 @@ pub fn start_task(input: StartTaskInput) -> Result<TaskSummary, String> {
         builder,
         display: launch_display,
         initial_input,
-    } = command_for(&input.target, &prompt, &cwd, &initial_detail.summary.title);
+    } = command_for(&backend, &prompt, &cwd, &initial_detail.summary.title);
     let should_watch_initial_input = initial_input.is_some();
     let mut child = pair
         .slave
@@ -733,6 +804,17 @@ pub fn start_task(input: StartTaskInput) -> Result<TaskSummary, String> {
             let _ = handle.killer.kill();
         }
         return Err(fail_task_start(&task_id, err));
+    }
+
+    if let Some(started_summary) = get_task_detail(&task_id).map(|detail| detail.summary) {
+        let _ = record_runtime_event(
+            "task-started",
+            format!(
+                "Task {} started with backend {}.",
+                started_summary.task_id, backend.display_name
+            ),
+            Some(task_event_payload(&started_summary)),
+        );
     }
 
     let task_id_for_output = task_id.clone();
@@ -849,9 +931,19 @@ pub fn send_task_input(task_id: &str, input: &str) -> Result<TaskSummary, String
         detail.summary.status = "running".to_string();
         detail.summary.attention_state = TaskAttentionState::Running;
     })?;
-    updated
+    let summary = updated
         .map(|detail| detail.summary)
-        .ok_or_else(|| format!("task not found: {task_id}"))
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    let _ = record_runtime_event(
+        "task-input",
+        format!("Operator input sent to task {}.", summary.task_id),
+        Some(json!({
+            "taskId": summary.task_id,
+            "status": summary.status,
+            "inputPreview": clamp_excerpt(input.trim_end(), 300),
+        })),
+    );
+    Ok(summary)
 }
 
 pub fn close_task(task_id: &str) -> Result<TaskSummary, String> {
@@ -873,9 +965,15 @@ pub fn close_task(task_id: &str) -> Result<TaskSummary, String> {
         detail.summary.completed_at = Some(now_timestamp_ms());
         detail.summary.termination_cause = Some(TaskTerminationCause::ManualClose);
     })?;
-    updated
+    let summary = updated
         .map(|detail| detail.summary)
-        .ok_or_else(|| format!("task not found: {task_id}"))
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    let _ = record_runtime_event(
+        "task-closed",
+        format!("Task {} was closed by operator.", summary.task_id),
+        Some(task_event_payload(&summary)),
+    );
+    Ok(summary)
 }
 
 pub fn get_task_status(task_id: &str) -> Result<TaskStatusDetail, String> {
@@ -942,8 +1040,17 @@ pub fn save_task_plan(
             });
         }
     })?;
-
-    updated.ok_or_else(|| format!("task not found: {task_id}"))
+    let detail = updated.ok_or_else(|| format!("task not found: {task_id}"))?;
+    let _ = record_runtime_event(
+        "task-plan-saved",
+        format!("Saved plan document for task {}.", detail.summary.task_id),
+        Some(json!({
+            "taskId": detail.summary.task_id,
+            "artifactPath": path_string,
+            "title": title,
+        })),
+    );
+    Ok(detail)
 }
 
 pub fn request_or_validate_approval(
@@ -998,7 +1105,17 @@ pub fn request_or_validate_approval(
 }
 
 pub fn mark_approval_executed(request_id: &str) {
-    let _ = set_approval_status(request_id, ApprovalDecision::Executed);
+    if let Ok(request) = set_approval_status(request_id, ApprovalDecision::Executed) {
+        let _ = record_runtime_event(
+            "approval-executed",
+            format!("Approval {} marked executed.", request.request_id),
+            Some(json!({
+                "requestId": request.request_id,
+                "toolName": request.tool_name,
+                "status": request.status,
+            })),
+        );
+    }
 }
 
 pub fn request_task_close(
@@ -1028,9 +1145,10 @@ pub fn request_task_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_backends::default_backend_for_target;
     use crate::agent_core::{
         approval::{create_approval_request, set_approval_status},
-        models::{ApprovalRiskLevel, TaskAttentionState, TaskContextPreset},
+        models::{ApprovalRiskLevel, TaskAttentionState, TaskContextPreset, TaskRole},
         task_store::{get_task_detail, upsert_task_detail},
     };
     use crate::mcp::tools::test_support::TestHarness;
@@ -1057,6 +1175,10 @@ mod tests {
                 workspace_name: "mini-term".into(),
                 workspace_root_path: workspace_path.to_string(),
                 target: TaskTarget::Codex,
+                role: TaskRole::Coordinator,
+                parent_task_id: None,
+                backend_id: Some("codex-cli".into()),
+                backend_display_name: Some("Codex CLI".into()),
                 title: "Sample task".into(),
                 status: "starting".into(),
                 attention_state: TaskAttentionState::Running,
@@ -1308,12 +1430,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn command_for_codex_streams_initial_prompt_via_pty() {
-        let launch = command_for(
-            &TaskTarget::Codex,
-            "review pending changes",
-            "D:/repo",
-            "Codex task",
-        );
+        let backend = default_backend_for_target(&TaskTarget::Codex).unwrap();
+        let launch = command_for(&backend, "review pending changes", "D:/repo", "Codex task");
         assert!(launch.display.contains("<prompt-via-pty>"));
         assert!(launch.display.contains("trust_level"));
         assert_eq!(
@@ -1331,9 +1449,13 @@ mod tests {
                 target: TaskTarget::Codex,
                 prompt: "Fix runtime MCP pagination".into(),
                 context_preset: TaskContextPreset::Light,
+                role: TaskRole::Coordinator,
+                parent_task_id: None,
+                backend_id: None,
                 cwd: None,
                 title: Some("Prompt preview".into()),
             },
+            &default_backend_for_target(&TaskTarget::Codex).unwrap(),
             "mini-term".into(),
             harness.workspace_path(),
             harness.workspace_path(),

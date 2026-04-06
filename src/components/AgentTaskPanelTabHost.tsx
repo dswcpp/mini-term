@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useAppStore } from '../store';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAppStore } from "../store";
 import {
   closeAgentTask,
   getAgentTaskStatus,
@@ -7,15 +7,16 @@ import {
   listAgentTasks,
   resumeAgentTask,
   sendAgentTaskInput,
-} from '../runtime/agentApi';
-import { getTaskEffectivePolicy } from '../runtime/agentPolicyApi';
+} from "../runtime/agentApi";
+import { getTaskEffectivePolicy } from "../runtime/agentPolicyApi";
 import type {
+  AgentTaskSummary,
   AgentTaskPanelTab,
   AgentTaskStatusDetail,
   TaskAttentionState,
   TaskEffectivePolicy,
   TaskTarget,
-} from '../types';
+} from "../types";
 
 interface AgentTaskPanelTabHostProps {
   tab: AgentTaskPanelTab;
@@ -24,64 +25,77 @@ interface AgentTaskPanelTabHostProps {
 }
 
 function formatRelativeTime(timestamp: number) {
-  if (!timestamp) return '';
+  if (!timestamp) return "";
   const diff = Date.now() - timestamp;
-  if (diff < 60_000) return '刚刚';
+  if (diff < 60_000) return "刚刚";
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
   return `${Math.floor(diff / 86_400_000)} 天前`;
 }
 
-const ATTENTION_OPTIONS: Array<TaskAttentionState | 'all'> = [
-  'all',
-  'running',
-  'waiting-input',
-  'needs-review',
-  'failed',
-  'completed',
+const ATTENTION_OPTIONS: Array<TaskAttentionState | "all"> = [
+  "all",
+  "running",
+  "waiting-input",
+  "needs-review",
+  "failed",
+  "completed",
 ];
-const TARGET_OPTIONS: Array<TaskTarget | 'all'> = ['all', 'codex', 'claude'];
+const TARGET_OPTIONS: Array<TaskTarget | "all"> = ["all", "codex", "claude"];
 
-function attentionLabel(value: TaskAttentionState | 'all') {
+function attentionLabel(value: TaskAttentionState | "all") {
   switch (value) {
-    case 'all':
-      return '全部';
-    case 'running':
-      return '运行中';
-    case 'waiting-input':
-      return '等待输入';
-    case 'needs-review':
-      return '待审查';
-    case 'failed':
-      return '失败';
-    case 'completed':
-      return '已完成';
+    case "all":
+      return "全部";
+    case "running":
+      return "运行中";
+    case "waiting-input":
+      return "等待输入";
+    case "needs-review":
+      return "待审查";
+    case "failed":
+      return "失败";
+    case "completed":
+      return "已完成";
   }
 }
 
-function targetLabel(value: TaskTarget | 'all') {
+function targetLabel(value: TaskTarget | "all") {
   switch (value) {
-    case 'all':
-      return '全部';
-    case 'codex':
-      return 'Codex';
-    case 'claude':
-      return 'Claude';
+    case "all":
+      return "全部";
+    case "codex":
+      return "Codex";
+    case "claude":
+      return "Claude";
   }
+}
+
+function roleLabel(role: AgentTaskSummary["role"]) {
+  return role === "worker" ? "Worker" : "Coordinator";
+}
+
+function backendLabel(
+  summary: Pick<AgentTaskSummary, "backendDisplayName" | "target">,
+) {
+  return (
+    summary.backendDisplayName ??
+    (summary.target === "codex" ? "Codex CLI" : "Claude CLI")
+  );
 }
 
 function statusLabel(value: string) {
   switch (value) {
-    case 'starting':
-      return '启动中';
-    case 'running':
-      return '运行中';
-    case 'waiting-input':
-      return '等待输入';
-    case 'exited':
-      return '已退出';
-    case 'error':
-      return '错误';
+    case "starting":
+      return "启动中";
+    case "running":
+      return "运行中";
+    case "waiting-input":
+      return "等待输入";
+    case "exited":
+      return "已退出";
+    case "error":
+      return "错误";
     default:
       return value;
   }
@@ -89,12 +103,12 @@ function statusLabel(value: string) {
 
 function presetLabel(value: string) {
   switch (value) {
-    case 'light':
-      return '轻量';
-    case 'standard':
-      return '标准';
-    case 'review':
-      return '审查';
+    case "light":
+      return "轻量";
+    case "standard":
+      return "标准";
+    case "review":
+      return "审查";
     default:
       return value;
   }
@@ -107,8 +121,8 @@ async function findApprovedCloseRequestId(
   const matching = approvals
     .filter(
       (request) =>
-        request.toolName === 'close_task' &&
-        request.status === 'approved' &&
+        request.toolName === "close_task" &&
+        request.status === "approved" &&
         request.payloadPreview.trim() === `Task: ${taskId}`,
     )
     .sort((left, right) => right.updatedAt - left.updatedAt);
@@ -140,10 +154,10 @@ export function AgentTaskPanelTabHost({
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [approvalNotice, setApprovalNotice] = useState<string | null>(null);
-  const [inputValue, setInputValue] = useState('');
+  const [inputValue, setInputValue] = useState("");
   const [actionState, setActionState] = useState<
-    'idle' | 'sending' | 'closing' | 'resuming'
-  >('idle');
+    "idle" | "sending" | "closing" | "resuming"
+  >("idle");
 
   const refreshTasks = useCallback(async () => {
     setLoading(true);
@@ -152,7 +166,7 @@ export function AgentTaskPanelTabHost({
       setTasks(result);
       setError(null);
     } catch {
-      setError('加载任务列表失败');
+      setError("加载任务列表失败");
     } finally {
       setLoading(false);
     }
@@ -171,7 +185,7 @@ export function AgentTaskPanelTabHost({
     } catch {
       setSelectedTask(null);
       setEffectivePolicy(null);
-      setDetailError('加载任务详情失败');
+      setDetailError("加载任务详情失败");
     } finally {
       setDetailLoading(false);
     }
@@ -209,18 +223,24 @@ export function AgentTaskPanelTabHost({
   const visibleTasks = useMemo(() => {
     return tasks.filter((item) => {
       const matchesScope =
-        tab.filter.scope === 'all' || item.summary.workspaceId === workspaceId;
+        tab.filter.scope === "all" || item.summary.workspaceId === workspaceId;
       const matchesAttention =
         !tab.filter.attention ||
-        tab.filter.attention === 'all' ||
+        tab.filter.attention === "all" ||
         item.summary.attentionState === tab.filter.attention;
       const matchesTarget =
         !tab.filter.target ||
-        tab.filter.target === 'all' ||
+        tab.filter.target === "all" ||
         item.summary.target === tab.filter.target;
       return matchesScope && matchesAttention && matchesTarget;
     });
-  }, [tab.filter.attention, tab.filter.scope, tab.filter.target, tasks, workspaceId]);
+  }, [
+    tab.filter.attention,
+    tab.filter.scope,
+    tab.filter.target,
+    tasks,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (visibleTasks.length === 0) {
@@ -271,13 +291,15 @@ export function AgentTaskPanelTabHost({
   }, [openWorktreeDiff, selectedTask, setActiveWorkspace]);
 
   const openPlan = useCallback(() => {
-    const artifact = selectedTask?.artifacts.find((item) => item.kind === 'plan');
+    const artifact = selectedTask?.artifacts.find(
+      (item) => item.kind === "plan",
+    );
     if (!selectedTask || !artifact) {
       return;
     }
     setActiveWorkspace(selectedTask.summary.workspaceId);
     openFileViewer(selectedTask.summary.workspaceId, artifact.path, {
-      initialMode: 'preview',
+      initialMode: "preview",
     });
   }, [openFileViewer, selectedTask, setActiveWorkspace]);
 
@@ -285,16 +307,16 @@ export function AgentTaskPanelTabHost({
     if (!selectedTask || !inputValue.trim()) {
       return;
     }
-    setActionState('sending');
+    setActionState("sending");
     try {
       await sendAgentTaskInput(selectedTask.summary.taskId, inputValue.trim());
-      setInputValue('');
+      setInputValue("");
       await refreshTasks();
       await refreshSelectedTask(selectedTask.summary.taskId);
     } catch {
-      setDetailError('发送任务输入失败');
+      setDetailError("发送任务输入失败");
     } finally {
-      setActionState('idle');
+      setActionState("idle");
     }
   }, [inputValue, refreshSelectedTask, refreshTasks, selectedTask]);
 
@@ -302,7 +324,7 @@ export function AgentTaskPanelTabHost({
     if (!selectedTask) {
       return;
     }
-    setActionState('closing');
+    setActionState("closing");
     try {
       const approvalRequestId = await findApprovedCloseRequestId(
         selectedTask.summary.taskId,
@@ -316,15 +338,15 @@ export function AgentTaskPanelTabHost({
         await refreshSelectedTask(selectedTask.summary.taskId);
         setDetailError(null);
       } else if (result.approvalRequired) {
-        setApprovalNotice('已创建关闭审批，请先在 Inbox 中批准后再重试。');
+        setApprovalNotice("已创建关闭审批，请先在 Inbox 中批准后再重试。");
         setDetailError(null);
       } else {
-        setDetailError('关闭任务失败');
+        setDetailError("关闭任务失败");
       }
     } catch {
-      setDetailError('关闭任务失败');
+      setDetailError("关闭任务失败");
     } finally {
-      setActionState('idle');
+      setActionState("idle");
     }
   }, [refreshSelectedTask, refreshTasks, selectedTask]);
 
@@ -332,7 +354,7 @@ export function AgentTaskPanelTabHost({
     if (!selectedTask) {
       return;
     }
-    setActionState('resuming');
+    setActionState("resuming");
     try {
       const detail = await resumeAgentTask(selectedTask.summary.taskId);
       setSelectedTask(detail);
@@ -340,9 +362,9 @@ export function AgentTaskPanelTabHost({
       setApprovalNotice(null);
       setDetailError(null);
     } catch {
-      setDetailError('恢复会话失败');
+      setDetailError("恢复会话失败");
     } finally {
-      setActionState('idle');
+      setActionState("idle");
     }
   }, [refreshTasks, selectedTask]);
 
@@ -352,8 +374,10 @@ export function AgentTaskPanelTabHost({
     (selectedTask && selectedTask.summary.taskId === tab.selectedTaskId
       ? selectedTask.summary
       : null);
-  const planArtifact = selectedTask?.artifacts.find((artifact) => artifact.kind === 'plan');
-  const canSendInput = selectedSummary?.status === 'running';
+  const planArtifact = selectedTask?.artifacts.find(
+    (artifact) => artifact.kind === "plan",
+  );
+  const canSendInput = selectedSummary?.status === "running";
 
   return (
     <div className="flex h-full bg-[var(--bg-terminal)] text-[var(--text-primary)]">
@@ -364,7 +388,7 @@ export function AgentTaskPanelTabHost({
               任务
             </div>
             <div className="mt-0.5 text-[11px] text-[var(--text-secondary)]">
-              {tab.filter.scope === 'all' ? '全部工作区' : '当前工作区'}
+              {tab.filter.scope === "all" ? "全部工作区" : "当前工作区"}
             </div>
           </div>
           <button
@@ -390,7 +414,8 @@ export function AgentTaskPanelTabHost({
               value={tab.filter.scope}
               onChange={(event) =>
                 setAgentTaskPanelFilter(workspaceId, tab.id, {
-                  scope: event.target.value as AgentTaskPanelTab['filter']['scope'],
+                  scope: event.target
+                    .value as AgentTaskPanelTab["filter"]["scope"],
                 })
               }
             >
@@ -404,10 +429,10 @@ export function AgentTaskPanelTabHost({
             <select
               aria-label="状态"
               className="rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
-              value={tab.filter.attention ?? 'all'}
+              value={tab.filter.attention ?? "all"}
               onChange={(event) =>
                 setAgentTaskPanelFilter(workspaceId, tab.id, {
-                  attention: event.target.value as TaskAttentionState | 'all',
+                  attention: event.target.value as TaskAttentionState | "all",
                 })
               }
             >
@@ -424,10 +449,10 @@ export function AgentTaskPanelTabHost({
             <select
               aria-label="目标"
               className="rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
-              value={tab.filter.target ?? 'all'}
+              value={tab.filter.target ?? "all"}
               onChange={(event) =>
                 setAgentTaskPanelFilter(workspaceId, tab.id, {
-                  target: event.target.value as TaskTarget | 'all',
+                  target: event.target.value as TaskTarget | "all",
                 })
               }
             >
@@ -465,11 +490,15 @@ export function AgentTaskPanelTabHost({
                 type="button"
                 className={`flex w-full flex-col items-start gap-1 border-b border-[var(--border-subtle)] px-3 py-2 text-left ${
                   selected
-                    ? 'bg-[var(--accent-subtle)]/30'
-                    : 'hover:bg-[var(--bg-surface)]'
+                    ? "bg-[var(--accent-subtle)]/30"
+                    : "hover:bg-[var(--bg-surface)]"
                 }`}
                 onClick={() =>
-                  setAgentTaskPanelSelection(workspaceId, tab.id, summary.taskId)
+                  setAgentTaskPanelSelection(
+                    workspaceId,
+                    tab.id,
+                    summary.taskId,
+                  )
                 }
               >
                 <div className="flex w-full items-center justify-between gap-2">
@@ -481,11 +510,17 @@ export function AgentTaskPanelTabHost({
                   </span>
                 </div>
                 <div className="truncate text-[11px] text-[var(--text-secondary)]">
-                  {targetLabel(summary.target)} · {summary.workspaceName}
+                  {backendLabel(summary)} | {roleLabel(summary.role)} |{" "}
+                  {summary.workspaceName}
                 </div>
                 <div className="line-clamp-2 text-[11px] text-[var(--text-muted)]">
                   {summary.lastOutputExcerpt || summary.promptPreview}
                 </div>
+                {summary.parentTaskId ? (
+                  <div className="text-[10px] text-[var(--text-muted)]">
+                    Parent {summary.parentTaskId}
+                  </div>
+                ) : null}
                 <div className="flex items-center gap-2 text-[10px] text-[var(--text-muted)]">
                   <span>{formatRelativeTime(summary.updatedAt)}</span>
                   {summary.changedFiles.length > 0 ? (
@@ -512,11 +547,17 @@ export function AgentTaskPanelTabHost({
                     {selectedSummary.title}
                   </div>
                   <div className="mt-1 flex flex-wrap gap-3 text-[11px] text-[var(--text-muted)]">
-                    <span>{targetLabel(selectedSummary.target)}</span>
+                    <span>{backendLabel(selectedSummary)}</span>
+                    <span>{roleLabel(selectedSummary.role)}</span>
                     <span>{selectedSummary.workspaceName}</span>
                     <span>{statusLabel(selectedSummary.status)}</span>
-                    <span>{attentionLabel(selectedSummary.attentionState)}</span>
+                    <span>
+                      {attentionLabel(selectedSummary.attentionState)}
+                    </span>
                     <span>{presetLabel(selectedSummary.contextPreset)}</span>
+                    {selectedSummary.parentTaskId ? (
+                      <span>Parent {selectedSummary.parentTaskId}</span>
+                    ) : null}
                   </div>
                 </div>
                 <div className="flex shrink-0 gap-2">
@@ -524,7 +565,7 @@ export function AgentTaskPanelTabHost({
                     type="button"
                     className="rounded-[var(--radius-sm)] border border-[var(--border-default)] px-2.5 py-1 text-[11px] text-[var(--text-secondary)]"
                     onClick={() => void handleResumeTask()}
-                    disabled={actionState !== 'idle'}
+                    disabled={actionState !== "idle"}
                   >
                     恢复会话
                   </button>
@@ -532,11 +573,11 @@ export function AgentTaskPanelTabHost({
                     type="button"
                     className="rounded-[var(--radius-sm)] border border-[var(--border-default)] px-2.5 py-1 text-[11px] text-[var(--text-secondary)]"
                     onClick={() => void handleCloseTask()}
-                    disabled={actionState !== 'idle'}
+                    disabled={actionState !== "idle"}
                   >
                     关闭任务
                   </button>
-                  {selectedSummary.attentionState === 'needs-review' &&
+                  {selectedSummary.attentionState === "needs-review" &&
                   selectedSummary.changedFiles[0] ? (
                     <button
                       type="button"
@@ -576,7 +617,7 @@ export function AgentTaskPanelTabHost({
                     提示词预览
                   </div>
                   <pre className="mt-1 whitespace-pre-wrap rounded bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-5 text-[var(--text-secondary)]">
-                    {selectedSummary.promptPreview || '暂无提示词预览'}
+                    {selectedSummary.promptPreview || "暂无提示词预览"}
                   </pre>
                 </div>
 
@@ -588,19 +629,19 @@ export function AgentTaskPanelTabHost({
                     {effectivePolicy?.isInjected ? (
                       <>
                         <div>
-                          配置：{effectivePolicy.injectionProfileId ?? '未知'}
+                          配置：{effectivePolicy.injectionProfileId ?? "未知"}
                         </div>
                         <div>
-                          预设：{effectivePolicy.injectionPreset ?? '未知'}
+                          预设：{effectivePolicy.injectionPreset ?? "未知"}
                         </div>
                         <div className="mt-1">
                           {effectivePolicy.policySummary ??
                             selectedSummary.policySummary ??
-                            '该任务已通过 Mini-Term 策略运行时注入。'}
+                            "该任务已通过 Mini-Term 策略运行时注入。"}
                         </div>
                       </>
                     ) : (
-                      '该任务没有 Mini-Term 注入元数据。'
+                      "该任务没有 Mini-Term 注入元数据。"
                     )}
                   </div>
                 </div>
@@ -612,7 +653,7 @@ export function AgentTaskPanelTabHost({
                   <pre className="mt-1 max-h-[320px] overflow-auto whitespace-pre-wrap rounded bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-5 text-[var(--text-secondary)]">
                     {selectedTask?.recentOutputExcerpt ||
                       selectedSummary.lastOutputExcerpt ||
-                      '暂无输出'}
+                      "暂无输出"}
                   </pre>
                 </div>
 
@@ -697,6 +738,35 @@ export function AgentTaskPanelTabHost({
 
                 <div className="mt-4">
                   <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+                    Backend
+                  </div>
+                  <div className="break-all text-[11px] text-[var(--text-muted)]">
+                    {backendLabel(selectedSummary)}
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+                    Role
+                  </div>
+                  <div className="break-all text-[11px] text-[var(--text-muted)]">
+                    {roleLabel(selectedSummary.role)}
+                  </div>
+                </div>
+
+                {selectedSummary.parentTaskId ? (
+                  <div className="mt-4">
+                    <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+                      Parent Task
+                    </div>
+                    <div className="break-all text-[11px] text-[var(--text-muted)]">
+                      {selectedSummary.parentTaskId}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="mt-4">
+                  <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
                     当前工作目录
                   </div>
                   <div className="break-all text-[11px] text-[var(--text-muted)]">
@@ -709,7 +779,7 @@ export function AgentTaskPanelTabHost({
                     日志路径
                   </div>
                   <div className="break-all text-[11px] text-[var(--text-muted)]">
-                    {selectedTask?.logPath || '暂无日志路径'}
+                    {selectedTask?.logPath || "暂无日志路径"}
                   </div>
                 </div>
 
@@ -729,7 +799,7 @@ export function AgentTaskPanelTabHost({
                         type="button"
                         className="mt-2 rounded-[var(--radius-sm)] border border-[var(--accent)]/40 bg-[var(--accent-subtle)] px-3 py-1.5 text-[11px] text-[var(--accent)]"
                         onClick={() => void handleSendInput()}
-                        disabled={actionState !== 'idle' || !inputValue.trim()}
+                        disabled={actionState !== "idle" || !inputValue.trim()}
                       >
                         发送输入
                       </button>

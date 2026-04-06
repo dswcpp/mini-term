@@ -1,6 +1,8 @@
 use super::data_dir::{approvals_path, ensure_parent};
 use super::models::{ApprovalDecision, ApprovalRequest, ApprovalRiskLevel};
+use crate::runtime_mcp::record_runtime_event;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -92,6 +94,17 @@ pub fn create_approval_request(
     };
     store.approvals.push(request.clone());
     write_store(&path, &store)?;
+    let _ = record_runtime_event(
+        "approval-requested",
+        format!("Approval requested for {}.", request.tool_name),
+        Some(json!({
+            "requestId": request.request_id.clone(),
+            "toolName": request.tool_name.clone(),
+            "riskLevel": request.risk_level.clone(),
+            "status": request.status.clone(),
+            "payloadPreview": request.payload_preview.clone(),
+        })),
+    );
     Ok(request)
 }
 
@@ -103,11 +116,29 @@ pub fn set_approval_status(
     let mut store = read_store(&path);
     for request in &mut store.approvals {
         if request.request_id == request_id {
+            let previous_status = request.status.clone();
             let next_status = next_approval_status(&request.status, &status);
             request.status = next_status;
             request.updated_at = now_timestamp_ms();
             let updated = request.clone();
             write_store(&path, &store)?;
+            if updated.status != previous_status && updated.status != ApprovalDecision::Executed {
+                let status_label = match &updated.status {
+                    ApprovalDecision::Approved => "approved",
+                    ApprovalDecision::Rejected => "rejected",
+                    ApprovalDecision::Pending => "pending",
+                    ApprovalDecision::Executed => "executed",
+                };
+                let _ = record_runtime_event(
+                    "approval-decision",
+                    format!("Approval {} set to {}.", updated.request_id, status_label),
+                    Some(json!({
+                        "requestId": updated.request_id.clone(),
+                        "toolName": updated.tool_name.clone(),
+                        "status": updated.status.clone(),
+                    })),
+                );
+            }
             return Ok(updated);
         }
     }

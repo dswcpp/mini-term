@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.4-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.2.5-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/Tauri-v2-orange" alt="tauri">
   <img src="https://img.shields.io/badge/React-19-61dafb" alt="react">

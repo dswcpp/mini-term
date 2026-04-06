@@ -254,7 +254,8 @@ fn store_write_count_for_tests() -> usize {
 mod tests {
     use super::*;
     use crate::agent_core::models::{
-        TaskAttentionState, TaskContextPreset, TaskSummary, TaskTarget, TaskTerminationCause,
+        TaskAttentionState, TaskContextPreset, TaskRole, TaskSummary, TaskTarget,
+        TaskTerminationCause,
     };
     use crate::mcp::tools::test_support::TestHarness;
 
@@ -265,6 +266,10 @@ mod tests {
             workspace_name: "mini-term".into(),
             workspace_root_path: "D:/code/mini-term".into(),
             target: TaskTarget::Codex,
+            role: TaskRole::Coordinator,
+            parent_task_id: None,
+            backend_id: Some("codex-cli".into()),
+            backend_display_name: Some("Codex CLI".into()),
             title: "Sample task".into(),
             status: status.into(),
             attention_state: TaskAttentionState::Running,
@@ -416,5 +421,7 @@ mod tests {
             .find(|task| task.summary.task_id == "task-legacy")
             .expect("legacy task should load");
         assert!(detail.artifacts.is_empty());
+        assert_eq!(detail.summary.role, TaskRole::Coordinator);
+        assert!(detail.summary.backend_id.is_none());
     }
 }

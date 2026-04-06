@@ -841,6 +841,17 @@ pub fn record_fs_event_batch(
     record_fs_event_batch_for_path(runtime_state_path(), project_path, events)
 }
 
+pub fn record_runtime_event(
+    kind: &str,
+    summary: impl Into<String>,
+    payload_preview: Option<Value>,
+) -> Result<(), String> {
+    let summary = summary.into();
+    mutate_state(|state| {
+        push_event(state, kind, summary, payload_preview);
+    })
+}
+
 #[cfg(test)]
 pub fn write_runtime_state_for_tests(state: RuntimeMcpState) {
     runtime_store().replace_for_tests(state).unwrap();

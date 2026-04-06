@@ -171,6 +171,9 @@ fn start_task_schema() -> Value {
             "target": { "type": "string", "enum": ["codex", "claude"] },
             "prompt": { "type": "string" },
             "contextPreset": { "type": "string", "enum": ["light", "standard", "review"] },
+            "role": { "type": "string", "enum": ["coordinator", "worker"] },
+            "parentTaskId": { "type": "string" },
+            "backendId": { "type": "string" },
             "cwd": { "type": "string" },
             "title": { "type": "string" }
         }),

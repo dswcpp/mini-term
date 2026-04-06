@@ -1,4 +1,5 @@
 mod agent_api;
+mod agent_backends;
 pub mod agent_core;
 mod agent_policy;
 mod ai_sessions;
@@ -72,6 +73,7 @@ pub fn run() {
             git::get_commit_file_diff,
             git::get_file_git_history,
             git::get_file_git_blame,
+            agent_api::list_agent_backends,
             agent_api::list_agent_workspaces,
             agent_api::get_agent_workspace_context,
             agent_api::list_agent_tasks,

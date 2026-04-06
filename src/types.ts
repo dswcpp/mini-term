@@ -15,10 +15,17 @@ export interface LegacyProjectConfig {
   expandedDirs?: string[];
 }
 
-export type SettingsPage = 'terminal' | 'theme' | 'system' | 'agent' | 'mcp' | 'shortcuts' | 'about';
-export type PreviewMode = 'source' | 'preview';
-export type InteractionDialogMode = 'alert' | 'confirm' | 'prompt';
-export type InteractionDialogTone = 'neutral' | 'warning' | 'danger';
+export type SettingsPage =
+  | "terminal"
+  | "theme"
+  | "system"
+  | "agent"
+  | "mcp"
+  | "shortcuts"
+  | "about";
+export type PreviewMode = "source" | "preview";
+export type InteractionDialogMode = "alert" | "confirm" | "prompt";
+export type InteractionDialogTone = "neutral" | "warning" | "danger";
 
 export interface CompletionUsageBucket {
   commands: Record<string, number>;
@@ -31,15 +38,15 @@ export interface CompletionUsageStats extends CompletionUsageBucket {
   scopes?: Record<string, CompletionUsageBucket>;
 }
 
-export type ThemePresetId = 'warm-carbon' | 'ghostty-dark' | 'ghostty-light';
-export type ThemeWindowEffect = 'auto' | 'mica' | 'acrylic' | 'blur' | 'none';
+export type ThemePresetId = "warm-carbon" | "ghostty-dark" | "ghostty-light";
+export type ThemeWindowEffect = "auto" | "mica" | "acrylic" | "blur" | "none";
 
 export interface ThemeConfig {
   preset: ThemePresetId;
   windowEffect: ThemeWindowEffect;
 }
 
-export type WorkspaceRootRole = 'primary' | 'member';
+export type WorkspaceRootRole = "primary" | "member";
 
 export interface WorkspaceRootConfig {
   id: string;
@@ -76,7 +83,12 @@ export interface AppConfig {
   lastWorkspaceId?: string;
   projects?: LegacyProjectConfig[];
   projectTree?: ProjectTreeItem[];
-  projectGroups?: { id: string; name: string; collapsed: boolean; projectIds: string[] }[];
+  projectGroups?: {
+    id: string;
+    name: string;
+    collapsed: boolean;
+    projectIds: string[];
+  }[];
   projectOrdering?: string[];
   defaultShell: string;
   availableShells: ShellConfig[];
@@ -103,8 +115,13 @@ export interface SavedPane {
 }
 
 export type SavedSplitNode =
-  | { type: 'leaf'; pane: SavedPane }
-  | { type: 'split'; direction: 'horizontal' | 'vertical'; children: SavedSplitNode[]; sizes: number[] };
+  | { type: "leaf"; pane: SavedPane }
+  | {
+      type: "split";
+      direction: "horizontal" | "vertical";
+      children: SavedSplitNode[];
+      sizes: number[];
+    };
 
 export interface SavedTab {
   customTitle?: string;
@@ -116,10 +133,22 @@ export interface SavedProjectLayout {
   activeTabIndex: number;
 }
 
-export type PaneStatus = 'idle' | 'ai-idle' | 'ai-working' | 'error';
-export type ShellKind = 'powershell' | 'pwsh' | 'cmd' | 'bash' | 'zsh' | 'unknown';
-export type SessionMode = 'human' | 'agent' | 'task';
-export type SessionPhase = 'starting' | 'ready' | 'running' | 'waiting-input' | 'error' | 'exited';
+export type PaneStatus = "idle" | "ai-idle" | "ai-working" | "error";
+export type ShellKind =
+  | "powershell"
+  | "pwsh"
+  | "cmd"
+  | "bash"
+  | "zsh"
+  | "unknown";
+export type SessionMode = "human" | "agent" | "task";
+export type SessionPhase =
+  | "starting"
+  | "ready"
+  | "running"
+  | "waiting-input"
+  | "error"
+  | "exited";
 
 export interface CommandBlock {
   id: string;
@@ -127,7 +156,7 @@ export interface CommandBlock {
   startedAt: number;
   finishedAt?: number;
   exitCode?: number;
-  status: 'running' | 'completed' | 'success' | 'error' | 'interrupted';
+  status: "running" | "completed" | "success" | "error" | "interrupted";
 }
 
 export interface RunProfile {
@@ -176,12 +205,17 @@ export interface TerminalUiState {
 }
 
 export type TerminalOrchestratorAction =
-  | { type: 'open-session'; sessionId: string; ptyId: number }
-  | { type: 'restart-session'; sessionId: string; ptyId: number; previousPtyId?: number }
-  | { type: 'close-session'; sessionId: string; ptyId?: number }
-  | { type: 'write-input'; sessionId: string; bytes: number }
-  | { type: 'resize-session'; sessionId: string; cols: number; rows: number }
-  | { type: 'run-command'; sessionId: string; command: string };
+  | { type: "open-session"; sessionId: string; ptyId: number }
+  | {
+      type: "restart-session";
+      sessionId: string;
+      ptyId: number;
+      previousPtyId?: number;
+    }
+  | { type: "close-session"; sessionId: string; ptyId?: number }
+  | { type: "write-input"; sessionId: string; bytes: number }
+  | { type: "resize-session"; sessionId: string; cols: number; rows: number }
+  | { type: "run-command"; sessionId: string; command: string };
 
 export interface WorkspaceState {
   id: string;
@@ -217,7 +251,7 @@ export interface WorkspaceExplorerRuntime {
 }
 
 export interface TerminalTab {
-  kind: 'terminal';
+  kind: "terminal";
   id: string;
   customTitle?: string;
   splitLayout: SplitNode;
@@ -231,7 +265,7 @@ export interface FileNavigationTarget {
 }
 
 export interface FileViewerTab {
-  kind: 'file-viewer';
+  kind: "file-viewer";
   id: string;
   filePath: string;
   mode: PreviewMode;
@@ -240,14 +274,14 @@ export interface FileViewerTab {
 }
 
 export interface WorktreeDiffTab {
-  kind: 'worktree-diff';
+  kind: "worktree-diff";
   id: string;
   projectPath: string;
   status: GitFileStatus;
 }
 
 export interface CommitDiffTab {
-  kind: 'commit-diff';
+  kind: "commit-diff";
   id: string;
   repoPath: string;
   commitHash: string;
@@ -256,20 +290,20 @@ export interface CommitDiffTab {
 }
 
 export interface FileHistoryTab {
-  kind: 'file-history';
+  kind: "file-history";
   id: string;
   projectPath: string;
   filePath: string;
 }
 
 export interface AgentTaskPanelFilter {
-  scope: 'workspace' | 'all';
-  attention?: TaskAttentionState | 'all';
-  target?: TaskTarget | 'all';
+  scope: "workspace" | "all";
+  attention?: TaskAttentionState | "all";
+  target?: TaskTarget | "all";
 }
 
 export interface AgentTaskPanelTab {
-  kind: 'agent-tasks';
+  kind: "agent-tasks";
   id: string;
   filter: AgentTaskPanelFilter;
   selectedTaskId?: string;
@@ -285,8 +319,13 @@ export type WorkspaceTab =
   | AgentTaskPanelTab;
 
 export type SplitNode =
-  | { type: 'leaf'; pane: PaneState }
-  | { type: 'split'; direction: 'horizontal' | 'vertical'; children: SplitNode[]; sizes: number[] };
+  | { type: "leaf"; pane: PaneState }
+  | {
+      type: "split";
+      direction: "horizontal" | "vertical";
+      children: SplitNode[];
+      sizes: number[];
+    };
 
 export interface PaneState extends PaneLayoutState {
   status: PaneStatus;
@@ -295,17 +334,33 @@ export interface PaneState extends PaneLayoutState {
 
 export interface AiSession {
   id: string;
-  sessionType: 'claude' | 'codex';
+  sessionType: "claude" | "codex";
   title: string;
   timestamp: string;
   projectPath?: string;
 }
 
-export type TaskTarget = 'codex' | 'claude';
-export type TaskContextPreset = 'light' | 'standard' | 'review';
-export type TaskAttentionState = 'running' | 'waiting-input' | 'needs-review' | 'failed' | 'completed';
-export type ApprovalRiskLevel = 'medium' | 'high';
-export type ApprovalDecision = 'pending' | 'approved' | 'rejected' | 'executed';
+export type TaskTarget = "codex" | "claude";
+export type TaskRole = "coordinator" | "worker";
+export type TaskContextPreset = "light" | "standard" | "review";
+export type TaskAttentionState =
+  | "running"
+  | "waiting-input"
+  | "needs-review"
+  | "failed"
+  | "completed";
+export type ApprovalRiskLevel = "medium" | "high";
+export type ApprovalDecision = "pending" | "approved" | "rejected" | "executed";
+
+export interface AgentBackendDescriptor {
+  backendId: string;
+  displayName: string;
+  target: TaskTarget;
+  provider: string;
+  cliCommand: string;
+  description: string;
+  builtin: boolean;
+}
 
 export interface ApprovalRequest {
   requestId: string;
@@ -325,6 +380,10 @@ export interface AgentTaskSummary {
   workspaceName: string;
   workspaceRootPath: string;
   target: TaskTarget;
+  role: TaskRole;
+  parentTaskId?: string;
+  backendId?: string;
+  backendDisplayName?: string;
   title: string;
   status: string;
   attentionState: TaskAttentionState;
@@ -343,7 +402,7 @@ export interface AgentTaskSummary {
   policySummary?: string;
 }
 
-export type AgentTaskArtifactKind = 'plan';
+export type AgentTaskArtifactKind = "plan";
 
 export interface AgentTaskArtifact {
   artifactId: string;
@@ -397,9 +456,9 @@ export interface WorkspaceContextResult {
   relatedFiles: ContextDocument[];
 }
 
-export type AgentClientType = 'codex' | 'claude' | 'cursor' | 'generic-mcp';
-export type PromptStyle = 'minimal' | 'balanced' | 'strict';
-export type InjectionTargets = 'codex' | 'claude' | 'both';
+export type AgentClientType = "codex" | "claude" | "cursor" | "generic-mcp";
+export type PromptStyle = "minimal" | "balanced" | "strict";
+export type InjectionTargets = "codex" | "claude" | "both";
 
 export interface ToolUsagePolicy {
   preferredSequence: string[];
@@ -489,8 +548,8 @@ export interface AgentPolicyExportBundle {
 }
 
 export interface McpLaunchInfo {
-  status: 'resolved' | 'manual-required';
-  transport: 'stdio' | 'http';
+  status: "resolved" | "manual-required";
+  transport: "stdio" | "http";
   command?: string;
   args: string[];
   url?: string;
@@ -500,7 +559,7 @@ export interface McpLaunchInfo {
 
 export interface McpClientInstallFileResult {
   path: string;
-  kind: 'primary' | 'catalog' | string;
+  kind: "primary" | "catalog" | string;
   created: boolean;
   updated: boolean;
 }
@@ -658,7 +717,13 @@ export interface FsChangePayload {
   kind: string;
 }
 
-export type GitStatusType = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
+export type GitStatusType =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "untracked"
+  | "conflicted";
 
 export interface GitFileStatus {
   path: string;
@@ -678,7 +743,7 @@ export interface DiffHunk {
 }
 
 export interface DiffLine {
-  kind: 'add' | 'delete' | 'context';
+  kind: "add" | "delete" | "context";
   content: string;
   oldLineno?: number;
   newLineno?: number;
@@ -708,7 +773,7 @@ export interface GitDiffResult {
   tooLarge: boolean;
   canRestoreFile: boolean;
   canRestorePartial: boolean;
-  restoreMode: 'file-only' | 'file-and-hunk' | 'unsupported';
+  restoreMode: "file-only" | "file-and-hunk" | "unsupported";
   diffCleared: boolean;
 }
 
@@ -719,14 +784,14 @@ export interface FileContentResult {
 }
 
 export type DocumentPreviewKind =
-  | 'text'
-  | 'markdown'
-  | 'svg'
-  | 'image'
-  | 'pdf'
-  | 'docx'
-  | 'doc'
-  | 'unsupported';
+  | "text"
+  | "markdown"
+  | "svg"
+  | "image"
+  | "pdf"
+  | "docx"
+  | "doc"
+  | "unsupported";
 
 export interface DocumentPreviewResult {
   kind: DocumentPreviewKind;
@@ -773,7 +838,7 @@ export interface GitFileHistoryEntry {
   timestamp: number;
   path: string;
   oldPath?: string;
-  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  status: "added" | "modified" | "deleted" | "renamed";
 }
 
 export interface GitFileHistoryResult {
@@ -806,14 +871,14 @@ export interface GitFileBlameResult {
 
 export interface CommitFileInfo {
   path: string;
-  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  status: "added" | "modified" | "deleted" | "renamed";
   oldPath?: string;
 }
 
 export type UiDialog =
-  | { kind: 'settings'; page: SettingsPage }
+  | { kind: "settings"; page: SettingsPage }
   | {
-      kind: 'interaction-dialog';
+      kind: "interaction-dialog";
       dialogId: string;
       mode: InteractionDialogMode;
       title: string;
@@ -827,7 +892,7 @@ export type UiDialog =
       readOnly?: boolean;
     };
 
-export type UiNoticeTone = 'info' | 'success' | 'error';
+export type UiNoticeTone = "info" | "success" | "error";
 
 export interface UiNotice {
   id: string;
@@ -839,5 +904,3 @@ export interface UiNotice {
 
 export type ProjectConfig = LegacyProjectConfig;
 export type ProjectState = WorkspaceState;
-
-

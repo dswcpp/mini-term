@@ -39,6 +39,14 @@ impl TaskTarget {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskRole {
+    #[default]
+    Coordinator,
+    Worker,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskContextPreset {
@@ -99,6 +107,14 @@ pub struct TaskSummary {
     pub workspace_name: String,
     pub workspace_root_path: String,
     pub target: TaskTarget,
+    #[serde(default)]
+    pub role: TaskRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_display_name: Option<String>,
     pub title: String,
     pub status: String,
     pub attention_state: TaskAttentionState,
@@ -218,6 +234,12 @@ pub struct StartTaskInput {
     pub target: TaskTarget,
     pub prompt: String,
     pub context_preset: TaskContextPreset,
+    #[serde(default)]
+    pub role: TaskRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
     pub cwd: Option<String>,
     pub title: Option<String>,
 }

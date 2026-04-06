@@ -1,3 +1,4 @@
+use crate::agent_backends::list_agent_backends as list_registered_agent_backends;
 use crate::agent_core::{
     approval::{list_approvals, set_approval_status},
     models::{
@@ -21,6 +22,11 @@ use crate::mcp_host::{call_embedded_mcp_tool, get_embedded_mcp_launch, list_embe
 #[tauri::command]
 pub fn list_agent_workspaces() -> Result<serde_json::Value, String> {
     serde_json::to_value(list_workspaces()).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn list_agent_backends() -> Result<serde_json::Value, String> {
+    serde_json::to_value(list_registered_agent_backends()).map_err(|err| err.to_string())
 }
 
 #[tauri::command]

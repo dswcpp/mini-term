@@ -10,6 +10,7 @@ use crate::agent_core::{
 };
 use crate::fs::write_text_file;
 use crate::mcp::tools::action_support::approval_pending_value;
+use crate::runtime_mcp::record_runtime_event;
 use serde_json::{json, Value};
 use std::process::Command;
 use std::thread;
@@ -117,6 +118,21 @@ pub fn start_task_tool(args: Value) -> Result<Value, String> {
                 .ok_or("contextPreset is required")?,
         )
         .map_err(|_| "contextPreset is invalid".to_string())?,
+        role: object
+            .get("role")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "role is invalid".to_string())?
+            .unwrap_or_default(),
+        parent_task_id: object
+            .get("parentTaskId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        backend_id: object
+            .get("backendId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         cwd: object
             .get("cwd")
             .and_then(Value::as_str)
@@ -264,6 +280,16 @@ pub fn write_file_tool(args: Value) -> Result<Value, String> {
 
     write_text_file(resolved_path.requested_path.clone(), content.to_string())?;
     mark_approval_executed(&approval.request_id);
+    let _ = record_runtime_event(
+        "file-written",
+        format!("Wrote file {}.", resolved_path.requested_path),
+        Some(json!({
+            "workspaceId": resolved_path.workspace_id.clone(),
+            "workspaceName": resolved_path.workspace_name.clone(),
+            "path": resolved_path.requested_path.clone(),
+            "approvalRequestId": approval.request_id.clone(),
+        })),
+    );
 
     Ok(json!({
         "ok": true,
@@ -325,6 +351,18 @@ pub fn run_workspace_command_tool(args: Value) -> Result<Value, String> {
 
     let result = run_workspace_command(&validated.workspace_path, &validated.command)?;
     mark_approval_executed(&approval.request_id);
+    let _ = record_runtime_event(
+        "workspace-command",
+        format!("Ran workspace command in {}.", validated.workspace_path),
+        Some(json!({
+            "workspaceId": validated.workspace_id,
+            "workspaceName": validated.workspace_name,
+            "workspacePath": validated.workspace_path,
+            "command": validated.command,
+            "approvalRequestId": approval.request_id,
+            "status": result.get("status").cloned(),
+        })),
+    );
     Ok(result)
 }
 
@@ -333,8 +371,8 @@ mod tests {
     use super::*;
     use crate::agent_core::{
         models::{
-            ApprovalDecision, TaskAttentionState, TaskContextPreset, TaskStatusDetail, TaskSummary,
-            TaskTarget,
+            ApprovalDecision, TaskAttentionState, TaskContextPreset, TaskRole, TaskStatusDetail,
+            TaskSummary, TaskTarget,
         },
         task_store::upsert_task_detail,
     };
@@ -442,6 +480,10 @@ done
                 workspace_name: "mini-term".into(),
                 workspace_root_path: "D:/code/mini-term".into(),
                 target: TaskTarget::Codex,
+                role: TaskRole::Coordinator,
+                parent_task_id: None,
+                backend_id: Some("codex-cli".into()),
+                backend_display_name: Some("Codex CLI".into()),
                 title: "task".into(),
                 status: "error".into(),
                 attention_state: TaskAttentionState::Failed,
@@ -503,6 +545,10 @@ done
                 workspace_name: "mini-term".into(),
                 workspace_root_path: workspace_path.to_string(),
                 target: TaskTarget::Codex,
+                role: TaskRole::Coordinator,
+                parent_task_id: None,
+                backend_id: Some("codex-cli".into()),
+                backend_display_name: Some("Codex CLI".into()),
                 title: "Sample task".into(),
                 status: "running".into(),
                 attention_state: TaskAttentionState::Running,
