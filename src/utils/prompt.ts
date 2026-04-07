@@ -1,4 +1,60 @@
 /**
+ * 自定义 confirm 弹窗，替代 window.confirm
+ * 返回 Promise<boolean>
+ */
+export function showConfirm(title: string, message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'prompt-overlay';
+
+    const dialog = document.createElement('div');
+    dialog.className = 'prompt-dialog';
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'prompt-title';
+    titleEl.textContent = title;
+    dialog.appendChild(titleEl);
+
+    const msgEl = document.createElement('div');
+    msgEl.className = 'prompt-message';
+    msgEl.textContent = message;
+    dialog.appendChild(msgEl);
+
+    const buttons = document.createElement('div');
+    buttons.className = 'prompt-buttons';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'prompt-btn prompt-btn-cancel';
+    cancelBtn.textContent = '取消';
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'prompt-btn prompt-btn-confirm';
+    confirmBtn.textContent = '确定';
+
+    buttons.appendChild(cancelBtn);
+    buttons.appendChild(confirmBtn);
+    dialog.appendChild(buttons);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    confirmBtn.focus();
+
+    const cleanup = (value: boolean) => {
+      overlay.remove();
+      resolve(value);
+    };
+
+    confirmBtn.onclick = () => cleanup(true);
+    cancelBtn.onclick = () => cleanup(false);
+    overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
+    document.addEventListener('keydown', function handler(e) {
+      if (e.key === 'Enter') { cleanup(true); document.removeEventListener('keydown', handler); }
+      if (e.key === 'Escape') { cleanup(false); document.removeEventListener('keydown', handler); }
+    });
+  });
+}
+
+/**
  * 自定义 prompt 弹窗，替代 window.prompt
  * 返回 Promise<string | null>，取消返回 null
  */

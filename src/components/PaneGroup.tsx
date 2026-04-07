@@ -4,6 +4,7 @@ import { useAppStore, genId } from '../store';
 import { TerminalInstance } from './TerminalInstance';
 import { StatusDot } from './StatusDot';
 import { showContextMenu } from '../utils/contextMenu';
+import { showConfirm } from '../utils/prompt';
 import { disposeTerminal } from '../utils/terminalCache';
 import type { SplitNode, PaneState, ShellConfig } from '../types';
 
@@ -66,6 +67,9 @@ export function PaneGroup({ node, projectPath, onSplit, onClosePane, onUpdateNod
     const pane = node.panes.find((p) => p.id === paneId);
     if (!pane) return;
 
+    const confirmed = await showConfirm('关闭终端', `确定要关闭终端「${pane.shellName}」吗？`);
+    if (!confirmed) return;
+
     await invoke('kill_pty', { ptyId: pane.ptyId });
     disposeTerminal(pane.ptyId);
 
@@ -93,7 +97,9 @@ export function PaneGroup({ node, projectPath, onSplit, onClosePane, onUpdateNod
   }, [node, onUpdateNode]);
 
   const handleClosePaneGroup = useCallback(async () => {
-    // Kill all PTYs in this leaf before removing it
+    const confirmed = await showConfirm('关闭终端', '确定要关闭该区域内所有终端吗？');
+    if (!confirmed) return;
+
     for (const pane of node.panes) {
       await invoke('kill_pty', { ptyId: pane.ptyId });
       disposeTerminal(pane.ptyId);

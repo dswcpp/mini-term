@@ -237,6 +237,13 @@ html, body, #root {
   margin-bottom: 12px;
 }
 
+.prompt-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
 .prompt-input {
   width: 100%;
   box-sizing: border-box;
