@@ -1,4 +1,6 @@
+use crate::agent_backends::{list_agent_backends_with_config, AgentBackendDescriptor};
 use crate::agent_core::data_dir::config_path;
+use crate::agent_core::models::TaskTarget;
 use crate::ai_sessions::get_ai_sessions;
 use crate::config::{
     load_config_from_path, save_config_to_path, AppConfig, ShellConfig, ThemeConfig,
@@ -50,7 +52,36 @@ fn parse_limit(
         .clamp(1, max_limit)
 }
 
+fn backend_descriptor_value(backend: &AgentBackendDescriptor) -> Value {
+    serde_json::to_value(backend).unwrap_or(Value::Null)
+}
+
+fn routing_target_config_view(
+    backends: &[AgentBackendDescriptor],
+    target: &TaskTarget,
+    preferred_backend_id: Option<String>,
+    allow_builtin_fallback: bool,
+) -> Value {
+    let preferred_backend = backends
+        .iter()
+        .find(|backend| backend.target == target.clone() && backend.preferred_for_target);
+    let resolved_default = backends
+        .iter()
+        .find(|backend| backend.target == target.clone() && backend.default_for_target);
+
+    json!({
+        "preferredBackendId": preferred_backend_id,
+        "allowBuiltinFallback": allow_builtin_fallback,
+        "preferredBackend": preferred_backend.map(backend_descriptor_value),
+        "resolvedDefault": resolved_default.map(backend_descriptor_value),
+    })
+}
+
 fn config_view(config: &AppConfig) -> Value {
+    let agent_backends = config.agent_backends.clone().unwrap_or_default();
+    let backend_registry = list_agent_backends_with_config(config);
+    let routing = &agent_backends.routing;
+    let sidecar = &agent_backends.claude_sidecar;
     json!({
         "defaultShell": config.default_shell,
         "availableShells": config.available_shells,
@@ -65,6 +96,43 @@ fn config_view(config: &AppConfig) -> Value {
         },
         "workspaceCount": config.workspaces.len(),
         "recentWorkspaceCount": config.recent_workspaces.len(),
+        "agentBackends": {
+            "routing": {
+                "codex": routing_target_config_view(
+                    &backend_registry,
+                    &TaskTarget::Codex,
+                    routing.codex.preferred_backend_id.clone(),
+                    routing.codex.allow_builtin_fallback,
+                ),
+                "claude": routing_target_config_view(
+                    &backend_registry,
+                    &TaskTarget::Claude,
+                    routing.claude.preferred_backend_id.clone(),
+                    routing.claude.allow_builtin_fallback,
+                ),
+            },
+            "registry": backend_registry
+                .iter()
+                .map(backend_descriptor_value)
+                .collect::<Vec<_>>(),
+            "claudeSidecar": {
+                "enabled": sidecar.enabled,
+                "startupMode": sidecar.startup_mode.clone(),
+                "connectionTimeoutMs": sidecar.connection_timeout_ms,
+                "commandConfigured": sidecar.command.is_some(),
+                "cwdConfigured": sidecar.cwd.is_some(),
+                "envEntryCount": sidecar.env.len(),
+                "provider": {
+                    "kind": sidecar.provider.normalized_kind(),
+                    "baseUrl": sidecar.provider.base_url.clone(),
+                    "model": sidecar.provider.model.clone(),
+                    "timeoutMs": sidecar.provider.timeout_ms,
+                    "systemPromptConfigured": sidecar.provider.system_prompt.is_some(),
+                    "apiKeySource": sidecar.provider.api_key_source(),
+                    "apiKeyEnvVar": sidecar.provider.api_key_env_var.clone(),
+                }
+            }
+        },
     })
 }
 
@@ -391,6 +459,12 @@ pub fn set_config_fields_tool(args: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_backends::{backend_runtime_test_lock, clear_backend_runtime_state};
+    use crate::config::{
+        load_config_from_path, save_config_to_path, AgentBackendRoutingConfig, AgentBackendsConfig,
+        SidecarBackendConfig, SidecarProviderConfig, SidecarStartupMode,
+        TaskTargetBackendRoutingConfig,
+    };
     use crate::mcp::tools::test_support::TestHarness;
     use crate::runtime_mcp::{
         write_runtime_state_for_tests, RuntimeEvent, RuntimeHostInfo, RuntimeMcpState,
@@ -470,6 +544,90 @@ mod tests {
         assert!(value["config"]["availableShells"][0]["command"]
             .as_str()
             .is_some());
+        assert_eq!(
+            value["config"]["agentBackends"]["claudeSidecar"]["provider"]["kind"],
+            "reference"
+        );
+        assert_eq!(
+            value["config"]["agentBackends"]["claudeSidecar"]["provider"]["apiKeySource"],
+            "missing"
+        );
+        assert_eq!(
+            value["config"]["agentBackends"]["routing"]["codex"]["preferredBackendId"],
+            "codex-cli"
+        );
+        assert_eq!(
+            value["config"]["agentBackends"]["routing"]["claude"]["preferredBackendId"],
+            "claude-cli"
+        );
+        assert_eq!(
+            value["config"]["agentBackends"]["routing"]["codex"]["resolvedDefault"]["backendId"],
+            "codex-cli"
+        );
+        assert_eq!(
+            value["config"]["agentBackends"]["routing"]["claude"]["resolvedDefault"]["backendId"],
+            "claude-cli"
+        );
+        assert_eq!(
+            value["config"]["agentBackends"]["registry"]
+                .as_array()
+                .map(|items| items.len()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn get_config_includes_backend_routing_diagnostics() {
+        let _guard = backend_runtime_test_lock().lock().unwrap();
+        clear_backend_runtime_state("claude-sidecar");
+        let _harness = TestHarness::new("runtime-get-config-routing");
+        let config_path = config_path();
+        let mut config = load_config_from_path(&config_path);
+        config.agent_backends = Some(AgentBackendsConfig {
+            routing: AgentBackendRoutingConfig {
+                codex: AgentBackendRoutingConfig::default().codex,
+                claude: TaskTargetBackendRoutingConfig {
+                    preferred_backend_id: Some("claude-sidecar".into()),
+                    allow_builtin_fallback: true,
+                },
+            },
+            claude_sidecar: SidecarBackendConfig {
+                enabled: true,
+                command: Some("node".into()),
+                args: vec!["dist/sidecar.js".into()],
+                env: Default::default(),
+                provider: SidecarProviderConfig::default(),
+                cwd: None,
+                startup_mode: SidecarStartupMode::Process,
+                connection_timeout_ms: 2_000,
+            },
+        });
+        save_config_to_path(&config_path, config).unwrap();
+
+        let value = get_config_tool(json!({})).unwrap();
+
+        assert_eq!(
+            value["config"]["agentBackends"]["routing"]["claude"]["preferredBackend"]["backendId"],
+            "claude-sidecar"
+        );
+        assert_eq!(
+            value["config"]["agentBackends"]["routing"]["claude"]["resolvedDefault"]["backendId"],
+            "claude-cli"
+        );
+        assert!(
+            value["config"]["agentBackends"]["routing"]["claude"]["resolvedDefault"]
+                ["routingStatusMessage"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("preferred backend `claude-sidecar`")
+        );
+        assert!(
+            value["config"]["agentBackends"]["routing"]["claude"]["preferredBackend"]
+                ["routingStatusMessage"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("falling back")
+        );
     }
 
     #[test]

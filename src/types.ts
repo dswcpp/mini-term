@@ -77,6 +77,13 @@ export interface RecentWorkspaceEntry {
   expandedDirsByRoot?: Record<string, string[]>;
 }
 
+export interface ExternalMcpInteropConfig {
+  importedCatalog?: ExternalMcpCatalog;
+  lastSyncResults: ExternalMcpSyncResult[];
+  lastImportedAt?: number;
+  lastSyncedAt?: number;
+}
+
 export interface AppConfig {
   workspaces: WorkspaceConfig[];
   recentWorkspaces: RecentWorkspaceEntry[];
@@ -100,6 +107,46 @@ export interface AppConfig {
   workspaceSidebarSizes?: number[];
   completionUsage?: CompletionUsageStats;
   agentPolicies?: AgentPoliciesConfig;
+  agentBackends?: AgentBackendsConfig;
+  externalMcp?: ExternalMcpInteropConfig;
+}
+
+export type SidecarStartupMode = "process" | "loopback";
+
+export interface ClaudeSidecarProviderConfig {
+  kind: string;
+  baseUrl?: string;
+  model?: string;
+  apiKey?: string;
+  apiKeyEnvVar?: string;
+  timeoutMs?: number;
+  systemPrompt?: string;
+}
+
+export interface ClaudeSidecarBackendConfig {
+  enabled: boolean;
+  command?: string;
+  args: string[];
+  env: Record<string, string>;
+  provider: ClaudeSidecarProviderConfig;
+  cwd?: string;
+  startupMode: SidecarStartupMode;
+  connectionTimeoutMs: number;
+}
+
+export interface AgentBackendRoutingTargetConfig {
+  preferredBackendId?: string;
+  allowBuiltinFallback: boolean;
+}
+
+export interface AgentBackendRoutingConfig {
+  codex: AgentBackendRoutingTargetConfig;
+  claude: AgentBackendRoutingTargetConfig;
+}
+
+export interface AgentBackendsConfig {
+  routing: AgentBackendRoutingConfig;
+  claudeSidecar: ClaudeSidecarBackendConfig;
 }
 
 export interface ShellConfig {
@@ -340,26 +387,132 @@ export interface AiSession {
   projectPath?: string;
 }
 
+export type ExternalSessionProviderId = "claude" | "codex";
+
+export interface ExternalSessionSummary {
+  providerId: ExternalSessionProviderId;
+  sessionId: string;
+  title: string;
+  timestamp: string;
+  summary?: string;
+  projectPath?: string;
+  sourcePath: string;
+  resumeCommand?: string;
+}
+
+export interface ExternalSessionMessage {
+  role: string;
+  content: string;
+  timestamp?: string;
+}
+
+export interface ExternalSessionDeleteOutcome {
+  providerId: ExternalSessionProviderId;
+  sessionId: string;
+  sourcePath: string;
+  deleted: boolean;
+}
+
+export type ExternalMcpClientType = "codex" | "claude";
+
+export interface ExternalMcpServer {
+  id: string;
+  name: string;
+  transport: string;
+  command?: string;
+  args: string[];
+  cwd?: string;
+  env: Record<string, string>;
+  url?: string;
+  headers: Record<string, string>;
+  sourceClients: ExternalMcpClientType[];
+  sourcePaths: string[];
+}
+
+export interface ExternalMcpSourceStatus {
+  clientType: ExternalMcpClientType;
+  sourceKind: string;
+  path: string;
+  exists: boolean;
+  serverCount: number;
+}
+
+export interface ExternalMcpCatalog {
+  servers: ExternalMcpServer[];
+  sources: ExternalMcpSourceStatus[];
+  warnings: string[];
+}
+
+export interface ExternalMcpSyncFileResult {
+  path: string;
+  kind: string;
+  created: boolean;
+  updated: boolean;
+}
+
+export interface ExternalMcpSyncResult {
+  clientType: ExternalMcpClientType;
+  serverCount: number;
+  files: ExternalMcpSyncFileResult[];
+}
+
 export type TaskTarget = "codex" | "claude";
 export type TaskRole = "coordinator" | "worker";
 export type TaskContextPreset = "light" | "standard" | "review";
+export type AgentBackendKind = "builtin-cli" | "sidecar";
+export type AgentBackendTransport = "pty-command" | "sidecar-rpc";
+export type AgentBackendRuntimeStatus =
+  | "unconfigured"
+  | "configured"
+  | "starting"
+  | "ready"
+  | "degraded"
+  | "error";
 export type TaskAttentionState =
   | "running"
   | "waiting-input"
   | "needs-review"
   | "failed"
   | "completed";
+export type TaskTerminationCause =
+  | "manual-close"
+  | "process-exit"
+  | "startup-failed";
 export type ApprovalRiskLevel = "medium" | "high";
 export type ApprovalDecision = "pending" | "approved" | "rejected" | "executed";
+
+export interface AgentBackendCapabilities {
+  supportsWorkers: boolean;
+  supportsResume: boolean;
+  supportsToolCalls: boolean;
+  brokeredTools: boolean;
+  brokeredApprovals: boolean;
+  restrictedToolNames: string[];
+  toolCallAuthority?: string;
+  toolCallNotes?: string;
+  approvalFlowNotes?: string;
+}
 
 export interface AgentBackendDescriptor {
   backendId: string;
   displayName: string;
   target: TaskTarget;
+  preferredForTarget?: boolean;
+  defaultForTarget?: boolean;
   provider: string;
-  cliCommand: string;
+  cliCommand?: string;
   description: string;
   builtin: boolean;
+  kind: AgentBackendKind;
+  transport: AgentBackendTransport;
+  capabilities: AgentBackendCapabilities;
+  configured?: boolean;
+  available?: boolean;
+  status?: AgentBackendRuntimeStatus;
+  statusMessage?: string;
+  routingStatusMessage?: string;
+  lastError?: string;
+  lastHandshakeAt?: number;
 }
 
 export interface ApprovalRequest {
@@ -400,6 +553,9 @@ export interface AgentTaskSummary {
   injectionProfileId?: string;
   injectionPreset?: TaskContextPreset;
   policySummary?: string;
+  terminationCause?: TaskTerminationCause;
+  retrySuperseded?: boolean;
+  supersededByTaskId?: string;
 }
 
 export type AgentTaskArtifactKind = "plan";
@@ -427,6 +583,44 @@ export interface AgentTaskStatusDetail {
   diffSummary: GitFileStatus[];
   logPath: string;
   artifacts: AgentTaskArtifact[];
+}
+
+export interface StartAgentTaskInput {
+  workspaceId: string;
+  target: TaskTarget;
+  prompt: string;
+  contextPreset: TaskContextPreset;
+  role?: TaskRole;
+  parentTaskId?: string;
+  backendId?: string;
+  cwd?: string;
+  title?: string;
+}
+
+export interface AgentBackendConnectionTestResult {
+  backendId: string;
+  ok: boolean;
+  status: AgentBackendRuntimeStatus;
+  message: string;
+  lastHandshakeAt?: number;
+}
+
+export interface SpawnWorkerInput {
+  parentTaskId: string;
+  prompt: string;
+  target?: TaskTarget;
+  contextPreset?: TaskContextPreset;
+  backendId?: string;
+  cwd?: string;
+  title?: string;
+}
+
+export interface AgentTaskRuntimeEvent {
+  eventId: string;
+  kind: string;
+  timestamp: number;
+  summary: string;
+  payloadPreview?: Record<string, unknown> | null;
 }
 
 export interface AgentWorkspaceSummary {

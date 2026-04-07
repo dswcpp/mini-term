@@ -1,3 +1,5 @@
+use crate::agent_ext::mcp_interop::{ExternalMcpCatalog, ExternalMcpSyncResult};
+use crate::agent_ext::model_gateway::{ModelGatewayProviderKind, PROVIDER_KIND_REFERENCE};
 use crate::agent_policy::AgentPoliciesConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
@@ -66,6 +68,280 @@ pub struct AppConfig {
     pub completion_usage: CompletionUsageConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_policies: Option<AgentPoliciesConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_backends: Option<AgentBackendsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_mcp: Option<ExternalMcpInteropConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalMcpInteropConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_catalog: Option<ExternalMcpCatalog>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub last_sync_results: Vec<ExternalMcpSyncResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_imported_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_synced_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendsConfig {
+    #[serde(default)]
+    pub routing: AgentBackendRoutingConfig,
+    #[serde(default)]
+    pub claude_sidecar: SidecarBackendConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendRoutingConfig {
+    #[serde(default = "default_codex_backend_routing")]
+    pub codex: TaskTargetBackendRoutingConfig,
+    #[serde(default = "default_claude_backend_routing")]
+    pub claude: TaskTargetBackendRoutingConfig,
+}
+
+impl Default for AgentBackendRoutingConfig {
+    fn default() -> Self {
+        Self {
+            codex: default_codex_backend_routing(),
+            claude: default_claude_backend_routing(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTargetBackendRoutingConfig {
+    #[serde(default)]
+    pub preferred_backend_id: Option<String>,
+    #[serde(default = "default_allow_builtin_fallback")]
+    pub allow_builtin_fallback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarBackendConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub provider: SidecarProviderConfig,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub startup_mode: SidecarStartupMode,
+    #[serde(default = "default_sidecar_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarProviderConfig {
+    #[serde(default = "default_sidecar_provider_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub api_key_env_var: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+impl Default for SidecarProviderConfig {
+    fn default() -> Self {
+        Self {
+            kind: default_sidecar_provider_kind(),
+            base_url: None,
+            model: None,
+            api_key: None,
+            api_key_env_var: None,
+            timeout_ms: None,
+            system_prompt: None,
+        }
+    }
+}
+
+impl Default for SidecarBackendConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            provider: SidecarProviderConfig::default(),
+            cwd: None,
+            startup_mode: SidecarStartupMode::default(),
+            connection_timeout_ms: default_sidecar_connection_timeout_ms(),
+        }
+    }
+}
+
+impl SidecarBackendConfig {
+    pub fn is_launchable(&self) -> bool {
+        self.launch_validation_error().is_none()
+    }
+
+    pub fn launch_validation_error(&self) -> Option<String> {
+        if !self.enabled {
+            return Some("Sidecar backend is disabled in Mini-Term settings.".to_string());
+        }
+
+        if matches!(self.startup_mode, SidecarStartupMode::Process)
+            && !self
+                .command
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Some(
+                "Sidecar backend is enabled, but the launch command is missing.".to_string(),
+            );
+        }
+
+        self.provider_validation_error()
+    }
+
+    pub fn provider_validation_error(&self) -> Option<String> {
+        let kind = self.provider.normalized_kind();
+        let Some(provider_kind) = ModelGatewayProviderKind::parse(&kind) else {
+            return Some(format!(
+                "Sidecar provider `{kind}` is not supported. Use `reference`, `openai-compatible`, or `anthropic`."
+            ));
+        };
+
+        if provider_kind.requires_model()
+            && !self
+                .provider
+                .model
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Some(format!(
+                "Sidecar provider `{}` requires a model.",
+                provider_kind.as_str()
+            ));
+        }
+
+        if provider_kind.requires_api_key() && !self.provider.has_resolved_api_key() {
+            return Some(format!(
+                "Sidecar provider `{}` requires an API key or API key env var.",
+                provider_kind.as_str()
+            ));
+        }
+
+        if self
+            .provider
+            .base_url
+            .as_deref()
+            .is_some_and(|value| !value.starts_with("http://") && !value.starts_with("https://"))
+        {
+            return Some(
+                "Sidecar provider base URL must start with `http://` or `https://`.".to_string(),
+            );
+        }
+
+        None
+    }
+
+    pub fn resolved_env(&self) -> BTreeMap<String, String> {
+        merge_sidecar_provider_into_env(self.env.clone(), &self.provider)
+    }
+
+    pub fn redact_secrets_in_text(&self, text: &str) -> String {
+        self.provider.redact_secrets_in_text(text)
+    }
+}
+
+impl SidecarProviderConfig {
+    pub fn normalized_kind(&self) -> String {
+        let kind = self.kind.trim().to_ascii_lowercase();
+        if kind.is_empty() {
+            default_sidecar_provider_kind()
+        } else {
+            kind
+        }
+    }
+
+    pub fn display_label(&self) -> String {
+        match self.normalized_kind().as_str() {
+            PROVIDER_KIND_REFERENCE => PROVIDER_KIND_REFERENCE.to_string(),
+            "openai-compatible" | "anthropic" => self
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|model| format!("{}/{model}", self.normalized_kind()))
+                .unwrap_or_else(|| self.normalized_kind()),
+            other => other.to_string(),
+        }
+    }
+
+    pub fn resolved_api_key(&self) -> Option<String> {
+        normalize_optional_string(self.api_key.clone()).or_else(|| {
+            normalize_optional_string(self.api_key_env_var.clone()).and_then(|env_var| {
+                std::env::var(&env_var)
+                    .ok()
+                    .and_then(|value| normalize_optional_string(Some(value)))
+            })
+        })
+    }
+
+    pub fn has_resolved_api_key(&self) -> bool {
+        self.resolved_api_key().is_some()
+    }
+
+    pub fn api_key_source(&self) -> &'static str {
+        if normalize_optional_string(self.api_key_env_var.clone()).is_some() {
+            "env-var"
+        } else if normalize_optional_string(self.api_key.clone()).is_some() {
+            "inline"
+        } else {
+            "missing"
+        }
+    }
+
+    pub fn redact_secrets_in_text(&self, text: &str) -> String {
+        let mut redacted = text.to_string();
+        let env_secret =
+            normalize_optional_string(self.api_key_env_var.clone()).and_then(|env_var| {
+                std::env::var(&env_var)
+                    .ok()
+                    .and_then(|value| normalize_optional_string(Some(value)))
+            });
+        for secret in [normalize_optional_string(self.api_key.clone()), env_secret]
+            .into_iter()
+            .flatten()
+        {
+            if secret.len() >= 4 {
+                redacted = redacted.replace(&secret, "[redacted]");
+            }
+        }
+        redacted
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidecarStartupMode {
+    #[default]
+    Process,
+    Loopback,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,6 +540,32 @@ fn default_terminal_font_size() -> f64 {
     14.0
 }
 
+fn default_sidecar_connection_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_sidecar_provider_kind() -> String {
+    PROVIDER_KIND_REFERENCE.into()
+}
+
+fn default_allow_builtin_fallback() -> bool {
+    true
+}
+
+fn default_codex_backend_routing() -> TaskTargetBackendRoutingConfig {
+    TaskTargetBackendRoutingConfig {
+        preferred_backend_id: Some("codex-cli".into()),
+        allow_builtin_fallback: true,
+    }
+}
+
+fn default_claude_backend_routing() -> TaskTargetBackendRoutingConfig {
+    TaskTargetBackendRoutingConfig {
+        preferred_backend_id: Some("claude-cli".into()),
+        allow_builtin_fallback: true,
+    }
+}
+
 fn default_workspace_root_role() -> String {
     "member".into()
 }
@@ -331,6 +633,8 @@ impl Default for AppConfig {
             workspace_sidebar_sizes: None,
             completion_usage: CompletionUsageConfig::default(),
             agent_policies: Some(crate::agent_policy::default_agent_policies()),
+            agent_backends: Some(AgentBackendsConfig::default()),
+            external_mcp: Some(ExternalMcpInteropConfig::default()),
         }
     }
 }
@@ -586,6 +890,162 @@ fn normalize_recent_workspace(mut workspace: RecentWorkspaceEntry) -> RecentWork
     workspace
 }
 
+const SIDECAR_PROVIDER_ENV_KEY: &str = "MINI_TERM_SIDECAR_PROVIDER";
+const SIDECAR_PROVIDER_BASE_URL_ENV_KEY: &str = "MINI_TERM_SIDECAR_BASE_URL";
+const SIDECAR_PROVIDER_MODEL_ENV_KEY: &str = "MINI_TERM_SIDECAR_MODEL";
+const SIDECAR_PROVIDER_API_KEY_ENV_KEY: &str = "MINI_TERM_SIDECAR_API_KEY";
+const SIDECAR_PROVIDER_TIMEOUT_ENV_KEY: &str = "MINI_TERM_SIDECAR_PROVIDER_TIMEOUT_MS";
+const SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY: &str = "MINI_TERM_SIDECAR_SYSTEM_PROMPT";
+const SIDECAR_PROVIDER_ENV_KEYS: [&str; 6] = [
+    SIDECAR_PROVIDER_ENV_KEY,
+    SIDECAR_PROVIDER_BASE_URL_ENV_KEY,
+    SIDECAR_PROVIDER_MODEL_ENV_KEY,
+    SIDECAR_PROVIDER_API_KEY_ENV_KEY,
+    SIDECAR_PROVIDER_TIMEOUT_ENV_KEY,
+    SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY,
+];
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_string(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env.get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_positive_u64(env: &BTreeMap<String, String>, key: &str) -> Option<u64> {
+    env.get(key)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn normalize_sidecar_provider_config(
+    mut provider: SidecarProviderConfig,
+    env: &BTreeMap<String, String>,
+) -> SidecarProviderConfig {
+    let normalized_kind = provider.kind.trim().to_ascii_lowercase();
+    let has_explicit_provider_config = normalized_kind != default_sidecar_provider_kind()
+        || provider.base_url.is_some()
+        || provider.model.is_some()
+        || provider.api_key.is_some()
+        || provider.api_key_env_var.is_some()
+        || provider.timeout_ms.is_some()
+        || provider.system_prompt.is_some();
+
+    provider.kind = normalized_kind;
+    if !has_explicit_provider_config || provider.kind.is_empty() {
+        provider.kind = env_string(env, SIDECAR_PROVIDER_ENV_KEY)
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_else(default_sidecar_provider_kind);
+    }
+
+    provider.base_url = normalize_optional_string(provider.base_url)
+        .or_else(|| env_string(env, SIDECAR_PROVIDER_BASE_URL_ENV_KEY));
+    provider.model = normalize_optional_string(provider.model)
+        .or_else(|| env_string(env, SIDECAR_PROVIDER_MODEL_ENV_KEY));
+    provider.api_key = normalize_optional_string(provider.api_key)
+        .or_else(|| env_string(env, SIDECAR_PROVIDER_API_KEY_ENV_KEY));
+    provider.api_key_env_var = normalize_optional_string(provider.api_key_env_var);
+    provider.timeout_ms = provider
+        .timeout_ms
+        .filter(|value| *value > 0)
+        .or_else(|| env_positive_u64(env, SIDECAR_PROVIDER_TIMEOUT_ENV_KEY));
+    provider.system_prompt = normalize_optional_string(provider.system_prompt)
+        .or_else(|| env_string(env, SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY));
+
+    provider
+}
+
+fn merge_sidecar_provider_into_env(
+    mut env: BTreeMap<String, String>,
+    provider: &SidecarProviderConfig,
+) -> BTreeMap<String, String> {
+    env.retain(|key, _| !SIDECAR_PROVIDER_ENV_KEYS.contains(&key.as_str()));
+    env.insert(SIDECAR_PROVIDER_ENV_KEY.into(), provider.normalized_kind());
+
+    if let Some(base_url) = normalize_optional_string(provider.base_url.clone()) {
+        env.insert(SIDECAR_PROVIDER_BASE_URL_ENV_KEY.into(), base_url);
+    }
+    if let Some(model) = normalize_optional_string(provider.model.clone()) {
+        env.insert(SIDECAR_PROVIDER_MODEL_ENV_KEY.into(), model);
+    }
+    if let Some(api_key) = provider.resolved_api_key() {
+        env.insert(SIDECAR_PROVIDER_API_KEY_ENV_KEY.into(), api_key);
+    }
+    if let Some(timeout_ms) = provider.timeout_ms.filter(|value| *value > 0) {
+        env.insert(
+            SIDECAR_PROVIDER_TIMEOUT_ENV_KEY.into(),
+            timeout_ms.to_string(),
+        );
+    }
+    if let Some(system_prompt) = normalize_optional_string(provider.system_prompt.clone()) {
+        env.insert(SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY.into(), system_prompt);
+    }
+
+    env
+}
+
+fn normalize_sidecar_config(mut config: SidecarBackendConfig) -> SidecarBackendConfig {
+    config.command = config
+        .command
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    config.args = config
+        .args
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    config.cwd = config
+        .cwd
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    config.env = config
+        .env
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_string();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key, value))
+        })
+        .collect();
+    config.provider = normalize_sidecar_provider_config(config.provider, &config.env);
+    config.env = merge_sidecar_provider_into_env(config.env, &config.provider);
+    if config.connection_timeout_ms == 0 {
+        config.connection_timeout_ms = default_sidecar_connection_timeout_ms();
+    }
+    config
+}
+
+fn normalize_target_backend_routing(
+    mut config: TaskTargetBackendRoutingConfig,
+    default_preferred_backend_id: &str,
+) -> TaskTargetBackendRoutingConfig {
+    config.preferred_backend_id = normalize_optional_string(config.preferred_backend_id)
+        .or_else(|| Some(default_preferred_backend_id.to_string()));
+    config
+}
+
+fn normalize_agent_backend_routing(
+    mut config: AgentBackendRoutingConfig,
+) -> AgentBackendRoutingConfig {
+    config.codex = normalize_target_backend_routing(config.codex, "codex-cli");
+    config.claude = normalize_target_backend_routing(config.claude, "claude-cli");
+    config
+}
+
+fn normalize_agent_backends(mut config: AgentBackendsConfig) -> AgentBackendsConfig {
+    config.routing = normalize_agent_backend_routing(config.routing);
+    config.claude_sidecar = normalize_sidecar_config(config.claude_sidecar);
+    config
+}
+
 fn migrate_config(mut config: AppConfig) -> AppConfig {
     if config.project_tree.is_some() {
         config.project_groups = None;
@@ -676,6 +1136,11 @@ pub fn normalize_config(mut config: AppConfig) -> AppConfig {
         config.agent_policies = Some(crate::agent_policy::default_agent_policies());
     }
 
+    config.agent_backends = Some(normalize_agent_backends(
+        config.agent_backends.unwrap_or_default(),
+    ));
+    config.external_mcp = Some(config.external_mcp.unwrap_or_default());
+
     config
 }
 
@@ -739,6 +1204,7 @@ pub fn save_config_to_path(path: &Path, config: AppConfig) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_temp_dir(label: &str) -> PathBuf {
@@ -751,6 +1217,11 @@ mod tests {
         path
     }
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn default_config_has_shells() {
         let config = AppConfig::default();
@@ -759,11 +1230,63 @@ mod tests {
     }
 
     #[test]
+    fn default_agent_backend_routing_prefers_builtin_clis() {
+        let routing = AppConfig::default().agent_backends.unwrap().routing;
+        assert_eq!(
+            routing.codex.preferred_backend_id.as_deref(),
+            Some("codex-cli")
+        );
+        assert!(routing.codex.allow_builtin_fallback);
+        assert_eq!(
+            routing.claude.preferred_backend_id.as_deref(),
+            Some("claude-cli")
+        );
+        assert!(routing.claude.allow_builtin_fallback);
+    }
+
+    #[test]
     fn config_round_trip() {
         let config = AppConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.available_shells.len(), config.available_shells.len());
+    }
+
+    #[test]
+    fn config_round_trip_preserves_external_mcp_state() {
+        let config = AppConfig {
+            external_mcp: Some(ExternalMcpInteropConfig {
+                imported_catalog: Some(ExternalMcpCatalog {
+                    servers: vec![],
+                    sources: vec![],
+                    warnings: vec!["warning".into()],
+                }),
+                last_sync_results: vec![ExternalMcpSyncResult {
+                    client_type: "codex".into(),
+                    server_count: 2,
+                    files: vec![],
+                }],
+                last_imported_at: Some(10),
+                last_synced_at: Some(20),
+            }),
+            ..AppConfig::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        let external_mcp = parsed
+            .external_mcp
+            .expect("external MCP state should deserialize");
+        assert_eq!(external_mcp.last_sync_results.len(), 1);
+        assert_eq!(external_mcp.last_imported_at, Some(10));
+        assert_eq!(external_mcp.last_synced_at, Some(20));
+        assert_eq!(
+            external_mcp
+                .imported_catalog
+                .expect("catalog should deserialize")
+                .warnings,
+            vec!["warning".to_string()]
+        );
     }
 
     #[test]
@@ -1057,5 +1580,193 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(existing_root);
+    }
+
+    #[test]
+    fn normalize_sidecar_config_derives_provider_from_legacy_env() {
+        let config = normalize_config(
+            serde_json::from_value(serde_json::json!({
+                "workspaces": [],
+                "recentWorkspaces": [],
+                "defaultShell": "cmd",
+                "availableShells": [{"name": "cmd", "command": "cmd"}],
+                "agentBackends": {
+                    "claudeSidecar": {
+                        "enabled": true,
+                        "command": "node",
+                        "args": ["dist/sidecar.js"],
+                        "env": {
+                            "MINI_TERM_SIDECAR_PROVIDER": "openai-compatible",
+                            "MINI_TERM_SIDECAR_BASE_URL": "https://example.com/v1",
+                            "MINI_TERM_SIDECAR_MODEL": "gpt-4.1-mini",
+                            "MINI_TERM_SIDECAR_API_KEY": "secret-key",
+                            "MINI_TERM_SIDECAR_PROVIDER_TIMEOUT_MS": "45000",
+                            "MINI_TERM_SIDECAR_SYSTEM_PROMPT": "Reply plainly.",
+                            "KEEP_ME": "1"
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+
+        let sidecar = config.agent_backends.unwrap_or_default().claude_sidecar;
+        assert_eq!(sidecar.provider.kind, "openai-compatible");
+        assert_eq!(
+            sidecar.provider.base_url.as_deref(),
+            Some("https://example.com/v1")
+        );
+        assert_eq!(sidecar.provider.model.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(sidecar.provider.api_key.as_deref(), Some("secret-key"));
+        assert_eq!(sidecar.provider.api_key_env_var.as_deref(), None);
+        assert_eq!(sidecar.provider.timeout_ms, Some(45_000));
+        assert_eq!(
+            sidecar.provider.system_prompt.as_deref(),
+            Some("Reply plainly.")
+        );
+        assert_eq!(sidecar.env.get("KEEP_ME").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn normalize_sidecar_config_syncs_provider_fields_back_into_env() {
+        let sidecar = normalize_sidecar_config(SidecarBackendConfig {
+            enabled: true,
+            command: Some("node".into()),
+            args: vec!["dist/sidecar.js".into()],
+            env: BTreeMap::from([("KEEP_ME".into(), "1".into())]),
+            provider: SidecarProviderConfig {
+                kind: "openai-compatible".into(),
+                base_url: Some("https://api.openai.com/v1".into()),
+                model: Some("gpt-4.1-mini".into()),
+                api_key: Some("sk-test".into()),
+                api_key_env_var: None,
+                timeout_ms: Some(60_000),
+                system_prompt: Some("Use plain text.".into()),
+            },
+            cwd: None,
+            startup_mode: SidecarStartupMode::Process,
+            connection_timeout_ms: 10_000,
+        });
+
+        assert_eq!(
+            sidecar
+                .env
+                .get("MINI_TERM_SIDECAR_PROVIDER")
+                .map(String::as_str),
+            Some("openai-compatible")
+        );
+        assert_eq!(
+            sidecar
+                .env
+                .get("MINI_TERM_SIDECAR_MODEL")
+                .map(String::as_str),
+            Some("gpt-4.1-mini")
+        );
+        assert_eq!(
+            sidecar
+                .env
+                .get("MINI_TERM_SIDECAR_API_KEY")
+                .map(String::as_str),
+            Some("sk-test")
+        );
+        assert_eq!(
+            sidecar
+                .env
+                .get("MINI_TERM_SIDECAR_PROVIDER_TIMEOUT_MS")
+                .map(String::as_str),
+            Some("60000")
+        );
+        assert_eq!(sidecar.env.get("KEEP_ME").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn sidecar_provider_validation_rejects_missing_openai_fields() {
+        let config = normalize_sidecar_config(SidecarBackendConfig {
+            enabled: true,
+            command: Some("node".into()),
+            args: vec![],
+            env: BTreeMap::new(),
+            provider: SidecarProviderConfig {
+                kind: "openai-compatible".into(),
+                model: Some("gpt-4.1-mini".into()),
+                api_key: None,
+                api_key_env_var: None,
+                base_url: None,
+                timeout_ms: None,
+                system_prompt: None,
+            },
+            cwd: None,
+            startup_mode: SidecarStartupMode::Process,
+            connection_timeout_ms: 10_000,
+        });
+
+        assert_eq!(
+            config.provider_validation_error().as_deref(),
+            Some("Sidecar provider `openai-compatible` requires an API key or API key env var.")
+        );
+        assert!(!config.is_launchable());
+    }
+
+    #[test]
+    fn sidecar_provider_can_resolve_api_key_from_env_var_reference() {
+        let _guard = env_lock().lock().unwrap();
+        let env_var = "MINI_TERM_TEST_PROVIDER_API_KEY";
+        std::env::set_var(env_var, "env-secret");
+        let sidecar = normalize_sidecar_config(SidecarBackendConfig {
+            enabled: true,
+            command: Some("node".into()),
+            args: vec![],
+            env: BTreeMap::new(),
+            provider: SidecarProviderConfig {
+                kind: "openai-compatible".into(),
+                model: Some("gpt-4.1-mini".into()),
+                api_key: None,
+                api_key_env_var: Some(env_var.into()),
+                base_url: None,
+                timeout_ms: None,
+                system_prompt: None,
+            },
+            cwd: None,
+            startup_mode: SidecarStartupMode::Process,
+            connection_timeout_ms: 10_000,
+        });
+
+        assert_eq!(sidecar.provider.api_key_source(), "env-var");
+        assert_eq!(
+            sidecar.provider.resolved_api_key().as_deref(),
+            Some("env-secret")
+        );
+        assert_eq!(
+            sidecar
+                .env
+                .get("MINI_TERM_SIDECAR_API_KEY")
+                .map(String::as_str),
+            Some("env-secret")
+        );
+        assert!(sidecar.is_launchable());
+
+        std::env::remove_var(env_var);
+    }
+
+    #[test]
+    fn sidecar_provider_redacts_resolved_secret_values_from_text() {
+        let _guard = env_lock().lock().unwrap();
+        let env_var = "MINI_TERM_TEST_PROVIDER_API_KEY_REDACT";
+        std::env::set_var(env_var, "env-secret-redact");
+        let provider = SidecarProviderConfig {
+            kind: "openai-compatible".into(),
+            base_url: None,
+            model: Some("gpt-4.1-mini".into()),
+            api_key: Some("inline-secret".into()),
+            api_key_env_var: Some(env_var.into()),
+            timeout_ms: None,
+            system_prompt: None,
+        };
+
+        let redacted =
+            provider.redact_secrets_in_text("inline-secret and env-secret-redact should not leak");
+        assert_eq!(redacted, "[redacted] and [redacted] should not leak");
+
+        std::env::remove_var(env_var);
     }
 }

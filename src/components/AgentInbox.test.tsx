@@ -129,7 +129,48 @@ describe('AgentInbox', () => {
 
     await waitFor(() => {
       expect(resolveApprovalRequest).toHaveBeenCalledWith('approval-close-1', true);
-      expect(closeAgentTask).toHaveBeenCalledWith('task-42', 'approval-close-1');
+      expect(closeAgentTask).toHaveBeenCalledWith('task-42', 'approval-close-1', false);
+    });
+  });
+
+  it('passes cascadeChildren when approving cascade close requests', async () => {
+    listApprovalRequests.mockResolvedValue([
+      {
+        requestId: 'approval-close-2',
+        toolName: 'close_task',
+        reason: 'Close an agent task and its children',
+        riskLevel: 'medium',
+        payloadPreview: 'Task: task-99\nCascadeChildren: true\nDescendantCount: 2',
+        status: 'pending',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      },
+    ]);
+    listAttentionTaskSummaries.mockResolvedValue([]);
+    resolveApprovalRequest.mockResolvedValue({
+      requestId: 'approval-close-2',
+      toolName: 'close_task',
+      reason: 'Close an agent task and its children',
+      riskLevel: 'medium',
+      payloadPreview: 'Task: task-99\nCascadeChildren: true\nDescendantCount: 2',
+      status: 'approved',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    closeAgentTask.mockResolvedValue({
+      ok: true,
+      approvalRequired: false,
+      data: {
+        taskId: 'task-99',
+      },
+    });
+
+    render(<AgentInbox />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+
+    await waitFor(() => {
+      expect(closeAgentTask).toHaveBeenCalledWith('task-99', 'approval-close-2', true);
     });
   });
 

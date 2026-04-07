@@ -1,21 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentBackendConnectionTestResult,
   AgentActionResult,
   AgentBackendDescriptor,
+  AgentTaskRuntimeEvent,
   AgentWorkspaceSummary,
   AgentTaskStatusDetail,
   AgentTaskSummary,
   ApprovalRequest,
+  StartAgentTaskInput,
+  SpawnWorkerInput,
   TaskContextPreset,
   WorkspaceContextResult,
 } from "../types";
+import { normalizeAgentBackends } from "../utils/agentBackends";
 
 export async function listApprovalRequests(): Promise<ApprovalRequest[]> {
   return invoke<ApprovalRequest[]>("list_approval_requests");
 }
 
 export async function listAgentBackends(): Promise<AgentBackendDescriptor[]> {
-  return invoke<AgentBackendDescriptor[]>("list_agent_backends");
+  const result = await invoke<AgentBackendDescriptor[]>("list_agent_backends");
+  return normalizeAgentBackends(result);
+}
+
+export async function testAgentBackendConnection(
+  backendId: string,
+): Promise<AgentBackendConnectionTestResult> {
+  return invoke<AgentBackendConnectionTestResult>("test_agent_backend_connection", {
+    backendId,
+  });
 }
 
 export async function resolveApprovalRequest(
@@ -58,6 +72,12 @@ export async function getAgentWorkspaceContext(
   });
 }
 
+export async function startAgentTask(
+  input: StartAgentTaskInput,
+): Promise<AgentTaskSummary> {
+  return invoke<AgentTaskSummary>("start_agent_task", { input });
+}
+
 export async function sendAgentTaskInput(
   taskId: string,
   input: string,
@@ -65,13 +85,21 @@ export async function sendAgentTaskInput(
   return invoke<AgentTaskSummary>("send_agent_task_input", { taskId, input });
 }
 
+export async function spawnWorkerTask(
+  input: SpawnWorkerInput,
+): Promise<AgentTaskSummary> {
+  return invoke<AgentTaskSummary>("spawn_worker_agent_task", { input });
+}
+
 export async function closeAgentTask(
   taskId: string,
   approvalRequestId?: string,
+  cascadeChildren?: boolean,
 ): Promise<AgentActionResult<AgentTaskSummary>> {
   return invoke<AgentActionResult<AgentTaskSummary>>("close_agent_task", {
     taskId,
     approvalRequestId,
+    cascadeChildren,
   });
 }
 
@@ -79,6 +107,18 @@ export async function resumeAgentTask(
   taskId: string,
 ): Promise<AgentTaskStatusDetail> {
   return invoke<AgentTaskStatusDetail>("resume_agent_task", { taskId });
+}
+
+export async function listAgentTaskEvents(
+  taskId: string,
+  limit?: number,
+  includeRelated?: boolean,
+): Promise<AgentTaskRuntimeEvent[]> {
+  return invoke<AgentTaskRuntimeEvent[]>("list_agent_task_events", {
+    taskId,
+    limit,
+    includeRelated,
+  });
 }
 
 export async function saveAgentTaskPlan(

@@ -1,5 +1,10 @@
 import { getDefaultThemeConfig } from '../theme';
-import type { AgentPoliciesConfig, AppConfig } from '../types';
+import type {
+  AgentBackendsConfig,
+  AgentPoliciesConfig,
+  AppConfig,
+  ExternalMcpInteropConfig,
+} from '../types';
 
 function createDefaultAgentPolicies(): AgentPoliciesConfig {
   const toolUsagePolicy = {
@@ -9,7 +14,7 @@ function createDefaultAgentPolicies(): AgentPoliciesConfig {
       'list_ptys/get_pty_detail/get_process_tree',
       'read_file/search_files',
       'get_git_summary/get_diff_for_review',
-      'start_task/get_task_status/save_task_plan/send_task_input/close_task',
+      'start_task/spawn_worker/get_task_status/save_task_plan/send_task_input/close_task',
     ],
     approvalTools: ['kill_pty', 'close_tab', 'write_file', 'close_task', 'run_workspace_command'],
     readOnlyTools: [
@@ -26,6 +31,7 @@ function createDefaultAgentPolicies(): AgentPoliciesConfig {
     ],
     taskTools: [
       'start_task',
+      'spawn_worker',
       'get_task_status',
       'save_task_plan',
       'list_attention_tasks',
@@ -130,6 +136,42 @@ function createDefaultAgentPolicies(): AgentPoliciesConfig {
   };
 }
 
+export function createDefaultAgentBackendsConfig(): AgentBackendsConfig {
+  return {
+    routing: {
+      codex: {
+        preferredBackendId: 'codex-cli',
+        allowBuiltinFallback: true,
+      },
+      claude: {
+        preferredBackendId: 'claude-cli',
+        allowBuiltinFallback: true,
+      },
+    },
+    claudeSidecar: {
+      enabled: false,
+      command: undefined,
+      args: [],
+      env: {},
+      provider: {
+        kind: 'reference',
+      },
+      cwd: undefined,
+      startupMode: 'process',
+      connectionTimeoutMs: 10000,
+    },
+  };
+}
+
+export function createDefaultExternalMcpInteropConfig(): ExternalMcpInteropConfig {
+  return {
+    importedCatalog: undefined,
+    lastSyncResults: [],
+    lastImportedAt: undefined,
+    lastSyncedAt: undefined,
+  };
+}
+
 declare global {
   interface Window {
     __TAURI__?: unknown;
@@ -176,5 +218,7 @@ export function createFallbackAppConfig(): AppConfig {
       scopes: {},
     },
     agentPolicies: createDefaultAgentPolicies(),
+    agentBackends: createDefaultAgentBackendsConfig(),
+    externalMcp: createDefaultExternalMcpInteropConfig(),
   };
 }

@@ -100,13 +100,13 @@ The HTTP wrapper reuses the same JSON-RPC tool handler as the stdio server.
 
 ## Tool Groups
 
-Mini-Term now exposes 38 tools across 6 fixed groups:
+Mini-Term now exposes 39 tools across 6 fixed groups:
 
 - `core-runtime` (3)
 - `runtime-observation` (9)
 - `pty-control` (4)
 - `ui-control` (6)
-- `task-management` (9)
+- `task-management` (10)
 - `legacy-compat` (7)
 
 `list_tools` includes control-plane capability metadata so clients can distinguish the source of truth, operational risk, and failure mode of each tool before calling it.
@@ -247,6 +247,7 @@ Current repository validation now covers:
   - `notify_user`
 - Task / approval tools
   - `start_task`
+  - `spawn_worker`
   - `get_task_status`
   - `save_task_plan`
     - stores a Markdown plan document for a tracked task

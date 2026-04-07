@@ -55,6 +55,10 @@ import { createEmptyCompletionUsage, recordCompletionUsage } from './utils/termi
 import { normalizePreviewModeForFile } from './utils/documentPreview';
 import { areSplitNodesEquivalent } from './utils/splitLayout';
 import { disposeTerminalBySession } from './utils/terminalCache';
+import {
+  createDefaultAgentBackendsConfig,
+  createDefaultExternalMcpInteropConfig,
+} from './runtime/tauriRuntime';
 
 let idCounter = 0;
 export const genId = () => `id-${Date.now()}-${++idCounter}`;
@@ -733,6 +737,8 @@ function upsertRecentEntry(recent: AppConfig['recentWorkspaces'], entry: AppConf
 
 function normalizeWorkspaceStoreConfig(config: AppConfig): AppConfig {
   const now = Date.now();
+  const defaultAgentBackends = createDefaultAgentBackendsConfig();
+  const currentAgentBackends = config.agentBackends;
   const workspaces = getConfigWorkspaces(config).map((workspace) => ({
     ...workspace,
     roots: ensureSinglePrimaryRoot(workspace.roots),
@@ -749,6 +755,38 @@ function normalizeWorkspaceStoreConfig(config: AppConfig): AppConfig {
     recentWorkspaces: config.recentWorkspaces ?? [],
     lastWorkspaceId: config.lastWorkspaceId ?? workspaces[0]?.id,
     completionUsage: config.completionUsage ?? createEmptyCompletionUsage(),
+    agentBackends: {
+      ...defaultAgentBackends,
+      ...currentAgentBackends,
+      routing: {
+        ...defaultAgentBackends.routing,
+        ...(currentAgentBackends?.routing ?? {}),
+        codex: {
+          ...defaultAgentBackends.routing.codex,
+          ...(currentAgentBackends?.routing?.codex ?? {}),
+        },
+        claude: {
+          ...defaultAgentBackends.routing.claude,
+          ...(currentAgentBackends?.routing?.claude ?? {}),
+        },
+      },
+      claudeSidecar: {
+        ...defaultAgentBackends.claudeSidecar,
+        ...(currentAgentBackends?.claudeSidecar ?? {}),
+        args: [
+          ...(currentAgentBackends?.claudeSidecar?.args ??
+            defaultAgentBackends.claudeSidecar.args),
+        ],
+        env: {
+          ...defaultAgentBackends.claudeSidecar.env,
+          ...(currentAgentBackends?.claudeSidecar?.env ?? {}),
+        },
+        provider: {
+          ...defaultAgentBackends.claudeSidecar.provider,
+          ...(currentAgentBackends?.claudeSidecar?.provider ?? {}),
+        },
+      },
+    },
   };
 }
 
@@ -1144,6 +1182,8 @@ const defaultConfig: AppConfig = normalizeWorkspaceStoreConfig({
   terminalFontSize: 14,
   theme: getDefaultThemeConfig(),
   completionUsage: createEmptyCompletionUsage(),
+  agentBackends: createDefaultAgentBackendsConfig(),
+  externalMcp: createDefaultExternalMcpInteropConfig(),
 });
 
 export const useAppStore = create<AppStore>((set, get) => ({

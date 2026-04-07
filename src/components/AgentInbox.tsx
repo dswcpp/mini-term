@@ -34,9 +34,15 @@ function getAttentionTone(attention: AgentTaskSummary["attentionState"]) {
   }
 }
 
-function parseCloseTaskId(payloadPreview: string) {
+function parseCloseTaskRequest(payloadPreview: string) {
   const match = payloadPreview.match(/^\s*Task:\s*(.+?)\s*$/m);
-  return match?.[1] || null;
+  if (!match?.[1]) {
+    return null;
+  }
+  return {
+    taskId: match[1],
+    cascadeChildren: /^\s*CascadeChildren:\s*true\s*$/im.test(payloadPreview),
+  };
 }
 
 function roleLabel(role: AgentTaskSummary["role"]) {
@@ -110,9 +116,13 @@ export function AgentInbox() {
         await resolveApprovalRequest(request.requestId, approved);
 
         if (approved && request.toolName === "close_task") {
-          const taskId = parseCloseTaskId(request.payloadPreview);
-          if (taskId) {
-            await closeAgentTask(taskId, request.requestId);
+          const closeRequest = parseCloseTaskRequest(request.payloadPreview);
+          if (closeRequest) {
+            await closeAgentTask(
+              closeRequest.taskId,
+              request.requestId,
+              closeRequest.cascadeChildren,
+            );
           }
         }
 

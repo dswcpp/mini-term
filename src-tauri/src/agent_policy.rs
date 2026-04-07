@@ -702,7 +702,8 @@ fn default_tool_usage_policy() -> ToolUsagePolicy {
             "list_ptys/get_pty_detail/get_process_tree".into(),
             "read_file/search_files".into(),
             "get_git_summary/get_diff_for_review".into(),
-            "start_task/get_task_status/save_task_plan/send_task_input/close_task".into(),
+            "start_task/spawn_worker/get_task_status/save_task_plan/send_task_input/close_task"
+                .into(),
         ],
         approval_tools: vec![
             "kill_pty".into(),
@@ -725,6 +726,7 @@ fn default_tool_usage_policy() -> ToolUsagePolicy {
         ],
         task_tools: vec![
             "start_task".into(),
+            "spawn_worker".into(),
             "get_task_status".into(),
             "save_task_plan".into(),
             "list_attention_tasks".into(),

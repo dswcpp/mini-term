@@ -3,17 +3,26 @@ import { useAppStore } from "../store";
 import {
   closeAgentTask,
   getAgentTaskStatus,
+  listAgentBackends,
+  listAgentTaskEvents,
   listApprovalRequests,
   listAgentTasks,
   resumeAgentTask,
   sendAgentTaskInput,
+  startAgentTask,
+  spawnWorkerTask,
 } from "../runtime/agentApi";
 import { getTaskEffectivePolicy } from "../runtime/agentPolicyApi";
+import { normalizeAgentBackends } from "../utils/agentBackends";
 import type {
+  AgentBackendDescriptor,
+  AgentTaskRuntimeEvent,
   AgentTaskSummary,
   AgentTaskPanelTab,
   AgentTaskStatusDetail,
+  StartAgentTaskInput,
   TaskAttentionState,
+  TaskContextPreset,
   TaskEffectivePolicy,
   TaskTarget,
 } from "../types";
@@ -41,6 +50,7 @@ const ATTENTION_OPTIONS: Array<TaskAttentionState | "all"> = [
   "failed",
   "completed",
 ];
+const PRESET_OPTIONS: TaskContextPreset[] = ["light", "standard", "review"];
 const TARGET_OPTIONS: Array<TaskTarget | "all"> = ["all", "codex", "claude"];
 
 function attentionLabel(value: TaskAttentionState | "all") {
@@ -84,6 +94,40 @@ function backendLabel(
   );
 }
 
+function backendKindLabel(kind: AgentBackendDescriptor["kind"]) {
+  return kind === "sidecar" ? "Sidecar" : "Built-in CLI";
+}
+
+function backendTransportLabel(transport: AgentBackendDescriptor["transport"]) {
+  return transport === "sidecar-rpc" ? "Sidecar RPC" : "PTY Command";
+}
+
+function backendRuntimeStatusLabel(status?: AgentBackendDescriptor["status"]) {
+  switch (status) {
+    case "unconfigured":
+      return "未配置";
+    case "configured":
+      return "已配置";
+    case "starting":
+      return "启动中";
+    case "ready":
+      return "就绪";
+    case "degraded":
+      return "降级";
+    case "error":
+      return "错误";
+    default:
+      return "未知";
+  }
+}
+
+function formatHandshakeTime(timestamp?: number) {
+  if (!timestamp) {
+    return "尚未握手";
+  }
+  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
+}
+
 function statusLabel(value: string) {
   switch (value) {
     case "starting":
@@ -114,19 +158,97 @@ function presetLabel(value: string) {
   }
 }
 
+function defaultBackendForTarget(
+  backends: AgentBackendDescriptor[],
+  target: TaskTarget,
+) {
+  return (
+    backends.find(
+      (backend) => backend.target === target && backend.defaultForTarget,
+    ) ??
+    backends.find(
+      (backend) => backend.target === target && backend.kind === "builtin-cli",
+    ) ?? backends.find((backend) => backend.target === target) ?? null
+  );
+}
+
+function buildBackendContractWarnings(
+  backend: AgentBackendDescriptor | null,
+): string[] {
+  if (!backend) {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  if (!backend.capabilities.supportsResume) {
+    warnings.push("该 backend 启动的任务不支持恢复会话。");
+  }
+  if (!backend.capabilities.supportsWorkers) {
+    warnings.push("该 backend 启动的 coordinator 任务不能派生 worker。");
+  }
+  if (!backend.capabilities.supportsToolCalls) {
+    warnings.push("该 backend 未声明工具调用能力，任务执行路径可能受限。");
+  }
+  if (backend.capabilities.restrictedToolNames.length > 0) {
+    warnings.push(
+      "该 backend 通过 Mini-Term 代理工具调用，并保留部分任务生命周期工具。",
+    );
+  }
+  return warnings;
+}
+
+function sidecarPreflightBlockReason(
+  backend: AgentBackendDescriptor | null,
+): string | null {
+  if (!backend || backend.kind !== "sidecar") {
+    return null;
+  }
+  if (!backend.configured) {
+    return backend.statusMessage ?? "当前 sidecar backend 尚未配置。";
+  }
+  if (backend.available) {
+    return null;
+  }
+  if (backend.status === "configured") {
+    return (
+      backend.statusMessage ??
+      "当前 sidecar backend 已配置，但尚未完成启动/握手测试。"
+    );
+  }
+  return (
+    backend.lastError ??
+    backend.statusMessage ??
+    "当前 sidecar backend 尚未通过预检。"
+  );
+}
+
 async function findApprovedCloseRequestId(
   taskId: string,
+  cascadeChildren: boolean,
 ): Promise<string | undefined> {
   const approvals = await listApprovalRequests();
   const matching = approvals
-    .filter(
-      (request) =>
-        request.toolName === "close_task" &&
-        request.status === "approved" &&
-        request.payloadPreview.trim() === `Task: ${taskId}`,
-    )
+    .filter((request) => {
+      if (request.toolName !== "close_task" || request.status !== "approved") {
+        return false;
+      }
+      const match = request.payloadPreview.match(/^\s*Task:\s*(.+?)\s*$/m);
+      if (match?.[1] !== taskId) {
+        return false;
+      }
+      const requestCascade =
+        /^\s*CascadeChildren:\s*true\s*$/im.test(request.payloadPreview);
+      return requestCascade === cascadeChildren;
+    })
     .sort((left, right) => right.updatedAt - left.updatedAt);
   return matching[0]?.requestId;
+}
+
+function formatEventKind(value: string) {
+  return value
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 export function AgentTaskPanelTabHost({
@@ -134,6 +256,10 @@ export function AgentTaskPanelTabHost({
   workspaceId,
   isActive,
 }: AgentTaskPanelTabHostProps) {
+  const workspaceConfig = useAppStore(
+    (state) =>
+      state.config.workspaces.find((item) => item.id === workspaceId) ?? null,
+  );
   const setActiveWorkspace = useAppStore((state) => state.setActiveWorkspace);
   const openFileViewer = useAppStore((state) => state.openFileViewer);
   const openWorktreeDiff = useAppStore((state) => state.openWorktreeDiff);
@@ -145,18 +271,35 @@ export function AgentTaskPanelTabHost({
   );
 
   const [tasks, setTasks] = useState<AgentTaskStatusDetail[]>([]);
+  const [agentBackends, setAgentBackends] = useState<AgentBackendDescriptor[]>(
+    [],
+  );
   const [selectedTask, setSelectedTask] =
     useState<AgentTaskStatusDetail | null>(null);
   const [effectivePolicy, setEffectivePolicy] =
     useState<TaskEffectivePolicy | null>(null);
+  const [taskEvents, setTaskEvents] = useState<AgentTaskRuntimeEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [backendRegistryError, setBackendRegistryError] = useState<
+    string | null
+  >(null);
+  const [createTarget, setCreateTarget] = useState<TaskTarget>("codex");
+  const [createContextPreset, setCreateContextPreset] =
+    useState<TaskContextPreset>("standard");
+  const [createBackendId, setCreateBackendId] = useState("");
+  const [createTitle, setCreateTitle] = useState("");
+  const [createPrompt, setCreatePrompt] = useState("");
+  const [createCwd, setCreateCwd] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
   const [approvalNotice, setApprovalNotice] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState("");
+  const [workerPrompt, setWorkerPrompt] = useState("");
+  const [workerTitle, setWorkerTitle] = useState("");
   const [actionState, setActionState] = useState<
-    "idle" | "sending" | "closing" | "resuming"
+    "idle" | "starting" | "sending" | "closing" | "resuming" | "spawning"
   >("idle");
 
   const refreshTasks = useCallback(async () => {
@@ -172,24 +315,59 @@ export function AgentTaskPanelTabHost({
     }
   }, []);
 
+  const refreshAgentBackends = useCallback(async () => {
+    try {
+      const result = await listAgentBackends();
+      setAgentBackends(normalizeAgentBackends(result));
+      setBackendRegistryError(null);
+    } catch {
+      setAgentBackends([]);
+      setBackendRegistryError("加载 backend 契约失败");
+    }
+  }, []);
+
   const refreshSelectedTask = useCallback(async (taskId: string) => {
     setDetailLoading(true);
     try {
-      const [detail, policy] = await Promise.all([
-        getAgentTaskStatus(taskId),
-        getTaskEffectivePolicy(taskId),
-      ]);
+      const loadTaskSnapshot = async (currentTaskId: string) =>
+        Promise.all([
+          getAgentTaskStatus(currentTaskId),
+          getTaskEffectivePolicy(currentTaskId),
+          listAgentTaskEvents(currentTaskId, 30, true),
+        ]);
+
+      let resolvedTaskId = taskId;
+      let [detail, policy, events] = await loadTaskSnapshot(resolvedTaskId);
+      let redirectCount = 0;
+
+      while (
+        detail.summary.retrySuperseded &&
+        detail.summary.supersededByTaskId &&
+        detail.summary.supersededByTaskId !== resolvedTaskId &&
+        redirectCount < 4
+      ) {
+        resolvedTaskId = detail.summary.supersededByTaskId;
+        [detail, policy, events] = await loadTaskSnapshot(resolvedTaskId);
+        redirectCount += 1;
+      }
+
+      if (resolvedTaskId !== taskId) {
+        setAgentTaskPanelSelection(workspaceId, tab.id, resolvedTaskId);
+      }
+
       setSelectedTask(detail);
       setEffectivePolicy(policy);
+      setTaskEvents(events);
       setDetailError(null);
     } catch {
       setSelectedTask(null);
       setEffectivePolicy(null);
+      setTaskEvents([]);
       setDetailError("加载任务详情失败");
     } finally {
       setDetailLoading(false);
     }
-  }, []);
+  }, [setAgentTaskPanelSelection, tab.id, workspaceId]);
 
   useEffect(() => {
     if (!isActive) {
@@ -197,6 +375,7 @@ export function AgentTaskPanelTabHost({
     }
 
     const refresh = () => {
+      void refreshAgentBackends();
       void refreshTasks();
       if (tab.selectedTaskId) {
         void refreshSelectedTask(tab.selectedTaskId);
@@ -206,19 +385,51 @@ export function AgentTaskPanelTabHost({
     refresh();
     const timer = window.setInterval(refresh, 8_000);
     return () => window.clearInterval(timer);
-  }, [isActive, refreshSelectedTask, refreshTasks, tab.selectedTaskId]);
+  }, [
+    isActive,
+    refreshAgentBackends,
+    refreshSelectedTask,
+    refreshTasks,
+    tab.selectedTaskId,
+  ]);
 
   useEffect(() => {
     if (!tab.selectedTaskId) {
       setSelectedTask(null);
       setEffectivePolicy(null);
+      setTaskEvents([]);
+      setWorkerPrompt("");
+      setWorkerTitle("");
       return;
     }
     if (selectedTask && selectedTask.summary.taskId !== tab.selectedTaskId) {
       setSelectedTask(null);
       setEffectivePolicy(null);
+      setTaskEvents([]);
+      setWorkerPrompt("");
+      setWorkerTitle("");
     }
   }, [selectedTask, tab.selectedTaskId]);
+
+  const workspaceRootPath = useMemo(() => {
+    const primaryRoot =
+      workspaceConfig?.roots.find((root) => root.role === "primary") ??
+      workspaceConfig?.roots[0];
+    return primaryRoot?.path ?? "";
+  }, [workspaceConfig]);
+
+  useEffect(() => {
+    setCreateCwd(workspaceRootPath);
+  }, [workspaceRootPath]);
+
+  useEffect(() => {
+    if (agentBackends.length === 0) {
+      return;
+    }
+    if (!agentBackends.some((backend) => backend.target === createTarget)) {
+      setCreateTarget(agentBackends[0].target);
+    }
+  }, [agentBackends, createTarget]);
 
   const visibleTasks = useMemo(() => {
     return tasks.filter((item) => {
@@ -320,7 +531,7 @@ export function AgentTaskPanelTabHost({
     }
   }, [inputValue, refreshSelectedTask, refreshTasks, selectedTask]);
 
-  const handleCloseTask = useCallback(async () => {
+  const handleCloseTask = useCallback(async (cascadeChildren = false) => {
     if (!selectedTask) {
       return;
     }
@@ -328,10 +539,19 @@ export function AgentTaskPanelTabHost({
     try {
       const approvalRequestId = await findApprovedCloseRequestId(
         selectedTask.summary.taskId,
+        cascadeChildren,
       );
       const result = approvalRequestId
-        ? await closeAgentTask(selectedTask.summary.taskId, approvalRequestId)
-        : await closeAgentTask(selectedTask.summary.taskId);
+        ? await closeAgentTask(
+            selectedTask.summary.taskId,
+            approvalRequestId,
+            cascadeChildren,
+          )
+        : await closeAgentTask(
+            selectedTask.summary.taskId,
+            undefined,
+            cascadeChildren,
+          );
       if (result.ok) {
         setApprovalNotice(null);
         await refreshTasks();
@@ -350,15 +570,49 @@ export function AgentTaskPanelTabHost({
     }
   }, [refreshSelectedTask, refreshTasks, selectedTask]);
 
+  const handleSpawnWorker = useCallback(async () => {
+    if (!selectedTask || !workerPrompt.trim()) {
+      return;
+    }
+    setActionState("spawning");
+    try {
+      const worker = await spawnWorkerTask({
+        parentTaskId: selectedTask.summary.taskId,
+        prompt: workerPrompt.trim(),
+        title: workerTitle.trim() || undefined,
+      });
+      setApprovalNotice(null);
+      setDetailError(null);
+      setWorkerPrompt("");
+      setWorkerTitle("");
+      await refreshTasks();
+      setAgentTaskPanelSelection(workspaceId, tab.id, worker.taskId);
+      await refreshSelectedTask(worker.taskId);
+    } catch {
+      setDetailError("Failed to spawn worker task");
+    } finally {
+      setActionState("idle");
+    }
+  }, [
+    refreshSelectedTask,
+    refreshTasks,
+    selectedTask,
+    setAgentTaskPanelSelection,
+    tab.id,
+    workerPrompt,
+    workerTitle,
+    workspaceId,
+  ]);
+
   const handleResumeTask = useCallback(async () => {
     if (!selectedTask) {
       return;
     }
     setActionState("resuming");
     try {
-      const detail = await resumeAgentTask(selectedTask.summary.taskId);
-      setSelectedTask(detail);
+      await resumeAgentTask(selectedTask.summary.taskId);
       await refreshTasks();
+      await refreshSelectedTask(selectedTask.summary.taskId);
       setApprovalNotice(null);
       setDetailError(null);
     } catch {
@@ -366,7 +620,117 @@ export function AgentTaskPanelTabHost({
     } finally {
       setActionState("idle");
     }
-  }, [refreshTasks, selectedTask]);
+  }, [refreshSelectedTask, refreshTasks, selectedTask]);
+
+  const createBackendOptions = useMemo(
+    () => agentBackends.filter((backend) => backend.target === createTarget),
+    [agentBackends, createTarget],
+  );
+  const fallbackCreateBackend = useMemo(
+    () => defaultBackendForTarget(agentBackends, createTarget),
+    [agentBackends, createTarget],
+  );
+  const selectedCreateBackend =
+    createBackendOptions.find((backend) => backend.backendId === createBackendId) ??
+    fallbackCreateBackend;
+  const createBackendWarnings = useMemo(
+    () => buildBackendContractWarnings(selectedCreateBackend),
+    [selectedCreateBackend],
+  );
+  const createBackendPreflightBlock = useMemo(
+    () => sidecarPreflightBlockReason(selectedCreateBackend),
+    [selectedCreateBackend],
+  );
+
+  useEffect(() => {
+    const hasSelectedBackend = createBackendOptions.some(
+      (backend) => backend.backendId === createBackendId,
+    );
+    if (hasSelectedBackend) {
+      return;
+    }
+    setCreateBackendId(selectedCreateBackend?.backendId ?? "");
+  }, [createBackendId, createBackendOptions, selectedCreateBackend]);
+
+  const handleStartTask = useCallback(async () => {
+    if (!createPrompt.trim()) {
+      setCreateError("请输入任务说明。");
+      return;
+    }
+    if (!selectedCreateBackend) {
+      setCreateError("当前目标没有可用 backend。");
+      return;
+    }
+
+    if (createBackendPreflightBlock) {
+      setCreateError(createBackendPreflightBlock);
+      return;
+    }
+
+    setActionState("starting");
+    try {
+      const filterPatch: Partial<AgentTaskPanelTab["filter"]> = {};
+      if (
+        tab.filter.attention &&
+        tab.filter.attention !== "all" &&
+        tab.filter.attention !== "running"
+      ) {
+        filterPatch.attention = "all";
+      }
+      if (
+        tab.filter.target &&
+        tab.filter.target !== "all" &&
+        tab.filter.target !== createTarget
+      ) {
+        filterPatch.target = createTarget;
+      }
+      if (Object.keys(filterPatch).length > 0) {
+        setAgentTaskPanelFilter(workspaceId, tab.id, filterPatch);
+      }
+
+      const input: StartAgentTaskInput = {
+        workspaceId,
+        target: createTarget,
+        prompt: createPrompt.trim(),
+        contextPreset: createContextPreset,
+        backendId: selectedCreateBackend.backendId,
+        cwd: createCwd.trim() || undefined,
+        title: createTitle.trim() || undefined,
+      };
+      const startedTask = await startAgentTask(input);
+
+      setApprovalNotice(null);
+      setCreateError(null);
+      setDetailError(null);
+      setCreatePrompt("");
+      setCreateTitle("");
+      await refreshTasks();
+      setAgentTaskPanelSelection(workspaceId, tab.id, startedTask.taskId);
+      await refreshSelectedTask(startedTask.taskId);
+    } catch (cause) {
+      setCreateError(
+        cause instanceof Error ? cause.message : "启动任务失败",
+      );
+    } finally {
+      setActionState("idle");
+    }
+  }, [
+    createContextPreset,
+    createCwd,
+    createPrompt,
+    createTarget,
+    createTitle,
+    createBackendPreflightBlock,
+    refreshSelectedTask,
+    refreshTasks,
+    selectedCreateBackend,
+    setAgentTaskPanelFilter,
+    setAgentTaskPanelSelection,
+    tab.filter.attention,
+    tab.filter.target,
+    tab.id,
+    workspaceId,
+  ]);
 
   const selectedSummary =
     visibleTasks.find((item) => item.summary.taskId === tab.selectedTaskId)
@@ -374,10 +738,41 @@ export function AgentTaskPanelTabHost({
     (selectedTask && selectedTask.summary.taskId === tab.selectedTaskId
       ? selectedTask.summary
       : null);
+  const parentSummary = selectedSummary?.parentTaskId
+    ? tasks.find((item) => item.summary.taskId === selectedSummary.parentTaskId)
+        ?.summary
+    : null;
+  const childTaskSummaries = selectedSummary
+    ? tasks
+        .filter((item) => item.summary.parentTaskId === selectedSummary.taskId)
+        .map((item) => item.summary)
+    : [];
   const planArtifact = selectedTask?.artifacts.find(
     (artifact) => artifact.kind === "plan",
   );
   const canSendInput = selectedSummary?.status === "running";
+  const selectedBackend = selectedSummary
+    ? agentBackends.find(
+        (backend) => backend.backendId === selectedSummary.backendId,
+      ) ??
+      (!selectedSummary.backendId
+        ? defaultBackendForTarget(agentBackends, selectedSummary.target)
+        : null)
+    : null;
+  const selectedBackendPreflightBlock = sidecarPreflightBlockReason(selectedBackend);
+  const resumeSupported = selectedBackend?.capabilities.supportsResume ?? true;
+  const workersSupported = selectedBackend?.capabilities.supportsWorkers ?? true;
+  const canSpawnWorker =
+    selectedSummary?.role === "coordinator" && workersSupported;
+  const workerBlockReason =
+    selectedSummary?.role !== "coordinator"
+      ? "只有 coordinator 任务可以派生 worker。"
+      : !workersSupported
+        ? "当前 backend 未声明 worker 能力，无法从该任务派生 worker。"
+        : null;
+  const resumeBlockReason = !resumeSupported
+    ? "当前 backend 未声明恢复会话能力。"
+    : null;
 
   return (
     <div className="flex h-full bg-[var(--bg-terminal)] text-[var(--text-primary)]">
@@ -402,6 +797,213 @@ export function AgentTaskPanelTabHost({
             }}
           >
             刷新
+          </button>
+        </div>
+
+        <div className="border-b border-[var(--border-subtle)] px-3 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[var(--text-muted)]">
+              启动任务
+            </div>
+            <div className="truncate text-[10px] text-[var(--text-muted)]">
+              {workspaceConfig?.name ?? workspaceId}
+            </div>
+          </div>
+          <div className="mt-1 text-[11px] text-[var(--text-muted)]">
+            默认工作目录：
+            {workspaceRootPath || "未检测到工作区根目录"}
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+              目标
+              <select
+                aria-label="新任务目标"
+                className="rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
+                value={createTarget}
+                onChange={(event) =>
+                  setCreateTarget(event.target.value as TaskTarget)
+                }
+              >
+                {TARGET_OPTIONS.filter((option) => option !== "all").map(
+                  (option) => (
+                    <option key={option} value={option}>
+                      {targetLabel(option)}
+                    </option>
+                  ),
+                )}
+              </select>
+            </label>
+
+            <label className="flex flex-col gap-1 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+              预设
+              <select
+                aria-label="新任务预设"
+                className="rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
+                value={createContextPreset}
+                onChange={(event) =>
+                  setCreateContextPreset(
+                    event.target.value as TaskContextPreset,
+                  )
+                }
+              >
+                {PRESET_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {presetLabel(option)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <label className="mt-2 flex flex-col gap-1 text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+            Backend
+            <select
+              aria-label="新任务 Backend"
+              className="rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
+              value={createBackendId}
+              onChange={(event) => setCreateBackendId(event.target.value)}
+              disabled={createBackendOptions.length === 0}
+            >
+              {createBackendOptions.length === 0 ? (
+                <option value="">当前目标没有可用 backend</option>
+              ) : (
+                createBackendOptions.map((backend) => (
+                  <option key={backend.backendId} value={backend.backendId}>
+                    {backend.displayName}
+                    {backend.defaultForTarget ? " (default)" : ""}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+
+          {backendRegistryError ? (
+            <div className="mt-2 rounded border border-[var(--color-danger)]/30 px-2 py-2 text-[11px] text-[var(--color-danger)]">
+              {backendRegistryError}
+            </div>
+          ) : selectedCreateBackend ? (
+            <div className="mt-2 space-y-2 rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
+              <div className="font-medium text-[var(--text-primary)]">
+                {selectedCreateBackend.displayName}
+              </div>
+              <div>
+                {backendKindLabel(selectedCreateBackend.kind)} |{" "}
+                {backendTransportLabel(selectedCreateBackend.transport)}
+              </div>
+              <div>
+                Status: {backendRuntimeStatusLabel(selectedCreateBackend.status)} | Configured:{" "}
+                {selectedCreateBackend.configured ? "yes" : "no"} | Available:{" "}
+                {selectedCreateBackend.available ? "yes" : "no"}
+              </div>
+              <div>
+                Last Handshake: {formatHandshakeTime(selectedCreateBackend.lastHandshakeAt)}
+              </div>
+              {selectedCreateBackend.routingStatusMessage ? (
+                <div>{selectedCreateBackend.routingStatusMessage}</div>
+              ) : null}
+              {selectedCreateBackend.statusMessage ? (
+                <div>{selectedCreateBackend.statusMessage}</div>
+              ) : null}
+              {selectedCreateBackend.lastError ? (
+                <div className="text-[var(--color-danger)]">
+                  Last error: {selectedCreateBackend.lastError}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-1">
+                <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">
+                  {selectedCreateBackend.capabilities.supportsWorkers
+                    ? "Workers"
+                    : "No Workers"}
+                </span>
+                <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">
+                  {selectedCreateBackend.capabilities.supportsResume
+                    ? "Resume"
+                    : "No Resume"}
+                </span>
+                <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">
+                  {selectedCreateBackend.capabilities.supportsToolCalls
+                    ? "Tool Calls"
+                    : "No Tool Calls"}
+                </span>
+              </div>
+              {createBackendWarnings.map((warning) => (
+                <div key={warning}>{warning}</div>
+              ))}
+              {selectedCreateBackend.capabilities.toolCallAuthority ? (
+                <div>
+                  Tool authority:{" "}
+                  {selectedCreateBackend.capabilities.toolCallAuthority}
+                </div>
+              ) : null}
+              {selectedCreateBackend.capabilities.approvalFlowNotes ? (
+                <div>{selectedCreateBackend.capabilities.approvalFlowNotes}</div>
+              ) : null}
+              {selectedCreateBackend.capabilities.restrictedToolNames.length >
+              0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {selectedCreateBackend.capabilities.restrictedToolNames.map(
+                    (toolName) => (
+                      <span
+                        key={`${selectedCreateBackend.backendId}-${toolName}`}
+                        className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]"
+                      >
+                        {toolName}
+                      </span>
+                    ),
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="mt-2 rounded border border-[var(--border-default)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
+              当前目标没有可用 backend。
+            </div>
+          )}
+
+          <input
+            aria-label="新任务标题"
+            value={createTitle}
+            onChange={(event) => setCreateTitle(event.target.value)}
+            className="mt-2 w-full rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+            placeholder="可选标题"
+          />
+          <input
+            aria-label="新任务工作目录"
+            value={createCwd}
+            onChange={(event) => setCreateCwd(event.target.value)}
+            className="mt-2 w-full rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+            placeholder="工作目录（默认当前工作区根目录）"
+          />
+          <textarea
+            aria-label="新任务说明"
+            value={createPrompt}
+            onChange={(event) => setCreatePrompt(event.target.value)}
+            className="mt-2 min-h-[120px] w-full rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+            placeholder="描述你要启动的任务..."
+          />
+          {createBackendPreflightBlock ? (
+            <div className="mt-2 text-[11px] text-[var(--color-danger)]">
+              {createBackendPreflightBlock}
+            </div>
+          ) : null}
+          {createError ? (
+            <div className="mt-2 text-[11px] text-[var(--color-danger)]">
+              {createError}
+            </div>
+          ) : null}
+          <button
+            type="button"
+            className="mt-2 rounded-[var(--radius-sm)] border border-[var(--accent)]/40 bg-[var(--accent-subtle)] px-3 py-1.5 text-[11px] text-[var(--accent)]"
+            onClick={() => void handleStartTask()}
+            disabled={
+              actionState !== "idle" ||
+              !createPrompt.trim() ||
+              !selectedCreateBackend ||
+              !!createBackendPreflightBlock
+            }
+          >
+            启动任务
           </button>
         </div>
 
@@ -536,7 +1138,7 @@ export function AgentTaskPanelTabHost({
       <div className="min-w-0 flex-1">
         {!selectedSummary ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
-            请选择一个任务查看详情
+            左侧可启动新任务，或选择已有任务查看详情
           </div>
         ) : (
           <div className="flex h-full flex-col">
@@ -565,18 +1167,29 @@ export function AgentTaskPanelTabHost({
                     type="button"
                     className="rounded-[var(--radius-sm)] border border-[var(--border-default)] px-2.5 py-1 text-[11px] text-[var(--text-secondary)]"
                     onClick={() => void handleResumeTask()}
-                    disabled={actionState !== "idle"}
+                    disabled={actionState !== "idle" || !resumeSupported}
+                    title={resumeBlockReason ?? undefined}
                   >
                     恢复会话
                   </button>
                   <button
                     type="button"
                     className="rounded-[var(--radius-sm)] border border-[var(--border-default)] px-2.5 py-1 text-[11px] text-[var(--text-secondary)]"
-                    onClick={() => void handleCloseTask()}
+                    onClick={() => void handleCloseTask(false)}
                     disabled={actionState !== "idle"}
                   >
                     关闭任务
                   </button>
+                  {childTaskSummaries.length > 0 ? (
+                    <button
+                      type="button"
+                      className="rounded-[var(--radius-sm)] border border-[var(--border-default)] px-2.5 py-1 text-[11px] text-[var(--text-secondary)]"
+                      onClick={() => void handleCloseTask(true)}
+                      disabled={actionState !== "idle"}
+                    >
+                      Close + Children
+                    </button>
+                  ) : null}
                   {selectedSummary.attentionState === "needs-review" &&
                   selectedSummary.changedFiles[0] ? (
                     <button
@@ -687,6 +1300,105 @@ export function AgentTaskPanelTabHost({
                   )}
                 </div>
 
+                <div className="mb-4">
+                  <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                    Task Graph
+                  </div>
+                  <div className="mt-1 space-y-2 rounded bg-[var(--bg-elevated)] px-3 py-2 text-[11px] leading-5 text-[var(--text-secondary)]">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                        Parent
+                      </div>
+                      {!parentSummary ? (
+                        <div className="mt-1 text-[var(--text-muted)]">
+                          No parent task
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="mt-1 flex w-full items-center justify-between rounded border border-[var(--border-default)] px-2 py-1 text-left hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                          onClick={() =>
+                            setAgentTaskPanelSelection(
+                              workspaceId,
+                              tab.id,
+                              parentSummary.taskId,
+                            )
+                          }
+                        >
+                          <span className="truncate">{parentSummary.title}</span>
+                          <span className="ml-2 shrink-0 text-[10px] text-[var(--text-muted)]">
+                            {roleLabel(parentSummary.role)}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                        Children
+                      </div>
+                      {childTaskSummaries.length === 0 ? (
+                        <div className="mt-1 text-[var(--text-muted)]">
+                          No child tasks
+                        </div>
+                      ) : (
+                        <div className="mt-1 space-y-1">
+                          {childTaskSummaries.map((childSummary) => (
+                            <button
+                              key={childSummary.taskId}
+                              type="button"
+                              className="flex w-full items-center justify-between rounded border border-[var(--border-default)] px-2 py-1 text-left hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                              onClick={() =>
+                                setAgentTaskPanelSelection(
+                                  workspaceId,
+                                  tab.id,
+                                  childSummary.taskId,
+                                )
+                              }
+                            >
+                              <span className="truncate">{childSummary.title}</span>
+                              <span className="ml-2 shrink-0 text-[10px] text-[var(--text-muted)]">
+                                {statusLabel(childSummary.status)}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mb-4">
+                  <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-muted)]">
+                    Timeline
+                  </div>
+                  {taskEvents.length === 0 ? (
+                    <div className="mt-1 text-[11px] text-[var(--text-muted)]">
+                      No runtime events yet
+                    </div>
+                  ) : (
+                    <div className="mt-1 space-y-1">
+                      {taskEvents.map((event) => (
+                        <div
+                          key={event.eventId}
+                          className="rounded border border-[var(--border-default)] bg-[var(--bg-elevated)] px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-[11px] font-medium text-[var(--text-primary)]">
+                              {formatEventKind(event.kind)}
+                            </div>
+                            <div className="shrink-0 text-[10px] text-[var(--text-muted)]">
+                              {formatRelativeTime(event.timestamp)}
+                            </div>
+                          </div>
+                          <div className="mt-1 text-[11px] text-[var(--text-secondary)]">
+                            {event.summary}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div>
                   <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-muted)]">
                     变更文件
@@ -747,11 +1459,118 @@ export function AgentTaskPanelTabHost({
 
                 <div className="mt-4">
                   <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+                    Backend Contract
+                  </div>
+                  {backendRegistryError ? (
+                    <div className="rounded border border-[var(--color-danger)]/30 px-2 py-2 text-[11px] text-[var(--color-danger)]">
+                      {backendRegistryError}
+                    </div>
+                  ) : selectedBackend ? (
+                    <div className="space-y-2 rounded border border-[var(--border-default)] bg-[var(--bg-surface)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
+                      <div>
+                        {backendKindLabel(selectedBackend.kind)} |{" "}
+                        {backendTransportLabel(selectedBackend.transport)}
+                      </div>
+                      <div>
+                        Status: {backendRuntimeStatusLabel(selectedBackend.status)} | Configured:{" "}
+                        {selectedBackend.configured ? "yes" : "no"} | Available:{" "}
+                        {selectedBackend.available ? "yes" : "no"}
+                      </div>
+                      <div>
+                        Last Handshake: {formatHandshakeTime(selectedBackend.lastHandshakeAt)}
+                      </div>
+                      {selectedBackend.routingStatusMessage ? (
+                        <div>{selectedBackend.routingStatusMessage}</div>
+                      ) : null}
+                      {selectedBackend.statusMessage ? (
+                        <div>{selectedBackend.statusMessage}</div>
+                      ) : null}
+                      {selectedBackend.lastError ? (
+                        <div className="text-[var(--color-danger)]">
+                          Last error: {selectedBackend.lastError}
+                        </div>
+                      ) : null}
+                      <div className="flex flex-wrap gap-1">
+                        <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">
+                          {selectedBackend.capabilities.supportsWorkers
+                            ? "Workers"
+                            : "No Workers"}
+                        </span>
+                        <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">
+                          {selectedBackend.capabilities.supportsResume
+                            ? "Resume"
+                            : "No Resume"}
+                        </span>
+                        <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">
+                          {selectedBackend.capabilities.supportsToolCalls
+                            ? "Tool Calls"
+                            : "No Tool Calls"}
+                        </span>
+                        <span className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]">
+                          {selectedBackend.capabilities.brokeredApprovals
+                            ? "Brokered Approvals"
+                            : "Direct Approvals"}
+                        </span>
+                      </div>
+                      {selectedBackend.capabilities.toolCallAuthority ? (
+                        <div>
+                          Tool authority:{" "}
+                          {selectedBackend.capabilities.toolCallAuthority}
+                        </div>
+                      ) : null}
+                      {selectedBackend.capabilities.toolCallNotes ? (
+                        <div>{selectedBackend.capabilities.toolCallNotes}</div>
+                      ) : null}
+                      {selectedBackend.capabilities.approvalFlowNotes ? (
+                        <div>{selectedBackend.capabilities.approvalFlowNotes}</div>
+                      ) : null}
+                      {selectedBackend.capabilities.restrictedToolNames.length >
+                      0 ? (
+                        <div>
+                          <div className="mb-1 text-[10px] uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+                            Reserved tools
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {selectedBackend.capabilities.restrictedToolNames.map(
+                              (toolName) => (
+                                <span
+                                  key={`${selectedBackend.backendId}-${toolName}`}
+                                  className="rounded-full border border-[var(--border-subtle)] px-2 py-0.5 text-[10px]"
+                                >
+                                  {toolName}
+                                </span>
+                              ),
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+                      {selectedBackendPreflightBlock ? (
+                        <div className="rounded border border-[var(--color-danger)]/30 px-2 py-2 text-[11px] text-[var(--color-danger)]">
+                          {selectedBackendPreflightBlock}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="rounded border border-[var(--border-default)] px-2 py-2 text-[11px] text-[var(--text-muted)]">
+                      {selectedSummary.backendId
+                        ? `未找到 backend 描述：${selectedSummary.backendId}`
+                        : "当前任务没有 backend 描述元数据。"}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4">
+                  <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
                     Role
                   </div>
                   <div className="break-all text-[11px] text-[var(--text-muted)]">
                     {roleLabel(selectedSummary.role)}
                   </div>
+                  {resumeBlockReason ? (
+                    <div className="mt-2 text-[11px] text-[var(--text-muted)]">
+                      {resumeBlockReason}
+                    </div>
+                  ) : null}
                 </div>
 
                 {selectedSummary.parentTaskId ? (
@@ -759,11 +1578,36 @@ export function AgentTaskPanelTabHost({
                     <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
                       Parent Task
                     </div>
-                    <div className="break-all text-[11px] text-[var(--text-muted)]">
-                      {selectedSummary.parentTaskId}
-                    </div>
+                    {parentSummary ? (
+                      <button
+                        type="button"
+                        className="w-full rounded border border-[var(--border-default)] px-2 py-1 text-left text-[11px] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                        onClick={() =>
+                          setAgentTaskPanelSelection(
+                            workspaceId,
+                            tab.id,
+                            parentSummary.taskId,
+                          )
+                        }
+                      >
+                        {parentSummary.title}
+                      </button>
+                    ) : (
+                      <div className="break-all text-[11px] text-[var(--text-muted)]">
+                        {selectedSummary.parentTaskId}
+                      </div>
+                    )}
                   </div>
                 ) : null}
+
+                <div className="mt-4">
+                  <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+                    Child Tasks
+                  </div>
+                  <div className="break-all text-[11px] text-[var(--text-muted)]">
+                    {childTaskSummaries.length}
+                  </div>
+                </div>
 
                 <div className="mt-4">
                   <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
@@ -786,6 +1630,41 @@ export function AgentTaskPanelTabHost({
                 <div className="mt-4">
                   <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
                     发送输入
+                  </div>
+                  <div className="mb-1 text-[11px] text-[var(--text-secondary)]">
+                    Spawn Worker
+                  </div>
+                  {canSpawnWorker ? (
+                    <>
+                      <input
+                        value={workerTitle}
+                        onChange={(event) => setWorkerTitle(event.target.value)}
+                        className="mb-2 w-full rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                        placeholder="Optional worker title"
+                      />
+                      <textarea
+                        value={workerPrompt}
+                        onChange={(event) => setWorkerPrompt(event.target.value)}
+                        className="min-h-[120px] w-full rounded-[var(--radius-sm)] border border-[var(--border-default)] bg-[var(--bg-surface)] px-3 py-2 text-[12px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                        placeholder="Describe the worker task..."
+                      />
+                      <button
+                        type="button"
+                        className="mt-2 rounded-[var(--radius-sm)] border border-[var(--accent)]/40 bg-[var(--accent-subtle)] px-3 py-1.5 text-[11px] text-[var(--accent)]"
+                        onClick={() => void handleSpawnWorker()}
+                        disabled={actionState !== "idle" || !workerPrompt.trim()}
+                      >
+                        Spawn Worker
+                      </button>
+                    </>
+                  ) : (
+                    <div className="text-[11px] text-[var(--text-muted)]">
+                      {workerBlockReason ?? "当前无法派生 worker。"}
+                    </div>
+                  )}
+
+                  <div className="mt-4 mb-1 text-[11px] text-[var(--text-secondary)]">
+                    Send Input
                   </div>
                   {canSendInput ? (
                     <>

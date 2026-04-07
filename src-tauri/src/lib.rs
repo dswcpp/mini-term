@@ -1,7 +1,10 @@
 mod agent_api;
+mod agent_backend_runtime;
 mod agent_backends;
 pub mod agent_core;
+mod agent_ext;
 mod agent_policy;
+mod agent_tool_broker;
 mod ai_sessions;
 mod config;
 mod fs;
@@ -11,6 +14,8 @@ pub mod mcp;
 mod mcp_host;
 mod process_monitor;
 mod pty;
+pub mod reference_sidecar;
+mod reference_sidecar_provider;
 mod runtime_mcp;
 
 use tauri::Manager;
@@ -61,6 +66,9 @@ pub fn run() {
             fs::write_text_file,
             fs::write_binary_file,
             ai_sessions::get_ai_sessions,
+            agent_ext::session_import::list_external_sessions,
+            agent_ext::session_import::get_external_session_messages,
+            agent_ext::session_import::delete_external_session,
             git::get_git_status,
             git::get_git_diff,
             git::restore_git_file,
@@ -74,6 +82,7 @@ pub fn run() {
             git::get_file_git_history,
             git::get_file_git_blame,
             agent_api::list_agent_backends,
+            agent_api::test_agent_backend_connection,
             agent_api::list_agent_workspaces,
             agent_api::get_agent_workspace_context,
             agent_api::list_agent_tasks,
@@ -82,9 +91,11 @@ pub fn run() {
             agent_api::list_approval_requests,
             agent_api::resolve_approval_request,
             agent_api::start_agent_task,
+            agent_api::spawn_worker_agent_task,
             agent_api::send_agent_task_input,
             agent_api::close_agent_task,
             agent_api::resume_agent_task,
+            agent_api::list_agent_task_events,
             agent_api::save_agent_task_plan,
             agent_api::list_agent_policy_profiles,
             agent_api::get_agent_policy_profile,
@@ -98,6 +109,8 @@ pub fn run() {
             agent_api::get_embedded_mcp_launch_info,
             agent_api::list_embedded_mcp_tools_command,
             agent_api::call_embedded_mcp_tool_command,
+            agent_api::list_external_mcp_servers_command,
+            agent_api::sync_external_mcp_servers_command,
             host_control::resolve_host_control_request,
         ])
         .run(tauri::generate_context!())

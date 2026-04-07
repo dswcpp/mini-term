@@ -1,7 +1,7 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "0.2.5",
+  "version": "0.2.6",
   "type": "module",
   "scripts": {
     "dev": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vite/bin/vite.js",
@@ -10,6 +10,7 @@
     "test:unit": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vitest/vitest.mjs run",
     "test:mcp": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./scripts/mcp-smoke.mjs",
     "test:mcp:http": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./scripts/mcp-http-smoke.mjs",
+    "agent:claude-sidecar": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; cargo run --manifest-path src-tauri/Cargo.toml --bin mini-term-claude-sidecar",
     "preview": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vite/bin/vite.js preview",
     "tauri": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/@tauri-apps/cli/tauri.js",
     "tauri:dev": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/@tauri-apps/cli/tauri.js dev -- --bin tauri-app",

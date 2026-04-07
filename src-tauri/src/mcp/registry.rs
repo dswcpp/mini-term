@@ -180,6 +180,20 @@ fn start_task_schema() -> Value {
         &["workspaceId", "target", "prompt", "contextPreset"],
     )
 }
+fn spawn_worker_schema() -> Value {
+    schema(
+        json!({
+            "parentTaskId": { "type": "string" },
+            "prompt": { "type": "string" },
+            "target": { "type": "string", "enum": ["codex", "claude"] },
+            "contextPreset": { "type": "string", "enum": ["light", "standard", "review"] },
+            "backendId": { "type": "string" },
+            "cwd": { "type": "string" },
+            "title": { "type": "string" }
+        }),
+        &["parentTaskId", "prompt"],
+    )
+}
 fn task_id_schema() -> Value {
     schema(json!({ "taskId": { "type": "string" } }), &["taskId"])
 }
@@ -226,7 +240,8 @@ fn close_task_schema() -> Value {
     schema(
         json!({
             "taskId": { "type": "string" },
-            "approvalRequestId": { "type": "string" }
+            "approvalRequestId": { "type": "string" },
+            "cascadeChildren": { "type": "boolean" }
         }),
         &["taskId"],
     )
@@ -670,6 +685,19 @@ const TOOL_DEFINITIONS: &[ToolDefinition] = &[
         "Launch Codex or Claude under Mini-Term tracking."
     ),
     tool!(
+        "spawn_worker",
+        "Spawn a worker task under a coordinator.",
+        spawn_worker_schema,
+        tasks::spawn_worker_tool,
+        "task-management",
+        false,
+        false,
+        false,
+        false,
+        false,
+        "Create a worker task that inherits defaults from a coordinator task."
+    ),
+    tool!(
         "get_task_status",
         "Read tracked task status.",
         task_id_schema,
@@ -905,6 +933,7 @@ fn risk_level_for(tool: &ToolDefinition) -> &'static str {
         | "split_pane"
         | "notify_user"
         | "start_task"
+        | "spawn_worker"
         | "save_task_plan"
         | "send_task_input"
         | "decide_approval_request" => "medium",
@@ -944,7 +973,7 @@ fn idempotency_for(tool: &ToolDefinition) -> &'static str {
 
 fn execution_kind_for(tool: &ToolDefinition) -> &'static str {
     match tool.name {
-        "start_task" => "start-long-running",
+        "start_task" | "spawn_worker" => "start-long-running",
         "set_config_fields" | "save_task_plan" | "write_file" | "run_workspace_command" => "mutate",
         "create_pty"
         | "write_pty"
@@ -985,7 +1014,7 @@ fn state_dependencies_for(tool: &ToolDefinition) -> &'static [&'static str] {
         "focus_workspace" | "create_tab" | "close_tab" | "split_pane" | "notify_user" => {
             &["host", "workspace-ui"]
         }
-        "start_task" => &["task-runtime", "workspace-config"],
+        "start_task" | "spawn_worker" => &["task-runtime", "workspace-config"],
         "get_task_status" | "list_attention_tasks" | "resume_session" => &["task-runtime"],
         "save_task_plan" | "send_task_input" | "close_task" => &["task-runtime", "approval-store"],
         "list_approval_requests" | "decide_approval_request" => &["approval-store"],
@@ -1036,7 +1065,7 @@ mod tests {
             .iter()
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
-        assert_eq!(TOOL_DEFINITIONS.len(), 38);
+        assert_eq!(TOOL_DEFINITIONS.len(), 39);
         assert_eq!(
             names,
             vec![
@@ -1063,6 +1092,7 @@ mod tests {
                 "split_pane",
                 "notify_user",
                 "start_task",
+                "spawn_worker",
                 "get_task_status",
                 "save_task_plan",
                 "list_attention_tasks",
@@ -1095,7 +1125,7 @@ mod tests {
                 ("legacy-compat", 7),
                 ("pty-control", 4),
                 ("runtime-observation", 9),
-                ("task-management", 9),
+                ("task-management", 10),
                 ("ui-control", 6),
             ])
         );
@@ -1159,6 +1189,15 @@ mod tests {
         let list_tools = (find_tool("list_tools").unwrap().input_schema)();
         assert!(list_tools["properties"]["group"].is_object());
 
+        let spawn_worker = (find_tool("spawn_worker").unwrap().input_schema)();
+        assert_eq!(spawn_worker["required"], json!(["parentTaskId", "prompt"]));
+
+        let close_task_schema = (find_tool("close_task").unwrap().input_schema)();
+        assert_eq!(
+            close_task_schema["properties"]["cascadeChildren"]["type"],
+            "boolean"
+        );
+
         let exported = tool_definitions_with_meta();
         let get_pty_detail = exported
             .iter()
@@ -1187,6 +1226,17 @@ mod tests {
         assert_eq!(
             close_task["stateDependencies"],
             json!(["task-runtime", "approval-store"])
+        );
+
+        let spawn_worker = exported
+            .iter()
+            .find(|tool| tool["name"] == "spawn_worker")
+            .unwrap();
+        assert_eq!(spawn_worker["executionKind"], "start-long-running");
+        assert_eq!(spawn_worker["riskLevel"], "medium");
+        assert_eq!(
+            spawn_worker["stateDependencies"],
+            json!(["task-runtime", "workspace-config"])
         );
     }
 }

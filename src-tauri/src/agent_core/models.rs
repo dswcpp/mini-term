@@ -4,6 +4,10 @@ use crate::fs::FileContentResult;
 use crate::git::{GitDiffResult, GitFileStatus};
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn display_path_string(path: &str) -> String {
     #[cfg(windows)]
     {
@@ -136,6 +140,10 @@ pub struct TaskSummary {
     pub policy_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination_cause: Option<TaskTerminationCause>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub retry_superseded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +249,23 @@ pub struct StartTaskInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_id: Option<String>,
     pub cwd: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnWorkerInput {
+    pub parent_task_id: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<TaskTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_preset: Option<TaskContextPreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
 

@@ -169,6 +169,32 @@ fn tool_result(value: Value, is_error: bool) -> Value {
     })
 }
 
+pub(crate) fn invoke_tool_structured(
+    tool_name: &str,
+    arguments: Value,
+) -> Result<(Value, bool), String> {
+    let Some(tool) = find_tool(tool_name) else {
+        return Err("unknown tool".to_string());
+    };
+
+    let result = match (tool.handler)(arguments) {
+        Ok(result) => {
+            let confirmation = result
+                .get("approvalRequired")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if confirmation {
+                (tool_confirmation_envelope(tool.name, result), false)
+            } else {
+                (tool_success_envelope(tool.name, result), false)
+            }
+        }
+        Err(message) => (tool_error_envelope(tool.name, &message), true),
+    };
+
+    Ok(result)
+}
+
 /// Detect transport format from the first byte on stdin.
 /// Returns `true` for NDJSON (Claude Code 2025-11-25+), `false` for Content-Length framing.
 fn detect_ndjson<R: Read>(reader: &mut R, first_buf: &mut Vec<u8>) -> io::Result<bool> {
@@ -316,26 +342,9 @@ pub(crate) fn handle_json_rpc_request(message: Value) -> Value {
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match find_tool(name) {
-                Some(tool) => match (tool.handler)(arguments) {
-                    Ok(result) => {
-                        let confirmation = result
-                            .get("approvalRequired")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        let envelope = if confirmation {
-                            tool_confirmation_envelope(tool.name, result)
-                        } else {
-                            tool_success_envelope(tool.name, result)
-                        };
-                        response(id, tool_result(envelope, false))
-                    }
-                    Err(message) => response(
-                        id,
-                        tool_result(tool_error_envelope(tool.name, &message), true),
-                    ),
-                },
-                None => error_response(id, -32601, "unknown tool"),
+            match invoke_tool_structured(name, arguments) {
+                Ok((envelope, is_error)) => response(id, tool_result(envelope, is_error)),
+                Err(message) => error_response(id, -32601, &message),
             }
         }
         Some(_) => error_response(id, -32601, "method not supported"),
@@ -427,7 +436,7 @@ mod tests {
             .as_array()
             .map(|items| items.len())
             .unwrap_or(0);
-        assert_eq!(count, 38, "expected exactly 38 tools, got {count}");
+        assert_eq!(count, 39, "expected exactly 39 tools, got {count}");
         let names = response["result"]["tools"]
             .as_array()
             .unwrap()

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.5-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.2.6-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/Tauri-v2-orange" alt="tauri">
   <img src="https://img.shields.io/badge/React-19-61dafb" alt="react">
@@ -96,8 +96,9 @@ Mini-Term 不是单纯的桌面终端管理器，也不是一个孤立的 MCP se
   - `close_tab`
   - `split_pane`
   - `notify_user`
-- `task-management` (8)
+- `task-management` (9)
   - `start_task`
+  - `spawn_worker`
   - `get_task_status`
   - `list_attention_tasks`
   - `resume_session`
@@ -125,7 +126,7 @@ Mini-Term 不是单纯的桌面终端管理器，也不是一个孤立的 MCP se
 3. `list_ptys` / `get_pty_detail` / `get_process_tree`
 4. `read_file` / `search_files`
 5. `get_git_summary` / `get_diff_for_review`
-6. `start_task` / `get_task_status` / `send_task_input`
+6. `start_task` / `spawn_worker` / `get_task_status` / `send_task_input`
 
 审批型动作默认流程：
 

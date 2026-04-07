@@ -1,10 +1,10 @@
 use crate::agent_core::{
     approval::{list_approvals, set_approval_status},
-    models::{ApprovalDecision, ApprovalRiskLevel, StartTaskInput, TaskStatusDetail, TaskSummary},
+    models::{ApprovalDecision, ApprovalRiskLevel, SpawnWorkerInput, StartTaskInput},
     task_runtime::{
         get_task_status, list_attention_tasks, mark_approval_executed,
         request_or_validate_approval, request_task_close, resume_session, save_task_plan,
-        send_task_input, start_task,
+        send_task_input, spawn_worker_task_with_retry, start_task_with_retry,
     },
     workspace_context::{resolve_workspace_path_for_write, validate_workspace_command_target},
 };
@@ -13,8 +13,6 @@ use crate::mcp::tools::action_support::approval_pending_value;
 use crate::runtime_mcp::record_runtime_event;
 use serde_json::{json, Value};
 use std::process::Command;
-use std::thread;
-use std::time::Duration;
 
 fn parse_approval_decision(value: &str) -> Option<ApprovalDecision> {
     match value {
@@ -46,54 +44,6 @@ fn run_workspace_command(workspace_path: &str, command: &str) -> Result<Value, S
         "stdout": String::from_utf8_lossy(&output.stdout),
         "stderr": String::from_utf8_lossy(&output.stderr),
     }))
-}
-
-fn is_transient_task_startup_failure(detail: &TaskStatusDetail) -> bool {
-    detail.summary.status == "error"
-        && detail.summary.exit_code == Some(-1073741502)
-        && (detail
-            .recent_output_excerpt
-            .contains("before producing terminal output")
-            || detail
-                .recent_output_excerpt
-                .contains("Task startup failed:")
-            || detail.recent_output_excerpt.contains("0xC0000142")
-            || detail.recent_output_excerpt.contains("-1073741502"))
-}
-
-fn start_task_with_retry(input: StartTaskInput) -> Result<TaskSummary, String> {
-    let max_attempts = if cfg!(windows) { 3 } else { 1 };
-    let startup_poll_intervals = [
-        Duration::from_millis(150),
-        Duration::from_millis(250),
-        Duration::from_millis(400),
-    ];
-
-    for attempt in 1..=max_attempts {
-        let summary = start_task(input.clone())?;
-        if attempt >= max_attempts {
-            return Ok(summary);
-        }
-
-        let mut should_retry = false;
-        for interval in startup_poll_intervals {
-            thread::sleep(interval);
-            let detail = get_task_status(&summary.task_id)?;
-            if is_transient_task_startup_failure(&detail) {
-                should_retry = true;
-                break;
-            }
-            if detail.summary.status != "starting" {
-                return Ok(summary);
-            }
-        }
-
-        if !should_retry {
-            return Ok(summary);
-        }
-    }
-
-    Err("task retry attempts exhausted".to_string())
 }
 
 pub fn start_task_tool(args: Value) -> Result<Value, String> {
@@ -144,6 +94,48 @@ pub fn start_task_tool(args: Value) -> Result<Value, String> {
     };
 
     serde_json::to_value(start_task_with_retry(input)?).map_err(|err| err.to_string())
+}
+
+pub fn spawn_worker_tool(args: Value) -> Result<Value, String> {
+    let object = args.as_object().cloned().unwrap_or_default();
+    let input = SpawnWorkerInput {
+        parent_task_id: object
+            .get("parentTaskId")
+            .and_then(Value::as_str)
+            .ok_or("parentTaskId is required")?
+            .to_string(),
+        prompt: object
+            .get("prompt")
+            .and_then(Value::as_str)
+            .ok_or("prompt is required")?
+            .to_string(),
+        target: object
+            .get("target")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "target is invalid".to_string())?,
+        context_preset: object
+            .get("contextPreset")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "contextPreset is invalid".to_string())?,
+        backend_id: object
+            .get("backendId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cwd: object
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        title: object
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+
+    serde_json::to_value(spawn_worker_task_with_retry(input)?).map_err(|err| err.to_string())
 }
 
 pub fn get_task_status_tool(args: Value) -> Result<Value, String> {
@@ -305,7 +297,11 @@ pub fn close_task_tool(args: Value) -> Result<Value, String> {
         .and_then(Value::as_str)
         .ok_or("taskId is required")?;
     let approval_request_id = object.get("approvalRequestId").and_then(Value::as_str);
-    let result = request_task_close(task_id, approval_request_id)?;
+    let cascade_children = object
+        .get("cascadeChildren")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let result = request_task_close(task_id, approval_request_id, cascade_children)?;
     if result.ok {
         serde_json::to_value(result.data.expect("close_task success should carry data"))
             .map_err(|err| err.to_string())
@@ -374,6 +370,7 @@ mod tests {
             ApprovalDecision, TaskAttentionState, TaskContextPreset, TaskRole, TaskStatusDetail,
             TaskSummary, TaskTarget,
         },
+        task_runtime::is_transient_task_startup_failure,
         task_store::upsert_task_detail,
     };
     use crate::mcp::tools::test_support::TestHarness;
@@ -503,6 +500,8 @@ done
                 injection_preset: None,
                 policy_summary: None,
                 termination_cause: None,
+                retry_superseded: false,
+                superseded_by_task_id: None,
             },
             recent_output_excerpt:
                 "Task process exited with code -1073741502 before producing terminal output".into(),
@@ -566,6 +565,8 @@ done
                 injection_preset: None,
                 policy_summary: None,
                 termination_cause: None,
+                retry_superseded: false,
+                superseded_by_task_id: None,
             },
             recent_output_excerpt: "output".into(),
             diff_summary: Vec::new(),
@@ -606,6 +607,35 @@ done
         }))
         .unwrap_err();
         assert_eq!(error, "target is invalid");
+    }
+
+    #[test]
+    fn spawn_worker_requires_parent_task_id() {
+        let _harness = TestHarness::new("spawn-worker-missing-parent");
+        let error = spawn_worker_tool(json!({
+            "prompt": "Investigate the failing test"
+        }))
+        .unwrap_err();
+        assert_eq!(error, "parentTaskId is required");
+    }
+
+    #[test]
+    fn spawn_worker_rejects_non_coordinator_parent() {
+        let harness = TestHarness::new("spawn-worker-non-coordinator");
+        let mut worker_parent = sample_task("task-worker-parent", &harness.workspace_path());
+        worker_parent.summary.role = TaskRole::Worker;
+        worker_parent.summary.parent_task_id = Some("task-root".into());
+        upsert_task_detail(worker_parent).unwrap();
+
+        let error = spawn_worker_tool(json!({
+            "parentTaskId": "task-worker-parent",
+            "prompt": "Investigate the failing test"
+        }))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "only coordinator tasks can spawn workers: task-worker-parent"
+        );
     }
 
     #[test]

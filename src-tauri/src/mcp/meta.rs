@@ -1,4 +1,6 @@
+use crate::agent_backends::list_agent_backends;
 use crate::agent_core::approval::list_approvals;
+use crate::agent_core::models::TaskTarget;
 use crate::runtime_mcp::{load_runtime_state, RuntimeMcpState};
 use serde_json::{json, Value};
 
@@ -77,6 +79,60 @@ pub fn host_mode() -> String {
         .to_string()
 }
 
+fn compact_backend_payload(
+    backend: Option<&crate::agent_backends::AgentBackendDescriptor>,
+) -> Value {
+    match backend {
+        Some(backend) => json!({
+            "backendId": backend.backend_id.clone(),
+            "displayName": backend.display_name.clone(),
+            "target": backend.target.clone(),
+            "kind": backend.kind,
+            "transport": backend.transport,
+            "builtin": backend.builtin,
+            "preferredForTarget": backend.preferred_for_target,
+            "defaultForTarget": backend.default_for_target,
+            "configured": backend.configured,
+            "available": backend.available,
+            "status": backend.status,
+            "routingStatusMessage": backend.routing_status_message.clone(),
+            "statusMessage": backend.status_message.clone(),
+            "lastError": backend.last_error.clone(),
+            "lastHandshakeAt": backend.last_handshake_at,
+        }),
+        None => Value::Null,
+    }
+}
+
+fn backend_runtime_summary_payload() -> Value {
+    let backends = list_agent_backends();
+    let preferred_backend = |target: &TaskTarget| {
+        backends
+            .iter()
+            .find(|backend| backend.target == target.clone() && backend.preferred_for_target)
+    };
+    let resolved_default = |target: &TaskTarget| {
+        backends
+            .iter()
+            .find(|backend| backend.target == target.clone() && backend.default_for_target)
+    };
+
+    json!({
+        "registryCount": backends.len(),
+        "readyCount": backends.iter().filter(|backend| backend.available).count(),
+        "targets": {
+            "codex": {
+                "preferredBackend": compact_backend_payload(preferred_backend(&TaskTarget::Codex)),
+                "resolvedDefault": compact_backend_payload(resolved_default(&TaskTarget::Codex)),
+            },
+            "claude": {
+                "preferredBackend": compact_backend_payload(preferred_backend(&TaskTarget::Claude)),
+                "resolvedDefault": compact_backend_payload(resolved_default(&TaskTarget::Claude)),
+            },
+        }
+    })
+}
+
 pub fn build_server_info_payload() -> Value {
     let state = load_runtime_state();
     let host_connection = host_connection_payload(&state);
@@ -132,6 +188,7 @@ pub fn build_server_info_payload() -> Value {
             "snapshotStaleAfterMs": SNAPSHOT_STALE_AFTER_MS,
             "snapshotIsStale": snapshot_age_ms > SNAPSHOT_STALE_AFTER_MS,
             "hostBackedToolsAvailable": host_connection["hostControlAvailable"].clone(),
+            "agentBackends": backend_runtime_summary_payload(),
             "summary": {
                 "ptyCount": state.ptys.len(),
                 "watcherCount": state.watchers.len(),
@@ -160,8 +217,15 @@ pub fn build_server_info_payload() -> Value {
 #[cfg(test)]
 mod tests {
     use super::build_server_info_payload;
+    use crate::agent_backends::{backend_runtime_test_lock, clear_backend_runtime_state};
     use crate::agent_core::approval::create_approval_request;
+    use crate::agent_core::data_dir::config_path;
     use crate::agent_core::models::ApprovalRiskLevel;
+    use crate::config::{
+        load_config_from_path, save_config_to_path, AgentBackendRoutingConfig, AgentBackendsConfig,
+        SidecarBackendConfig, SidecarProviderConfig, SidecarStartupMode,
+        TaskTargetBackendRoutingConfig,
+    };
     use crate::mcp::tools::test_support::TestHarness;
 
     #[test]
@@ -190,5 +254,58 @@ mod tests {
                 >= 1
         );
         assert!(payload["hostConnection"]["controlStatus"].is_string());
+        assert_eq!(
+            payload["runtime"]["agentBackends"]["targets"]["codex"]["resolvedDefault"]["backendId"],
+            "codex-cli"
+        );
+    }
+
+    #[test]
+    fn server_info_reports_backend_routing_fallback_summary() {
+        let _guard = backend_runtime_test_lock().lock().unwrap();
+        clear_backend_runtime_state("claude-sidecar");
+        let _harness = TestHarness::new("meta-server-info-backends");
+        let path = config_path();
+        let mut config = load_config_from_path(&path);
+        config.agent_backends = Some(AgentBackendsConfig {
+            routing: AgentBackendRoutingConfig {
+                codex: AgentBackendRoutingConfig::default().codex,
+                claude: TaskTargetBackendRoutingConfig {
+                    preferred_backend_id: Some("claude-sidecar".into()),
+                    allow_builtin_fallback: true,
+                },
+            },
+            claude_sidecar: SidecarBackendConfig {
+                enabled: true,
+                command: Some("node".into()),
+                args: vec!["dist/sidecar.js".into()],
+                env: Default::default(),
+                provider: SidecarProviderConfig::default(),
+                cwd: None,
+                startup_mode: SidecarStartupMode::Process,
+                connection_timeout_ms: 2_000,
+            },
+        });
+        save_config_to_path(&path, config).unwrap();
+
+        let payload = build_server_info_payload();
+
+        assert_eq!(
+            payload["runtime"]["agentBackends"]["targets"]["claude"]["preferredBackend"]
+                ["backendId"],
+            "claude-sidecar"
+        );
+        assert_eq!(
+            payload["runtime"]["agentBackends"]["targets"]["claude"]["resolvedDefault"]
+                ["backendId"],
+            "claude-cli"
+        );
+        assert!(
+            payload["runtime"]["agentBackends"]["targets"]["claude"]["resolvedDefault"]
+                ["routingStatusMessage"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("preferred backend `claude-sidecar`")
+        );
     }
 }

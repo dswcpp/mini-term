@@ -1,7 +1,7 @@
 use super::data_dir::{ensure_parent, tasks_path};
 use super::models::{TaskAttentionState, TaskStatusDetail, TaskSummary, TaskTerminationCause};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -179,6 +179,10 @@ fn derive_attention(summary: &TaskSummary, derived_status: &str) -> TaskAttentio
     TaskAttentionState::Running
 }
 
+fn is_visible_task(summary: &TaskSummary) -> bool {
+    !summary.retry_superseded
+}
+
 pub fn list_task_details() -> Vec<TaskStatusDetail> {
     let mut tasks = runtime_store().snapshot();
     for task in &mut tasks {
@@ -190,10 +194,97 @@ pub fn list_task_details() -> Vec<TaskStatusDetail> {
     tasks
 }
 
+pub fn list_visible_task_details() -> Vec<TaskStatusDetail> {
+    list_task_details()
+        .into_iter()
+        .filter(|detail| is_visible_task(&detail.summary))
+        .collect()
+}
+
 pub fn get_task_detail(task_id: &str) -> Option<TaskStatusDetail> {
     list_task_details()
         .into_iter()
         .find(|task| task.summary.task_id == task_id)
+}
+
+fn child_ids_by_parent(tasks: &[TaskStatusDetail]) -> HashMap<String, Vec<String>> {
+    let mut index = HashMap::<String, Vec<String>>::new();
+    for detail in tasks {
+        if let Some(parent_task_id) = detail.summary.parent_task_id.as_deref() {
+            index
+                .entry(parent_task_id.to_string())
+                .or_default()
+                .push(detail.summary.task_id.clone());
+        }
+    }
+    index
+}
+
+fn collect_descendant_ids_from_index(
+    task_id: &str,
+    child_index: &HashMap<String, Vec<String>>,
+    visited: &mut HashSet<String>,
+    result: &mut Vec<String>,
+) {
+    let Some(child_ids) = child_index.get(task_id) else {
+        return;
+    };
+
+    for child_id in child_ids {
+        if !visited.insert(child_id.clone()) {
+            continue;
+        }
+        collect_descendant_ids_from_index(child_id, child_index, visited, result);
+        result.push(child_id.clone());
+    }
+}
+
+pub fn list_child_task_summaries(parent_task_id: &str) -> Vec<TaskSummary> {
+    list_task_details()
+        .into_iter()
+        .filter(|detail| detail.summary.parent_task_id.as_deref() == Some(parent_task_id))
+        .map(|detail| detail.summary)
+        .collect()
+}
+
+pub fn collect_descendant_task_ids(task_id: &str) -> Vec<String> {
+    let tasks = list_task_details();
+    let child_index = child_ids_by_parent(&tasks);
+    let mut visited = HashSet::new();
+    let mut result = Vec::new();
+    collect_descendant_ids_from_index(task_id, &child_index, &mut visited, &mut result);
+    result
+}
+
+pub fn collect_related_task_ids(task_id: &str) -> Vec<String> {
+    let tasks = list_task_details();
+    let summaries_by_id = tasks
+        .iter()
+        .map(|detail| (detail.summary.task_id.clone(), detail.summary.clone()))
+        .collect::<HashMap<_, _>>();
+
+    if !summaries_by_id.contains_key(task_id) {
+        return Vec::new();
+    }
+
+    let child_index = child_ids_by_parent(&tasks);
+    let mut seen = HashSet::new();
+    let mut related = Vec::new();
+    let mut current_task_id = Some(task_id.to_string());
+
+    while let Some(current) = current_task_id {
+        if seen.insert(current.clone()) {
+            related.push(current.clone());
+        }
+        current_task_id = summaries_by_id
+            .get(&current)
+            .and_then(|summary| summary.parent_task_id.clone());
+    }
+
+    let mut descendants = Vec::new();
+    collect_descendant_ids_from_index(task_id, &child_index, &mut seen, &mut descendants);
+    related.extend(descendants);
+    related
 }
 
 pub fn upsert_task_detail(detail: TaskStatusDetail) -> Result<(), String> {
@@ -287,6 +378,8 @@ mod tests {
             injection_preset: None,
             policy_summary: None,
             termination_cause: None,
+            retry_superseded: false,
+            superseded_by_task_id: None,
         }
     }
 
@@ -301,6 +394,17 @@ mod tests {
             log_path: format!("{task_id}.log"),
             artifacts: Vec::new(),
         }
+    }
+
+    fn sample_child_detail(
+        task_id: &str,
+        parent_task_id: &str,
+        updated_at: u64,
+    ) -> TaskStatusDetail {
+        let mut detail = sample_detail(task_id, "running");
+        detail.summary.parent_task_id = Some(parent_task_id.to_string());
+        detail.summary.updated_at = updated_at;
+        detail
     }
 
     #[test]
@@ -423,5 +527,70 @@ mod tests {
         assert!(detail.artifacts.is_empty());
         assert_eq!(detail.summary.role, TaskRole::Coordinator);
         assert!(detail.summary.backend_id.is_none());
+    }
+
+    #[test]
+    fn list_child_task_summaries_returns_children_sorted_by_updated_at() {
+        let _harness = TestHarness::new("task-store-children");
+        write_store_for_tests(TaskStoreFile {
+            tasks: vec![
+                sample_detail("task-parent", "running"),
+                sample_child_detail("task-child-1", "task-parent", 10),
+                sample_child_detail("task-child-2", "task-parent", 20),
+                sample_child_detail("task-unrelated", "task-other", 30),
+            ],
+        });
+
+        let children = list_child_task_summaries("task-parent");
+        assert_eq!(
+            children
+                .into_iter()
+                .map(|summary| summary.task_id)
+                .collect::<Vec<_>>(),
+            vec!["task-child-2".to_string(), "task-child-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_descendant_task_ids_returns_postorder_descendants() {
+        let _harness = TestHarness::new("task-store-descendants");
+        write_store_for_tests(TaskStoreFile {
+            tasks: vec![
+                sample_detail("task-root", "running"),
+                sample_child_detail("task-child-1", "task-root", 10),
+                sample_child_detail("task-child-2", "task-root", 9),
+                sample_child_detail("task-grandchild", "task-child-1", 8),
+            ],
+        });
+
+        assert_eq!(
+            collect_descendant_task_ids("task-root"),
+            vec![
+                "task-grandchild".to_string(),
+                "task-child-1".to_string(),
+                "task-child-2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_related_task_ids_includes_ancestors_and_descendants() {
+        let _harness = TestHarness::new("task-store-related");
+        write_store_for_tests(TaskStoreFile {
+            tasks: vec![
+                sample_detail("task-root", "running"),
+                sample_child_detail("task-child", "task-root", 10),
+                sample_child_detail("task-grandchild", "task-child", 9),
+            ],
+        });
+
+        assert_eq!(
+            collect_related_task_ids("task-child"),
+            vec![
+                "task-child".to_string(),
+                "task-root".to_string(),
+                "task-grandchild".to_string(),
+            ]
+        );
     }
 }
