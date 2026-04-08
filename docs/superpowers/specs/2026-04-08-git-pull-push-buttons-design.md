@@ -17,8 +17,11 @@ pub async fn git_push(repo_path: String) -> Result<String, String>
 ```
 
 - 通过 `std::process::Command` 在 `repo_path` 目录下执行 `git pull` / `git push`
+- 设置 `stdin(Stdio::null())` 防止认证提示阻塞进程
 - 成功返回 stdout，失败返回 stderr 作为 `Err(String)`
 - 在 `lib.rs` 中注册这两个 command
+
+注意：现有 `git.rs` 使用 git2-rs 做只读操作，pull/push 是首次引入 `std::process::Command`，因为 git2-rs 的认证处理（SSH key / credential helper）配置复杂且平台差异大，直接调用 git CLI 可复用用户已配置的认证方式。Tauri async command 运行在阻塞线程池上，使用 `std::process::Command` 是安全的。
 
 ## 前端 UI
 
@@ -47,22 +50,28 @@ hover 后：▾ repo-name [main]                    ↓ ↑
 ```
 用户 hover 仓库行 → 显示 ↓ ↑ 按钮
 点击 ↓ → invoke('git_pull', { repoPath }) → loading
-  → 成功：✓ 闪绿 + 自动刷新该仓库 commit 历史
+  → 成功：✓ 闪绿 + 刷新 commits 和 branches
   → 失败：✕ 闪红 + title 显示错误
 点击 ↑ → invoke('git_push', { repoPath }) → loading
-  → 成功：✓ 闪绿
+  → 成功：✓ 闪绿 + 刷新 branches（远程分支指针已变）
   → 失败：✕ 闪红 + title 显示错误
 ```
 
 ## 状态管理
 
 - loading 状态用组件内 `useState` 管理（不入全局 store）
-- pull 成功后调用已有的 `loadCommits` 刷新该仓库提交历史
-- push 成功后不刷新（本地历史未变）
-- 两个按钮互不阻塞
+- pull 成功后调用 `loadCommits` + `loadBranches` 刷新该仓库
+- push 成功后调用 `loadBranches` 刷新远程分支信息
+- 同一仓库 pull/push 互斥：任一操作执行中时，两个按钮均禁用
+
+## 边界情况
+
+- **无 remote**：`git pull`/`git push` 会输出错误到 stderr，通过通用失败反馈处理（title 显示错误信息）
+- **detached HEAD**：同上，stderr 自然处理
+- **认证阻塞**：`stdin(Stdio::null())` 确保不会等待用户输入，认证失败会立即返回错误
 
 ## 技术决策
 
-- **git CLI 而非 git2-rs**：项目已有模式（`git.rs` 全部使用 `std::process::Command`），复用用户的 SSH key / credential helper，实现简单
+- **git CLI 而非 git2-rs**：git2-rs 认证配置复杂且平台差异大；CLI 复用用户已配置的 SSH key / credential helper，简单可靠。这是对现有 git2-rs 只读模式的有意补充
 - **Unicode 字符而非 icon 库**：与项目现有风格一致（`▾` `↻` `✕`）
 - **hover 显示而非始终显示**：保持界面简洁
