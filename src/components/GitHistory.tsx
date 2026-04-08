@@ -61,6 +61,56 @@ function buildRepoTree(repos: GitRepoInfo[], projectPath: string): RepoTreeNode[
   return root;
 }
 
+function GitActionButton({
+  repoPath,
+  action,
+  state,
+  disabled,
+  onClick,
+}: {
+  repoPath: string;
+  action: 'pull' | 'push';
+  state?: { status: string; error?: string };
+  disabled: boolean;
+  onClick: (repoPath: string) => void;
+}) {
+  const loading = state?.status === 'loading';
+  const success = state?.status === 'success';
+  const error = state?.status === 'error';
+
+  let display: string;
+  let colorClass: string;
+  if (loading) {
+    display = '↻';
+    colorClass = 'text-[var(--text-muted)]';
+  } else if (success) {
+    display = '✓';
+    colorClass = 'text-[var(--color-success)]';
+  } else if (error) {
+    display = '✕';
+    colorClass = 'text-[var(--color-error)]';
+  } else {
+    display = action === 'pull' ? '↓' : '↑';
+    colorClass = 'text-[var(--text-muted)] hover:text-[var(--text-primary)]';
+  }
+
+  return (
+    <button
+      className={`w-5 h-5 flex items-center justify-center text-sm transition-colors rounded ${colorClass} ${
+        disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+      } ${loading ? 'animate-pulse' : ''}`}
+      title={error ? state?.error : action === 'pull' ? 'Git Pull' : 'Git Push'}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) onClick(repoPath);
+      }}
+    >
+      {display}
+    </button>
+  );
+}
+
 const GIT_REFRESH_PATTERNS = [
   /create mode/,
   /Switched to/,
@@ -89,6 +139,11 @@ export function GitHistory() {
   const [repoBranches, setRepoBranches] = useState<Map<string, BranchInfo[]>>(new Map());
 
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // pull/push 操作状态
+  const [pullState, setPullState] = useState<Map<string, { status: string; error?: string }>>(new Map());
+  const [pushState, setPushState] = useState<Map<string, { status: string; error?: string }>>(new Map());
+
   const repoStatesRef = useRef(repoStates);
   repoStatesRef.current = repoStates;
   const autoExpandedForRef = useRef<string | null>(null);
@@ -243,6 +298,37 @@ export function GitHistory() {
     }, 500);
   }, [loadRepos, loadCommits, loadBranches]);
 
+  const handlePull = useCallback(async (repoPath: string) => {
+    setPullState((prev) => new Map(prev).set(repoPath, { status: 'loading' }));
+    setPushState((prev) => { const n = new Map(prev); n.delete(repoPath); return n; });
+    try {
+      await invoke('git_pull', { repoPath });
+      setPullState((prev) => new Map(prev).set(repoPath, { status: 'success' }));
+      loadCommits(repoPath);
+      loadBranches(repoPath);
+    } catch (e) {
+      setPullState((prev) => new Map(prev).set(repoPath, { status: 'error', error: String(e) }));
+    }
+    setTimeout(() => {
+      setPullState((prev) => { const n = new Map(prev); n.delete(repoPath); return n; });
+    }, 1500);
+  }, [loadCommits, loadBranches]);
+
+  const handlePush = useCallback(async (repoPath: string) => {
+    setPushState((prev) => new Map(prev).set(repoPath, { status: 'loading' }));
+    setPullState((prev) => { const n = new Map(prev); n.delete(repoPath); return n; });
+    try {
+      await invoke('git_push', { repoPath });
+      setPushState((prev) => new Map(prev).set(repoPath, { status: 'success' }));
+      loadBranches(repoPath);
+    } catch (e) {
+      setPushState((prev) => new Map(prev).set(repoPath, { status: 'error', error: String(e) }));
+    }
+    setTimeout(() => {
+      setPushState((prev) => { const n = new Map(prev); n.delete(repoPath); return n; });
+    }, 1500);
+  }, [loadBranches]);
+
   useTauriEvent<PtyOutputPayload>(
     'pty-output',
     useCallback(
@@ -289,25 +375,43 @@ export function GitHistory() {
             style={{ top: `${depth * 30}px`, zIndex: 10 - depth }}
           >
             <div
-              className="flex items-center gap-1 w-full py-[5px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
-              style={{ paddingLeft: `${depth * 16 + 8}px` }}
+              className="group flex items-center justify-between w-full py-[5px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
+              style={{ paddingLeft: `${depth * 16 + 8}px`, paddingRight: '8px' }}
               onClick={() => toggleRepo(repo.path)}
             >
-              <span
-                className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
-                style={{
-                  transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
-                  display: 'inline-block',
-                }}
-              >
-                &#9662;
-              </span>
-              <span className="truncate font-medium">{node.name}</span>
-              {repo.currentBranch && (
-                <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
-                  {repo.currentBranch}
+              <div className="flex items-center gap-1 min-w-0">
+                <span
+                  className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
+                  style={{
+                    transform: isExpanded ? 'rotate(0deg)' : 'rotate(-90deg)',
+                    display: 'inline-block',
+                  }}
+                >
+                  &#9662;
                 </span>
-              )}
+                <span className="truncate font-medium">{node.name}</span>
+                {repo.currentBranch && (
+                  <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                    {repo.currentBranch}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                <GitActionButton
+                  repoPath={repo.path}
+                  action="pull"
+                  state={pullState.get(repo.path)}
+                  disabled={pullState.get(repo.path)?.status === 'loading' || pushState.get(repo.path)?.status === 'loading'}
+                  onClick={handlePull}
+                />
+                <GitActionButton
+                  repoPath={repo.path}
+                  action="push"
+                  state={pushState.get(repo.path)}
+                  disabled={pullState.get(repo.path)?.status === 'loading' || pushState.get(repo.path)?.status === 'loading'}
+                  onClick={handlePush}
+                />
+              </div>
             </div>
           </div>
 
