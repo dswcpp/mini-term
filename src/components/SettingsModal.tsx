@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../store';
 import { checkForUpdate, compareVersions, type ReleaseInfo } from '../utils/updateChecker';
 import { applyTheme } from '../utils/themeManager';
@@ -312,6 +313,43 @@ function SystemSettings() {
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
 
+  const [vscodePathDraft, setVscodePathDraft] = useState(config.vscodePath ?? '');
+
+  useEffect(() => {
+    setVscodePathDraft(config.vscodePath ?? '');
+  }, [config.vscodePath]);
+
+  const persistVscodePath = useCallback(
+    (value: string) => {
+      const trimmed = value.trim();
+      const current = useAppStore.getState().config.vscodePath ?? '';
+      if (trimmed === current) return;
+      const newConfig = {
+        ...useAppStore.getState().config,
+        vscodePath: trimmed ? trimmed : undefined,
+      };
+      setConfig(newConfig);
+      invoke('save_config', { config: newConfig });
+    },
+    [setConfig],
+  );
+
+  const handleBrowseVscodePath = useCallback(async () => {
+    const isWindows = navigator.userAgent.includes('Windows');
+    const selected = await openDialog({
+      title: '选择 VS Code 可执行文件',
+      multiple: false,
+      directory: false,
+      filters: isWindows
+        ? [{ name: 'VS Code', extensions: ['exe'] }]
+        : undefined,
+    });
+    if (typeof selected === 'string' && selected.trim()) {
+      setVscodePathDraft(selected);
+      persistVscodePath(selected);
+    }
+  }, [persistVscodePath]);
+
   const handleUiFontSizeChange = useCallback((size: number) => {
     const newConfig = { ...useAppStore.getState().config, uiFontSize: size };
     setConfig(newConfig);
@@ -437,6 +475,40 @@ function SystemSettings() {
             }`}
           />
         </button>
+      </div>
+
+      {/* 外部编辑器 */}
+      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
+        外部编辑器
+      </div>
+
+      <div className="px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] mb-6 space-y-2">
+        <div className="text-base text-[var(--text-primary)]">VS Code 可执行文件</div>
+        <div className="text-sm text-[var(--text-muted)]">
+          文件树右上角「用 VS Code 打开」按钮将使用此可执行文件
+        </div>
+        <div className="flex gap-2 items-center">
+          <input
+            type="text"
+            className="flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
+            placeholder="例如 C:\Users\xxx\AppData\Local\Programs\Microsoft VS Code\Code.exe"
+            value={vscodePathDraft}
+            onChange={(e) => setVscodePathDraft(e.target.value)}
+            onBlur={() => persistVscodePath(vscodePathDraft)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.currentTarget.blur();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="px-3 py-1 text-base bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all flex-shrink-0"
+            onClick={handleBrowseVscodePath}
+          >
+            浏览…
+          </button>
+        </div>
       </div>
 
       <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">

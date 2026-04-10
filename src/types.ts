@@ -25,6 +25,7 @@ export interface AppConfig {
   terminalFollowTheme: boolean;
   aiCompletionPopup: boolean;
   aiCompletionTaskbarFlash: boolean;
+  vscodePath?: string;
 }
 
 export interface ProjectConfig {
