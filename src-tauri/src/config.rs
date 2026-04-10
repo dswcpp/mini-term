@@ -53,6 +53,10 @@ pub struct AppConfig {
     pub theme: String,
     #[serde(default = "default_terminal_follow_theme")]
     pub terminal_follow_theme: bool,
+    #[serde(default = "default_ai_completion_popup")]
+    pub ai_completion_popup: bool,
+    #[serde(default = "default_ai_completion_taskbar_flash")]
+    pub ai_completion_taskbar_flash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +130,12 @@ fn default_theme() -> String {
 fn default_terminal_follow_theme() -> bool {
     true
 }
+fn default_ai_completion_popup() -> bool {
+    true
+}
+fn default_ai_completion_taskbar_flash() -> bool {
+    true
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -142,6 +152,8 @@ impl Default for AppConfig {
             middle_column_sizes: None,
             theme: default_theme(),
             terminal_follow_theme: default_terminal_follow_theme(),
+            ai_completion_popup: default_ai_completion_popup(),
+            ai_completion_taskbar_flash: default_ai_completion_taskbar_flash(),
         }
     }
 }
