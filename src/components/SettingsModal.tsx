@@ -423,7 +423,7 @@ function SystemSettings() {
       <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] mb-6">
         <div>
           <div className="text-base text-[var(--text-primary)]">AI 完成任务栏闪烁</div>
-          <div className="text-sm text-[var(--text-muted)]">AI 任务结束且窗口失焦时闪烁任务栏图标（Windows 主要支持）</div>
+          <div className="text-sm text-[var(--text-muted)]">AI 任务结束且窗口失焦时请求用户注意（Windows 闪烁任务栏，macOS 跳动 Dock）</div>
         </div>
         <button
           className={`relative w-9 h-5 rounded-full transition-colors ${
