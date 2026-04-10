@@ -19,7 +19,7 @@ Tag 在用户激活该项目时清除。当前正在浏览的项目不触发 Tag
 | | Tag (DONE 胶囊) | Toast (右下弹框) | 任务栏闪烁 |
 |---|---|---|---|
 | 性质 | 持久状态 | 临时事件 | 一次性副作用 |
-| 存储 | `ProjectState.needsAttention: boolean` | `notifications: Notification[]` (store 切片) | 无（直接调 Tauri API） |
+| 存储 | `ProjectState.needsAttention: boolean` | `notifications: AiCompletionNotification[]` (store 切片) | 无（直接调 Tauri API） |
 | 触发 | pty `ai-working` → `ai-idle` 且非激活项目 | 同 Tag + 配置开关为 ON | pty `ai-working` → `ai-idle` + 配置开关为 ON（不区分激活项目） |
 | 聚焦时行为 | 正常（如果不是该项目激活） | 正常（如果不是该项目激活） | Tauri API 自动忽略 |
 | 清除 | `setActiveProject(pid)` | 5s 倒计时 / × / 点击跳转 | 用户聚焦窗口时 OS 自动解除 |
@@ -38,8 +38,8 @@ export interface ProjectState {
   needsAttention?: boolean;  // 新增
 }
 
-// 新增 Notification 类型
-export interface Notification {
+// 新增 AiCompletionNotification 类型
+export interface AiCompletionNotification {
   id: string;
   projectId: string;
   projectName: string;
@@ -59,29 +59,40 @@ export interface AppConfig {
 `AppConfig` struct (行 34-56) 加：
 
 ```rust
-#[serde(default = "default_true")]
+#[serde(default = "default_ai_completion_popup")]
 pub ai_completion_popup: bool,
 
-#[serde(default = "default_true")]
+#[serde(default = "default_ai_completion_taskbar_flash")]
 pub ai_completion_taskbar_flash: bool,
 ```
 
-`Default` 实现 (行 130-147) 中两者都设为 `true`。需要新增 `default_true` helper 函数（如已有则复用）。
+新增两个 helper 函数（与现有 `default_terminal_follow_theme` 风格一致）：
+
+```rust
+fn default_ai_completion_popup() -> bool { true }
+fn default_ai_completion_taskbar_flash() -> bool { true }
+```
+
+`Default` 实现 (行 130-147) 中调用这两个函数初始化字段。
 
 ## 前端实现
 
 ### `src/store.ts`
+
+**顶层 import：** 在文件头部新增 `import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';`（该模块已在 `App.tsx:5` 静态使用，所以再加一处不会增加 bundle 体积）。
 
 **新增 store 切片：**
 
 ```typescript
 interface AppStore {
   // ... 现有
-  notifications: Notification[];
-  pushNotification: (n: Omit<Notification, 'id' | 'timestamp'>) => void;
+  notifications: AiCompletionNotification[];
+  pushNotification: (n: Omit<AiCompletionNotification, 'id' | 'timestamp'>) => void;
   dismissNotification: (id: string) => void;
 }
 ```
+
+`pushNotification` 实现内部使用 `genId()`（已从 store.ts 顶层导出）生成 `id`，`Date.now()` 生成 `timestamp`，再 push 到 `state.notifications`。
 
 **修改 `updatePaneStatusByPty` (行 436-464)：**
 
@@ -114,10 +125,9 @@ updatePaneStatusByPty: (ptyId, status) =>
     if (isCompletion) {
       // 3a. 任务栏闪烁 — 不区分激活项目，因为 Tauri API 自带 focus 检测
       if (state.config.aiCompletionTaskbarFlash) {
+        // getCurrentWindow / UserAttentionType 已在 store.ts 顶层 import
         queueMicrotask(() => {
-          import('@tauri-apps/api/window').then(({ getCurrentWindow, UserAttentionType }) => {
-            getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
-          });
+          getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
         });
       }
 
@@ -472,5 +482,4 @@ export function ToastContainer() {
 - **Map 浅拷贝**：`needsAttention` 变更必须创建新的 `ProjectState` 对象（`{ ...ps, needsAttention: true }`），否则 React 不会重渲染 `ProjectList`
 - **Toast 卸载**：`useEffect` 中的 `setTimeout` 必须在依赖变化和 unmount 时清理，否则会在已 dismiss 的 toast 上重复调用
 - **防重逻辑的微妙性**：toast 防重用 `notifications.some(...)` 检查，意味着同项目快速完成两次只显示一次。这是有意的（防刷屏），但用户若需要每次都通知则要重新讨论
-- **Tauri API 异步导入**：`@tauri-apps/api/window` 在 `store.ts` 内动态 `import()` 是为了避免在 store 初始化时立即解析，防止 Vite 在 SSR 或测试环境下报错。如果项目已在其他地方静态导入该模块，可以改成顶层 import 减少一次 chunk 加载
-- **Linux 兼容性**：`requestUserAttention` 在 Linux 上的行为依赖窗口管理器（GNOME/KDE 等），可能完全无效或表现不一致。配置开关默认开启可能会让 Linux 用户疑惑"为什么没反应"——但因主要目标是 Windows，且 API 调用本身是 no-op 不会出错，可以在 Settings UI 的描述中标注"主要适用于 Windows"
+- **Linux 兼容性**：`requestUserAttention` 在 Linux 上的行为依赖窗口管理器（GNOME/KDE 等），可能完全无效或表现不一致。配置开关默认开启可能会让 Linux 用户疑惑"为什么没反应"——但因主要目标是 Windows，且 API 调用本身是 no-op 不会出错，已在 Settings UI 的描述中标注"Windows 主要支持"
