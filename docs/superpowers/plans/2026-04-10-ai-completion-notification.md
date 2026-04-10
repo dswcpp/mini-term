@@ -134,9 +134,9 @@ export interface AiCompletionNotification {
 Run: `cd D:/Git/mini-term && npx tsc --noEmit 2>&1`
 Expected: 无输出（成功）或仅有与本任务无关的预存错误。**不能引入新错误**。
 
-> 如果出现 `Property 'aiCompletionPopup' is missing in type` 之类错误，是因为 store 初始 config 还没加新字段——这是 Task 3 的工作，但为了让 Task 2 的 commit 也能编译通过，跳到 Task 3 Step 1（"在初始 config 中添加字段"）先做完，再回来 commit Task 2 + 3 Step 1 一起。或者直接合并 Task 2 + Task 3 Step 1 的改动到一个 commit。
+> 如果出现 `Property 'aiCompletionPopup' is missing in type` 之类错误，是因为 store 初始 config 还没加新字段——这是 Task 3 Step 3 的工作。为了让 Task 2 的 commit 也能编译通过，跳到 Task 3 Step 3（"扩展初始 config 包含两个新字段"）先做完，再把 Task 2 + Task 3 Step 3 的改动合并到同一个 commit。或者直接按顺序连续完成 Task 2 + 整个 Task 3 后再 commit。
 
-- [ ] **Step 5: 提交（可能与 Task 3 Step 1 合并）**
+- [ ] **Step 5: 提交（可能与 Task 3 Step 3 合并）**
 
 ```bash
 cd D:/Git/mini-term && git add src/types.ts && git commit -m "$(cat <<'EOF'
@@ -150,22 +150,18 @@ EOF
 
 ---
 
-### Task 3: store.ts — notifications 切片 + 初始 config + Tauri import
+### Task 3: store.ts — notifications 切片 + 初始 config
 
 **Files:**
-- Modify: `src/store.ts:1-26` (imports)
+- Modify: `src/store.ts:1-16` (types import)
 - Modify: `src/store.ts:291-319` (`AppStore` interface)
 - Modify: `src/store.ts:321-331` (初始 state)
 
-- [ ] **Step 1: 扩展 imports**
+> **依赖说明：** Tauri window API 的 import 不在此 Task 添加（会因 `noUnusedLocals: true` 触发未使用编译错误），统一在 Task 4 Step 1 添加（与首次使用同步）。
 
-修改 `src/store.ts` 第 1-2 行附近，在现有 import 之后追加：
+- [ ] **Step 1: 在 types import 中加入 AiCompletionNotification**
 
-```typescript
-import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
-```
-
-并在 types import 中加入 `AiCompletionNotification`：
+在 `src/store.ts` 第 3-16 行的 types import 块中加入 `AiCompletionNotification`：
 
 ```typescript
 import type {
@@ -253,7 +249,6 @@ cd D:/Git/mini-term && git add src/store.ts && git commit -m "$(cat <<'EOF'
 feat: store 新增 notifications 切片支持 AI 完成 toast
 - 引入 AiCompletionNotification 类型并在 AppStore 中暴露 notifications 数组
 - 实现 pushNotification 和 dismissNotification 操作方法
-- 顶层 import getCurrentWindow / UserAttentionType 备 transition 检测使用
 - 初始 config 补充 aiCompletionPopup 和 aiCompletionTaskbarFlash 默认值
 EOF
 )"
@@ -264,16 +259,24 @@ EOF
 ### Task 4: store.ts — transition 检测 + 清除逻辑
 
 **Files:**
-- Modify: `src/store.ts:39-49` 附近 (新增 `findPaneByPty` helper)
+- Modify: `src/store.ts:1-2` 附近 (Tauri import)
+- Modify: `src/store.ts:72` 之后 (新增 `findPaneByPty` helper)
 - Modify: `src/store.ts:336` (`setActiveProject`)
 - Modify: `src/store.ts:356-376` (`removeProject`)
 - Modify: `src/store.ts:436-464` (`updatePaneStatusByPty`)
 
-- [ ] **Step 1: 添加 findPaneByPty helper 函数**
+- [ ] **Step 1: 添加 Tauri window API import 和 findPaneByPty helper**
 
-在 `src/store.ts` 第 67 行（`collectPtyIds` 函数之后）插入：
+**1a. 添加 Tauri import：** 在 `src/store.ts` 第 1-2 行附近（紧跟 `import { create } from 'zustand';` 和 `import { invoke } from '@tauri-apps/api/core';` 之后）追加一行：
 
 ```typescript
+import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
+```
+
+**1b. 添加 findPaneByPty helper：** 在 `src/store.ts` 第 72 行（`collectPtyIds` 函数最后一个 `}` 之后）插入空行 + 函数：
+
+```typescript
+
 // 查找 ptyId 所属的 pane（按 SplitNode 树深搜）
 function findPaneByPty(node: SplitNode, ptyId: number): PaneState | null {
   if (node.type === 'leaf') {
