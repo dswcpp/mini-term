@@ -13,6 +13,7 @@ import type {
   SavedSplitNode,
   SavedTab,
   SavedProjectLayout,
+  AiCompletionNotification,
 } from './types';
 import {
   deepCloneTree,
@@ -310,6 +311,11 @@ interface AppStore {
   // Pane 状态
   updatePaneStatusByPty: (ptyId: number, status: PaneStatus) => void;
 
+  // Notifications
+  notifications: AiCompletionNotification[];
+  pushNotification: (n: Omit<AiCompletionNotification, 'id' | 'timestamp'>) => void;
+  dismissNotification: (id: string) => void;
+
   // 分组
   createGroup: (name: string, parentGroupId?: string) => void;
   removeGroup: (groupId: string) => void;
@@ -334,6 +340,7 @@ export const useAppStore = create<AppStore>((set) => ({
 
   activeProjectId: null,
   projectStates: new Map(),
+  notifications: [],
 
   setActiveProject: (id) => set({ activeProjectId: id }),
 
@@ -464,6 +471,19 @@ export const useAppStore = create<AppStore>((set) => ({
       }
       return changed ? { projectStates: newStates } : state;
     }),
+
+  pushNotification: (n) =>
+    set((state) => ({
+      notifications: [
+        ...state.notifications,
+        { ...n, id: genId(), timestamp: Date.now() },
+      ],
+    })),
+
+  dismissNotification: (id) =>
+    set((state) => ({
+      notifications: state.notifications.filter((x) => x.id !== id),
+    })),
 
   createGroup: (name, parentGroupId) =>
     set((state) => {
