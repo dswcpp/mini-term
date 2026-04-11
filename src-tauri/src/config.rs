@@ -319,13 +319,18 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
     config
 }
 
-#[tauri::command]
-pub fn load_config(app: AppHandle) -> AppConfig {
-    let path = config_path(&app);
+/// 从磁盘加载并迁移配置。供后端内部调用(例如 editor.rs 读取 vscode_path)。
+pub fn read_config(app: &AppHandle) -> AppConfig {
+    let path = config_path(app);
     match fs::read_to_string(&path) {
         Ok(content) => migrate_config(serde_json::from_str(&content).unwrap_or_default()),
         Err(_) => migrate_config(AppConfig::default()),
     }
+}
+
+#[tauri::command]
+pub fn load_config(app: AppHandle) -> AppConfig {
+    read_config(&app)
 }
 
 #[tauri::command]

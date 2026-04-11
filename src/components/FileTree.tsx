@@ -250,8 +250,8 @@ export function FileTree() {
 
   const handleOpenInVscode = useCallback(async () => {
     if (!project) return;
-    const executable = (config.vscodePath ?? '').trim();
-    if (!executable) {
+    // 前端做一次快速预检查(避免无意义的 invoke),后端会权威地再读一次 config
+    if (!(config.vscodePath ?? '').trim()) {
       await message(
         '请先在『设置 → 系统设置 → 外部编辑器』中配置 VS Code 可执行文件路径。',
         { title: '未配置 VS Code 路径', kind: 'warning' },
@@ -259,7 +259,7 @@ export function FileTree() {
       return;
     }
     try {
-      await invoke('open_in_vscode', { path: project.path, executable });
+      await invoke('open_in_vscode', { path: project.path });
     } catch (err) {
       const detail = typeof err === 'string' ? err : String(err);
       console.error('打开 VS Code 失败:', err);
