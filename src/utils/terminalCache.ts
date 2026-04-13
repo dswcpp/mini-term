@@ -237,11 +237,17 @@ async function clipboardHasImage(): Promise<boolean> {
   return false;
 }
 
-/** 读取系统剪贴板并写入终端 PTY。剪贴板含图片时发送 Alt+V 让 AI 工具处理。 */
+/** 读取系统剪贴板并写入终端 PTY。剪贴板含图片时保存为 temp PNG 粘贴路径，或发送 Alt+V。 */
 export async function pasteToTerminal(ptyId: number): Promise<void> {
   if (await clipboardHasImage()) {
-    // 发送 Alt+V 转义序列（ESC v），Codex 等 TUI 会捕获该按键
-    // 并通过 arboard 自行读取系统剪贴板中的图片数据
+    // 优先：Win32 API 读取图片保存为 temp PNG，粘贴文件路径
+    // 兼容 PinPix 等 arboard 无法读取的非标准剪贴板格式
+    try {
+      const path: string = await invoke('read_clipboard_image');
+      await enqueuePtyWrite(ptyId, path);
+      return;
+    } catch { /* Win32 也读不到，回退 Alt+V */ }
+    // 回退：发送 Alt+V 转义序列让 AI 工具自行处理
     await enqueuePtyWrite(ptyId, '\x1bv');
     return;
   }

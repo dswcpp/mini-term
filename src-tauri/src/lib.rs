@@ -1,4 +1,5 @@
 mod ai_sessions;
+mod clipboard;
 mod config;
 mod editor;
 mod fs;
@@ -48,6 +49,7 @@ pub fn run() {
             git::git_pull,
             git::git_push,
             editor::open_in_vscode,
+            clipboard::read_clipboard_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
