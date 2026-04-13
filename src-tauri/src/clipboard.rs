@@ -196,6 +196,20 @@ mod win {
     }
 }
 
+/// 清理 temp 目录中超过 24 小时的剪贴板截图文件，启动时调用一次。
+pub fn cleanup_old_clipboard_images() {
+    let dir = std::env::temp_dir().join("mini-term-clipboard");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        if modified < cutoff {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[tauri::command]
 pub fn read_clipboard_image() -> Result<String, String> {
     #[cfg(windows)]
