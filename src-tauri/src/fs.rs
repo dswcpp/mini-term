@@ -27,6 +27,15 @@ fn build_gitignore(project_root: &Path) -> Option<Gitignore> {
 
 const ALWAYS_IGNORE: &[&str] = &[".git", "node_modules", "target", ".next", "dist", "__pycache__", ".superpowers"];
 
+/// 过滤出有效的目录路径（用于拖拽添加项目时验证）
+#[tauri::command]
+pub fn filter_directories(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|p| Path::new(p).is_dir())
+        .collect()
+}
+
 #[cfg(test)]
 fn should_ignore(name: &str, full_path: &Path, is_dir: bool, gitignore: &Option<Gitignore>) -> bool {
     if is_dir && ALWAYS_IGNORE.contains(&name) {

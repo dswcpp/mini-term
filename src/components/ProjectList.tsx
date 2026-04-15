@@ -1,7 +1,8 @@
-import { useCallback, useState, useRef } from 'react';
+import { useCallback, useState, useRef, useEffect } from 'react';
 import { Allotment } from 'allotment';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { useAppStore, genId } from '../store';
 import { StatusDot } from './StatusDot';
@@ -54,11 +55,90 @@ export function ProjectList() {
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const [fileDragKind, setFileDragKind] = useState<'valid' | 'forbidden' | 'duplicate' | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const editProjectInputRef = useRef<HTMLInputElement>(null);
+  const projectListRef = useRef<HTMLDivElement>(null);
 
   const orderedItems = getOrderedTree(config);
   const allGroups = collectAllGroups(config.projectTree ?? []);
+
+  // === 系统文件拖放（从资源管理器拖入文件夹添加项目） ===
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    const isOverProjectList = (position: { x: number; y: number }): boolean => {
+      if (!projectListRef.current) return false;
+      const rect = projectListRef.current.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      const x = position.x / scale;
+      const y = position.y / scale;
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    };
+
+    const onDrop = async (paths: string[]) => {
+      const dirPaths: string[] = await invoke('filter_directories', { paths });
+      if (dirPaths.length === 0) return;
+
+      const { config: cfg, addProject: add, setActiveProject: setActive } = useAppStore.getState();
+      let addedAny = false;
+      let existingId: string | undefined;
+
+      for (const dirPath of dirPaths) {
+        const existing = cfg.projects.find((p) => p.path === dirPath);
+        if (existing) {
+          existingId = existing.id;
+          continue;
+        }
+        const name = dirPath.split(/[/\\]/).pop() || dirPath;
+        add({ id: genId(), name, path: dirPath });
+        addedAny = true;
+      }
+
+      if (addedAny) {
+        saveConfig();
+      } else if (existingId) {
+        setActive(existingId);
+      }
+    };
+
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const { payload } = event;
+        if (payload.type === 'enter') {
+          setIsFileDragOver(isOverProjectList(payload.position));
+          // 异步检测：文件 vs 文件夹 vs 重复
+          invoke<string[]>('filter_directories', { paths: payload.paths }).then((dirPaths) => {
+            if (dirPaths.length === 0) {
+              setFileDragKind('forbidden');
+            } else {
+              const { config: cfg } = useAppStore.getState();
+              const allDuplicate = dirPaths.every((p) => cfg.projects.some((proj) => proj.path === p));
+              setFileDragKind(allDuplicate ? 'duplicate' : 'valid');
+            }
+          });
+        } else if (payload.type === 'over') {
+          setIsFileDragOver(isOverProjectList(payload.position));
+        } else if (payload.type === 'drop') {
+          setIsFileDragOver(false);
+          setFileDragKind(null);
+          if (isOverProjectList(payload.position)) {
+            onDrop(payload.paths);
+          }
+        } else {
+          setIsFileDragOver(false);
+          setFileDragKind(null);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const handleAddProject = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -440,7 +520,30 @@ export function ProjectList() {
       <Allotment vertical>
         {/* 上半部分：项目列表 */}
         <Allotment.Pane minSize={100}>
-          <div className="h-full flex flex-col overflow-hidden">
+          <div ref={projectListRef} className="relative h-full flex flex-col overflow-hidden">
+            {isFileDragOver && (
+              <div className={`absolute inset-0 z-20 border-2 border-dashed rounded-[var(--radius-md)] flex items-center justify-center pointer-events-none ${
+                fileDragKind === 'forbidden'
+                  ? 'bg-[var(--color-error)]/10 border-[var(--color-error)]'
+                  : fileDragKind === 'duplicate'
+                    ? 'bg-[var(--color-warning,#f59e0b)]/10 border-[var(--color-warning,#f59e0b)]'
+                    : 'bg-[var(--accent)]/10 border-[var(--accent)]'
+              }`}>
+                <span className={`text-sm font-medium ${
+                  fileDragKind === 'forbidden'
+                    ? 'text-[var(--color-error)]'
+                    : fileDragKind === 'duplicate'
+                      ? 'text-[var(--color-warning,#f59e0b)]'
+                      : 'text-[var(--accent)]'
+                }`}>
+                  {fileDragKind === 'forbidden'
+                    ? '仅支持拖入文件夹'
+                    : fileDragKind === 'duplicate'
+                      ? '项目已存在，松手切换'
+                      : '拖放文件夹以添加项目'}
+                </span>
+              </div>
+            )}
             <div
               className="px-3 pt-3 pb-1.5 text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium cursor-default"
               onContextMenu={(e) => {

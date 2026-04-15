@@ -72,6 +72,19 @@ export function App() {
     });
   }, []);
 
+  // 阻止浏览器默认的文件拖放行为（防止导航到拖入的文件）
+  useEffect(() => {
+    const prevent = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+    };
+    document.addEventListener('dragover', prevent);
+    document.addEventListener('drop', prevent);
+    return () => {
+      document.removeEventListener('dragover', prevent);
+      document.removeEventListener('drop', prevent);
+    };
+  }, []);
+
   // 主题变化时应用新主题
   useEffect(() => {
     applyTheme(config.theme ?? 'auto');
