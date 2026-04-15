@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { GitHistoryContent } from './GitHistoryContent';
@@ -17,6 +17,8 @@ export function GitHistory() {
   // 仓库选择器状态 — 提升到容器层，两个 tab 共享
   const [repos, setRepos] = useState<GitRepoInfo[]>([]);
   const [selectedRepo, setSelectedRepo] = useState<string>('');
+  const [repoDropdownOpen, setRepoDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   const loadRepos = useCallback(() => {
     if (!project) return;
@@ -35,11 +37,25 @@ export function GitHistory() {
     loadRepos();
   }, [loadRepos]);
 
+  // 点击外部关闭下拉
+  useEffect(() => {
+    if (!repoDropdownOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setRepoDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [repoDropdownOpen]);
+
   // commit 成功后 Changes tab 通知容器刷新 History
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0);
   const onCommitSuccess = useCallback(() => {
     setHistoryRefreshKey((k) => k + 1);
   }, []);
+
+  const selectedRepoInfo = repos.find((r) => r.path === selectedRepo);
 
   if (!project) {
     return (
@@ -70,18 +86,54 @@ export function GitHistory() {
 
       {/* 仓库选择器（仅 Changes tab + 多仓库时显示） */}
       {activeTab === 'changes' && repos.length > 1 && (
-        <div className="px-3 pt-2 pb-0 flex-shrink-0">
-          <select
-            className="w-full text-sm bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-default)] rounded px-2 py-1"
-            value={selectedRepo}
-            onChange={(e) => setSelectedRepo(e.target.value)}
+        <div className="px-2 pt-2 pb-0 flex-shrink-0 relative" ref={dropdownRef}>
+          <div
+            className="flex items-center justify-between w-full py-[5px] px-2 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-sm transition-colors duration-100 text-[var(--color-folder)]"
+            onClick={() => setRepoDropdownOpen((v) => !v)}
           >
-            {repos.map((r) => (
-              <option key={r.path} value={r.path}>
-                {r.name} {r.currentBranch ? `(${r.currentBranch})` : ''}
-              </option>
-            ))}
-          </select>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
+                style={{
+                  transform: repoDropdownOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
+                  display: 'inline-block',
+                }}
+              >
+                &#9662;
+              </span>
+              <span className="truncate font-medium">{selectedRepoInfo?.name ?? '选择仓库'}</span>
+              {selectedRepoInfo?.currentBranch && (
+                <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                  {selectedRepoInfo.currentBranch}
+                </span>
+              )}
+            </div>
+          </div>
+          {repoDropdownOpen && (
+            <div className="absolute left-2 right-2 z-20 mt-0.5 bg-[var(--bg-elevated)] border border-[var(--border-default)] rounded-[var(--radius-sm)] shadow-[var(--shadow-overlay)] overflow-hidden">
+              {repos.map((r) => (
+                <div
+                  key={r.path}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-sm cursor-pointer transition-colors duration-100 ${
+                    r.path === selectedRepo
+                      ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                      : 'text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
+                  }`}
+                  onClick={() => {
+                    setSelectedRepo(r.path);
+                    setRepoDropdownOpen(false);
+                  }}
+                >
+                  <span className="truncate">{r.name}</span>
+                  {r.currentBranch && (
+                    <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                      {r.currentBranch}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
