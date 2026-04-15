@@ -16,9 +16,11 @@ export function TerminalInstance({ ptyId }: Props) {
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
   const terminalFollowTheme = useAppStore((s) => s.config.terminalFollowTheme);
 
-  // 终端不跟随主题且处于浅色模式时，面板背景强制深色
+  // 终端不跟随主题且处于浅色模式时，覆写 CSS 变量让整个终端区域（含 .xterm）统一深色
   const forceDarkBg = !terminalFollowTheme && getResolvedTheme() === 'light';
-  const panelBg = forceDarkBg ? DARK_TERMINAL_THEME.background : undefined;
+  const termStyle = forceDarkBg
+    ? { '--bg-terminal': DARK_TERMINAL_THEME.background } as React.CSSProperties
+    : undefined;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -128,7 +130,7 @@ export function TerminalInstance({ ptyId }: Props) {
     <div className="w-full h-full flex flex-col">
       <div
         className="flex-1 relative bg-[var(--bg-terminal)]"
-        style={panelBg ? { backgroundColor: panelBg } : undefined}
+        style={termStyle}
         onDragOverCapture={handleDragOver}
         onDragLeaveCapture={handleDragLeave}
         onDropCapture={handleDrop}

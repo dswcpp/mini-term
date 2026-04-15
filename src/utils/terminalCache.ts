@@ -102,8 +102,8 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
   wrapper.style.height = '100%';
 
   const theme = getTerminalTheme(useAppStore.getState().config.terminalFollowTheme ?? true);
-  // 预设背景色，防止 WebGL canvas 首帧渲染前闪白
-  wrapper.style.backgroundColor = theme.background!;
+  // 预设背景色，防止首帧渲染前闪屏；始终跟随系统主题 CSS 变量
+  wrapper.style.backgroundColor = 'var(--bg-terminal)';
 
   const term = new Terminal({
     fontSize: useAppStore.getState().config.terminalFontSize ?? 14,
