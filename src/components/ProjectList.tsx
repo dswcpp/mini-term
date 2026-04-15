@@ -172,12 +172,12 @@ export function ProjectList() {
       if (node.type === 'leaf') return node.panes.some((p) => p.status === target);
       return node.children.some((c) => hasPaneWith(c, target));
     };
-    let hasAiWorking = false;
+    let hasAiIdle = false;
     for (const tab of ps.tabs) {
-      if (hasPaneWith(tab.splitLayout, 'ai-idle')) return 'ai-idle';
-      if (hasPaneWith(tab.splitLayout, 'ai-working')) hasAiWorking = true;
+      if (hasPaneWith(tab.splitLayout, 'ai-working')) return 'ai-working';
+      if (hasPaneWith(tab.splitLayout, 'ai-idle')) hasAiIdle = true;
     }
-    return hasAiWorking ? 'ai-working' : 'idle';
+    return hasAiIdle ? 'ai-idle' : 'idle';
   };
 
   // 创建分组
