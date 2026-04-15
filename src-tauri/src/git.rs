@@ -968,3 +968,95 @@ pub fn git_pull(repo_path: String) -> Result<String, String> {
 pub fn git_push(repo_path: String) -> Result<String, String> {
     run_git_network_command(&repo_path, "push")
 }
+
+#[tauri::command]
+pub fn git_stage(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    for file in &files {
+        let path = Path::new(file);
+        let abs_path = repo.workdir().ok_or("bare repo")?.join(path);
+        if abs_path.exists() {
+            index.add_path(path).map_err(|e| e.to_string())?;
+        } else {
+            // 文件已删除，需要从 index 移除
+            index.remove_path(path).map_err(|e| e.to_string())?;
+        }
+    }
+    index.write().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+
+    let head = match repo.head() {
+        Ok(h) => Some(h.peel_to_commit().map_err(|e| e.to_string())?),
+        Err(_) => None, // empty repo, no HEAD
+    };
+
+    if let Some(ref commit) = head {
+        for file in &files {
+            repo.reset_default(Some(commit.as_object()), [file.as_str()])
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        // empty repo: 批量从 index 移除，最后一次 write
+        let mut index = repo.index().map_err(|e| e.to_string())?;
+        for file in &files {
+            index.remove_path(Path::new(file)).map_err(|e| e.to_string())?;
+        }
+        index.write().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_stage_all(repo_path: String) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .map_err(|e| e.to_string())?;
+
+    // 处理已删除的文件：遍历 index，移除工作区中不存在的文件
+    let workdir = repo.workdir().ok_or("bare repo")?;
+    let entries: Vec<String> = index
+        .iter()
+        .filter_map(|e| {
+            let path = String::from_utf8_lossy(&e.path).to_string();
+            if !workdir.join(&path).exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for path in entries {
+        index.remove_path(Path::new(&path)).map_err(|e| e.to_string())?;
+    }
+
+    index.write().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage_all(repo_path: String) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+
+    match repo.head() {
+        Ok(head) => {
+            let commit = head.peel_to_commit().map_err(|e| e.to_string())?;
+            repo.reset(commit.as_object(), git2::ResetType::Mixed, None)
+                .map_err(|e| e.to_string())?;
+        }
+        Err(_) => {
+            // empty repo: 清空整个 index
+            let mut index = repo.index().map_err(|e| e.to_string())?;
+            index.clear().map_err(|e| e.to_string())?;
+            index.write().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
