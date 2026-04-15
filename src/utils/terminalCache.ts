@@ -31,10 +31,10 @@ interface CachedEntry extends CachedTerminal {
 }
 
 export const DARK_TERMINAL_THEME = {
-  background: '#100f0d',
+  background: '#0a0908',
   foreground: '#d8d4cc',
   cursor: '#c8805a',
-  cursorAccent: '#100f0d',
+  cursorAccent: '#0a0908',
   selectionBackground: '#c8805a30',
   selectionForeground: '#e5e0d8',
   black: '#2a2824',

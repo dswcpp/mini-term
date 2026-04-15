@@ -5,11 +5,11 @@
 
 :root {
   /* Background layers - warm charcoal */
-  --bg-base: #0e0d0b;
-  --bg-surface: #161513;
-  --bg-elevated: #1e1c19;
-  --bg-overlay: #262421;
-  --bg-terminal: #100f0d;
+  --bg-base: #080706;
+  --bg-surface: #121110;
+  --bg-elevated: #1c1a18;
+  --bg-overlay: #252320;
+  --bg-terminal: #0a0908;
 
   /* Accent - warm copper */
   --accent: #c8805a;
@@ -17,9 +17,9 @@
   --accent-subtle: #c8805a18;
 
   /* Text */
-  --text-primary: #e5e0d8;
-  --text-secondary: #9a9488;
-  --text-muted: #5c5850;
+  --text-primary: #f0ece6;
+  --text-secondary: #a8a098;
+  --text-muted: #6a6258;
 
   /* Borders */
   --border-subtle: rgba(255, 255, 255, 0.05);
@@ -58,9 +58,9 @@
   --accent-muted: #b0683033;
   --accent-subtle: #b0683018;
 
-  --text-primary: #1a1a1a;
-  --text-secondary: #666666;
-  --text-muted: #999999;
+  --text-primary: #0a0a0a;
+  --text-secondary: #505050;
+  --text-muted: #808080;
 
   --border-subtle: rgba(0,0,0,0.06);
   --border-default: rgba(0,0,0,0.10);
