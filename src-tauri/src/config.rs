@@ -61,6 +61,14 @@ pub struct AppConfig {
     pub vscode_path: Option<String>,
     #[serde(default = "default_git_changes_view_mode")]
     pub git_changes_view_mode: String,
+    #[serde(default = "default_true")]
+    pub projects_visible: bool,
+    #[serde(default = "default_true")]
+    pub sessions_visible: bool,
+    #[serde(default = "default_true")]
+    pub files_visible: bool,
+    #[serde(default = "default_true")]
+    pub git_visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +151,9 @@ fn default_ai_completion_taskbar_flash() -> bool {
 fn default_git_changes_view_mode() -> String {
     "list".into()
 }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -163,6 +174,10 @@ impl Default for AppConfig {
             ai_completion_taskbar_flash: default_ai_completion_taskbar_flash(),
             vscode_path: None,
             git_changes_view_mode: default_git_changes_view_mode(),
+            projects_visible: true,
+            sessions_visible: true,
+            files_visible: true,
+            git_visible: true,
         }
     }
 }

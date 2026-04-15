@@ -515,11 +515,14 @@ export function ProjectList() {
     );
   };
 
+  const projectsVisible = config.projectsVisible;
+  const sessionsVisible = config.sessionsVisible;
+
   return (
     <div className="h-full bg-[var(--bg-surface)] flex flex-col">
       <Allotment vertical>
         {/* 上半部分：项目列表 */}
-        <Allotment.Pane minSize={100}>
+        <Allotment.Pane minSize={100} visible={projectsVisible}>
           <div ref={projectListRef} className="relative h-full flex flex-col overflow-hidden">
             {isFileDragOver && (
               <div className={`absolute inset-0 z-20 border-2 border-dashed rounded-[var(--radius-md)] flex items-center justify-center pointer-events-none ${
@@ -583,7 +586,7 @@ export function ProjectList() {
         </Allotment.Pane>
 
         {/* 下半部分：会话列表 */}
-        <Allotment.Pane minSize={80}>
+        <Allotment.Pane minSize={80} visible={sessionsVisible}>
           <SessionList />
         </Allotment.Pane>
       </Allotment>

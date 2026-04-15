@@ -10,6 +10,7 @@ import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
 import { FileTree } from './components/FileTree';
 import { GitHistory } from './components/GitHistory';
+import { ActivityBar } from './components/ActivityBar';
 import { SettingsModal } from './components/SettingsModal';
 import { ToastContainer } from './components/ToastContainer';
 import { useTauriEvent } from './hooks/useTauriEvent';
@@ -140,6 +141,10 @@ export function App() {
     prevProjectRef.current = activeProjectId;
   }, [activeProjectId]);
 
+  // 派生：左栏/中栏是否可见
+  const leftColumnVisible = config.projectsVisible || config.sessionsVisible;
+  const middleColumnVisible = config.filesVisible || config.gitVisible;
+
   // 防抖保存布局尺寸
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const saveLayoutSizes = useCallback((sizes: number[]) => {
@@ -197,30 +202,37 @@ export function App() {
         <div className="flex-1" />
       </div>
 
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden flex">
+        {/* Activity Bar — 常驻最左侧 */}
+        {configLoaded && <ActivityBar />}
+
+        {/* 主内容区域 — Allotment 可拖拽 */}
         {configLoaded ? <Allotment
           defaultSizes={config.layoutSizes ?? [200, 280, 1000]}
           onChange={saveLayoutSizes}
         >
-          <Allotment.Pane minSize={140} maxSize={350}>
+          {/* 左栏：Projects + Sessions */}
+          <Allotment.Pane minSize={140} maxSize={350} visible={leftColumnVisible}>
             <ProjectList />
           </Allotment.Pane>
 
-          <Allotment.Pane minSize={180}>
+          {/* 中栏：FileTree + Git */}
+          <Allotment.Pane minSize={100} visible={middleColumnVisible}>
             <Allotment
               vertical
               defaultSizes={config.middleColumnSizes ?? [300, 200]}
               onChange={saveMiddleColumnSizes}
             >
-              <Allotment.Pane minSize={150}>
+              <Allotment.Pane minSize={150} visible={config.filesVisible}>
                 <FileTree key={activeProjectId} />
               </Allotment.Pane>
-              <Allotment.Pane minSize={36}>
+              <Allotment.Pane minSize={36} visible={config.gitVisible}>
                 <GitHistory key={activeProjectId} />
               </Allotment.Pane>
             </Allotment>
           </Allotment.Pane>
 
+          {/* 右栏：Terminal */}
           <Allotment.Pane>
             <div className="relative h-full">
               {config.projects.map((project) => (

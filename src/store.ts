@@ -31,14 +31,14 @@ let idCounter = 0;
 export const genId = () => `id-${Date.now()}-${++idCounter}`;
 
 // 计算 Tab 聚合状态
-const STATUS_PRIORITY: Record<PaneStatus, number> = {
+export const STATUS_PRIORITY: Record<PaneStatus, number> = {
   error: 3,
   'ai-working': 2,
   'ai-idle': 1,
   idle: 0,
 };
 
-function getHighestStatus(node: SplitNode): PaneStatus {
+export function getHighestStatus(node: SplitNode): PaneStatus {
   if (node.type === 'leaf') {
     return node.panes.reduce<PaneStatus>((acc, p) => {
       return STATUS_PRIORITY[p.status] > STATUS_PRIORITY[acc] ? p.status : acc;
@@ -329,6 +329,9 @@ interface AppStore {
   pushNotification: (n: Omit<AiCompletionNotification, 'id' | 'timestamp'>) => void;
   dismissNotification: (id: string) => void;
 
+  // 面板显隐
+  togglePanel: (panel: 'projects' | 'sessions' | 'files' | 'git') => void;
+
   // 分组
   createGroup: (name: string, parentGroupId?: string) => void;
   removeGroup: (groupId: string) => void;
@@ -349,6 +352,10 @@ export const useAppStore = create<AppStore>((set) => ({
     aiCompletionPopup: true,
     aiCompletionTaskbarFlash: true,
     gitChangesViewMode: 'list',
+    projectsVisible: true,
+    sessionsVisible: true,
+    filesVisible: true,
+    gitVisible: true,
   },
   setConfig: (config) => set({ config }),
 
@@ -566,6 +573,20 @@ export const useAppStore = create<AppStore>((set) => ({
     set((state) => ({
       notifications: state.notifications.filter((x) => x.id !== id),
     })),
+
+  togglePanel: (panel) =>
+    set((state) => {
+      const visibleKeys = {
+        projects: 'projectsVisible',
+        sessions: 'sessionsVisible',
+        files: 'filesVisible',
+        git: 'gitVisible',
+      } as const;
+      const key = visibleKeys[panel];
+      const newConfig = { ...state.config, [key]: !state.config[key] };
+      invoke('save_config', { config: newConfig }).catch(() => {});
+      return { config: newConfig };
+    }),
 
   createGroup: (name, parentGroupId) =>
     set((state) => {

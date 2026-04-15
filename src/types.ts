@@ -27,6 +27,10 @@ export interface AppConfig {
   aiCompletionTaskbarFlash: boolean;
   vscodePath?: string;
   gitChangesViewMode: 'list' | 'tree';
+  projectsVisible: boolean;
+  sessionsVisible: boolean;
+  filesVisible: boolean;
+  gitVisible: boolean;
 }
 
 export interface ProjectConfig {
