@@ -9,6 +9,7 @@ import { showContextMenu } from '../utils/contextMenu';
 import { showPrompt } from '../utils/prompt';
 import { DiffModal } from './DiffModal';
 import { FileViewerModal } from './FileViewerModal';
+import { initFileDrag } from '../utils/fileDragState';
 import type { FileEntry, FsChangePayload, GitFileStatus, PtyOutputPayload } from '../types';
 
 interface TreeNodeProps {
@@ -169,10 +170,8 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
           }
           showContextMenu(e.clientX, e.clientY, items);
         }}
-        draggable
-        onDragStart={(e) => {
-          e.dataTransfer.setData('text/plain', entry.path);
-          e.dataTransfer.effectAllowed = 'copy';
+        onMouseDown={(e) => {
+          if (e.button === 0) initFileDrag(entry.path, e.clientX, e.clientY);
         }}
       >
         {entry.isDir && (

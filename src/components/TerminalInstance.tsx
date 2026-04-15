@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { getOrCreateTerminal, getCachedTerminal, activateWebgl, getTerminalTheme, DARK_TERMINAL_THEME, writePtyInput, copyTerminalSelection, pasteToTerminal } from '../utils/terminalCache';
 import { getResolvedTheme } from '../utils/themeManager';
 import { showContextMenu } from '../utils/contextMenu';
+import { isFileDragging, getFileDragPath } from '../utils/fileDragState';
 import '@xterm/xterm/css/xterm.css';
 
 interface Props {
@@ -86,26 +87,25 @@ export function TerminalInstance({ ptyId }: Props) {
     return () => window.removeEventListener('theme-changed', handler);
   }, [ptyId]);
 
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-    setFileDrag(true);
-  };
-  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
-    const nextTarget = e.relatedTarget as Node | null;
-    if (!nextTarget || !e.currentTarget.contains(nextTarget)) {
+  // 自定义鼠标拖拽（替代 HTML5 DnD，规避 WebView2 dragDropEnabled 拦截）
+  const dropZoneRef = useRef<HTMLDivElement>(null);
+
+  const handleMouseMove = useCallback(() => {
+    if (isFileDragging() && !fileDrag) setFileDrag(true);
+  }, [fileDrag]);
+
+  const handleMouseLeave = useCallback(() => {
+    if (fileDrag) setFileDrag(false);
+  }, [fileDrag]);
+
+  const handleMouseUp = useCallback(() => {
+    const path = getFileDragPath();
+    if (path) {
       setFileDrag(false);
-    }
-  };
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setFileDrag(false);
-    const filePath = e.dataTransfer.getData('text/plain').trim();
-    if (filePath) {
-      void writePtyInput(ptyId, filePath);
+      void writePtyInput(ptyId, path);
       getCachedTerminal(ptyId)?.term.focus();
     }
-  };
+  }, [ptyId]);
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -129,11 +129,13 @@ export function TerminalInstance({ ptyId }: Props) {
   return (
     <div className="w-full h-full flex flex-col">
       <div
+        ref={dropZoneRef}
         className="flex-1 relative bg-[var(--bg-terminal)]"
         style={termStyle}
-        onDragOverCapture={handleDragOver}
-        onDragLeaveCapture={handleDragLeave}
-        onDropCapture={handleDrop}
+        data-terminal-drop
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
+        onMouseUp={handleMouseUp}
         onContextMenu={handleContextMenu}
       >
         <div ref={containerRef} className="absolute top-1.5 bottom-0 left-2.5 right-0 cursor-none" />
