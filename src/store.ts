@@ -348,6 +348,7 @@ export const useAppStore = create<AppStore>((set) => ({
     terminalFollowTheme: true,
     aiCompletionPopup: true,
     aiCompletionTaskbarFlash: true,
+    gitChangesViewMode: 'list',
   },
   setConfig: (config) => set({ config }),
 

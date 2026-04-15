@@ -29,6 +29,16 @@ pub struct GitFileStatus {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct ChangeFileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub staged_status: Option<GitStatus>,
+    pub unstaged_status: Option<GitStatus>,
+    pub status_label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct DiffHunk {
     pub old_start: u32,
     pub old_lines: u32,
@@ -95,6 +105,48 @@ fn status_label(status: &GitStatus) -> &'static str {
         GitStatus::Untracked => "?",
         GitStatus::Conflicted => "C",
     }
+}
+
+fn map_staged_status(status: Status) -> Option<GitStatus> {
+    if status.contains(Status::CONFLICTED) {
+        return Some(GitStatus::Conflicted);
+    }
+    if status.contains(Status::INDEX_RENAMED) {
+        return Some(GitStatus::Renamed);
+    }
+    if status.contains(Status::INDEX_NEW) {
+        return Some(GitStatus::Added);
+    }
+    if status.contains(Status::INDEX_MODIFIED) {
+        return Some(GitStatus::Modified);
+    }
+    if status.contains(Status::INDEX_DELETED) {
+        return Some(GitStatus::Deleted);
+    }
+    None
+}
+
+fn map_unstaged_status(status: Status, is_empty_repo: bool) -> Option<GitStatus> {
+    if status.contains(Status::CONFLICTED) {
+        return Some(GitStatus::Conflicted);
+    }
+    if status.contains(Status::WT_RENAMED) {
+        return Some(GitStatus::Renamed);
+    }
+    if status.contains(Status::WT_MODIFIED) {
+        return Some(GitStatus::Modified);
+    }
+    if status.contains(Status::WT_DELETED) {
+        return Some(GitStatus::Deleted);
+    }
+    if status.contains(Status::WT_NEW) {
+        if is_empty_repo {
+            return Some(GitStatus::Added);
+        } else {
+            return Some(GitStatus::Untracked);
+        }
+    }
+    None
 }
 
 fn collect_repo_status(
@@ -265,6 +317,60 @@ pub fn get_git_status(project_path: String) -> Result<Vec<GitFileStatus>, String
         }
     }
     Ok(all)
+}
+
+#[tauri::command]
+pub fn get_changes_status(repo_path: String) -> Result<Vec<ChangeFileStatus>, String> {
+    let path = Path::new(&repo_path);
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let is_empty_repo = repo.head().is_err();
+
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+
+    for entry in statuses.iter() {
+        let raw_path = entry.path().unwrap_or("").to_string();
+        let s = entry.status();
+
+        let staged = map_staged_status(s);
+        let unstaged = map_unstaged_status(s, is_empty_repo);
+
+        if staged.is_none() && unstaged.is_none() {
+            continue;
+        }
+
+        let label = staged
+            .as_ref()
+            .or(unstaged.as_ref())
+            .map(status_label)
+            .unwrap_or("")
+            .to_string();
+
+        let old_path = if s.contains(Status::INDEX_RENAMED) || s.contains(Status::WT_RENAMED) {
+            entry.head_to_index().and_then(|d| {
+                d.old_file()
+                    .path()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+        } else {
+            None
+        };
+
+        result.push(ChangeFileStatus {
+            path: raw_path,
+            old_path,
+            staged_status: staged,
+            unstaged_status: unstaged,
+            status_label: label,
+        });
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -733,7 +839,11 @@ fn full_replace_diff(old_content: &str, new_content: &str) -> Vec<DiffHunk> {
 }
 
 #[tauri::command]
-pub fn get_git_diff(project_path: String, file_path: String) -> Result<GitDiffResult, String> {
+pub fn get_git_diff(
+    project_path: String,
+    file_path: String,
+    staged: Option<bool>,
+) -> Result<GitDiffResult, String> {
     let project = Path::new(&project_path);
     let abs_file = project.join(&file_path);
 
@@ -742,47 +852,71 @@ pub fn get_git_diff(project_path: String, file_path: String) -> Result<GitDiffRe
         .workdir()
         .ok_or("bare repository not supported")?;
 
-    // Relative path inside repo
     let rel_path = diff_paths(&abs_file, workdir)
         .ok_or("file is outside repository working directory")?;
     let rel_str = rel_path.to_string_lossy().replace('\\', "/");
 
-    // Read new (working tree) content
-    let new_bytes = std::fs::read(&abs_file).map_err(|e| e.to_string())?;
+    let is_staged = staged.unwrap_or(false);
 
-    // Large file protection (> 1 MB)
-    if new_bytes.len() > 1_048_576 {
-        return Ok(GitDiffResult {
-            old_content: String::new(),
-            new_content: String::new(),
-            hunks: Vec::new(),
-            is_binary: false,
-            too_large: true,
-        });
-    }
-
-    // Binary detection
-    let new_content = match std::str::from_utf8(&new_bytes) {
-        Ok(s) => s.to_string(),
-        Err(_) => {
+    // Read new content: from index (staged) or working tree (unstaged)
+    let new_content = if is_staged {
+        let index = repo.index().map_err(|e| e.to_string())?;
+        match index.get_path(Path::new(&rel_str), 0) {
+            Some(entry) => {
+                let blob = repo.find_blob(entry.id).map_err(|e| e.to_string())?;
+                if blob.is_binary() {
+                    return Ok(GitDiffResult {
+                        old_content: String::new(),
+                        new_content: String::new(),
+                        hunks: Vec::new(),
+                        is_binary: true,
+                        too_large: false,
+                    });
+                }
+                if blob.content().len() > 1_048_576 {
+                    return Ok(GitDiffResult {
+                        old_content: String::new(),
+                        new_content: String::new(),
+                        hunks: Vec::new(),
+                        is_binary: false,
+                        too_large: true,
+                    });
+                }
+                std::str::from_utf8(blob.content())
+                    .map_err(|_| "binary".to_string())?
+                    .to_string()
+            }
+            None => String::new(),
+        }
+    } else {
+        let new_bytes = std::fs::read(&abs_file).map_err(|e| e.to_string())?;
+        if new_bytes.len() > 1_048_576 {
             return Ok(GitDiffResult {
                 old_content: String::new(),
                 new_content: String::new(),
                 hunks: Vec::new(),
-                is_binary: true,
-                too_large: false,
-            })
+                is_binary: false,
+                too_large: true,
+            });
+        }
+        match std::str::from_utf8(&new_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                return Ok(GitDiffResult {
+                    old_content: String::new(),
+                    new_content: String::new(),
+                    hunks: Vec::new(),
+                    is_binary: true,
+                    too_large: false,
+                })
+            }
         }
     };
 
-    // Get HEAD content
     let old_content = match get_head_content(&repo, &rel_str)? {
-        None => String::new(), // empty repo
+        None => String::new(),
         Some(s) => s,
     };
-
-    // Check blob binary via git2 as well
-    // (already covered by UTF-8 check above for new content; old content checked in get_head_content)
 
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines_vec: Vec<&str> = new_content.lines().collect();
@@ -861,4 +995,158 @@ pub fn git_pull(repo_path: String) -> Result<String, String> {
 #[tauri::command]
 pub fn git_push(repo_path: String) -> Result<String, String> {
     run_git_network_command(&repo_path, "push")
+}
+
+#[tauri::command]
+pub fn git_stage(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    for file in &files {
+        let path = Path::new(file);
+        let abs_path = repo.workdir().ok_or("bare repo")?.join(path);
+        if abs_path.exists() {
+            index.add_path(path).map_err(|e| e.to_string())?;
+        } else {
+            // 文件已删除，需要从 index 移除
+            index.remove_path(path).map_err(|e| e.to_string())?;
+        }
+    }
+    index.write().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+
+    let head = match repo.head() {
+        Ok(h) => Some(h.peel_to_commit().map_err(|e| e.to_string())?),
+        Err(_) => None, // empty repo, no HEAD
+    };
+
+    if let Some(ref commit) = head {
+        for file in &files {
+            repo.reset_default(Some(commit.as_object()), [file.as_str()])
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        // empty repo: 批量从 index 移除，最后一次 write
+        let mut index = repo.index().map_err(|e| e.to_string())?;
+        for file in &files {
+            index.remove_path(Path::new(file)).map_err(|e| e.to_string())?;
+        }
+        index.write().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_stage_all(repo_path: String) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .map_err(|e| e.to_string())?;
+
+    // 处理已删除的文件：遍历 index，移除工作区中不存在的文件
+    let workdir = repo.workdir().ok_or("bare repo")?;
+    let entries: Vec<String> = index
+        .iter()
+        .filter_map(|e| {
+            let path = String::from_utf8_lossy(&e.path).to_string();
+            if !workdir.join(&path).exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for path in entries {
+        index.remove_path(Path::new(&path)).map_err(|e| e.to_string())?;
+    }
+
+    index.write().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage_all(repo_path: String) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+
+    match repo.head() {
+        Ok(head) => {
+            let commit = head.peel_to_commit().map_err(|e| e.to_string())?;
+            repo.reset(commit.as_object(), git2::ResetType::Mixed, None)
+                .map_err(|e| e.to_string())?;
+        }
+        Err(_) => {
+            // empty repo: 清空整个 index
+            let mut index = repo.index().map_err(|e| e.to_string())?;
+            index.clear().map_err(|e| e.to_string())?;
+            index.write().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_commit(repo_path: String, message: String) -> Result<String, String> {
+    let repo = Path::new(&repo_path);
+    if !repo.is_dir() {
+        return Err(format!("不是有效目录:{}", repo_path));
+    }
+    if !repo.join(".git").exists() {
+        return Err(format!("不是 git 仓库(缺少 .git):{}", repo_path));
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["commit", "-m", &message])
+        .current_dir(&repo_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("启动 git commit 失败:{}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[tauri::command]
+pub fn git_discard_file(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let workdir = repo.workdir().ok_or("bare repo")?.to_path_buf();
+
+    for file in &files {
+        let abs_path = workdir.join(file);
+
+        // 检查是否 untracked (WT_NEW)
+        let mut opts = StatusOptions::new();
+        opts.pathspec(file);
+        let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+        let is_untracked = statuses.iter().any(|e| e.status().contains(Status::WT_NEW));
+
+        if is_untracked {
+            // untracked: 直接删除文件
+            if abs_path.exists() {
+                std::fs::remove_file(&abs_path).map_err(|e| e.to_string())?;
+            }
+        } else {
+            // tracked: 先 unstage（如果在暂存区），再 checkout HEAD 版本
+            let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+            if let Some(ref commit) = head {
+                // unstage
+                let _ = repo.reset_default(Some(commit.as_object()), [file.as_str()]);
+            }
+            // checkout from HEAD
+            repo.checkout_head(Some(
+                git2::build::CheckoutBuilder::new()
+                    .force()
+                    .path(file),
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }

@@ -7,6 +7,7 @@ interface DiffModalProps {
   onClose: () => void;
   projectPath: string;
   status: GitFileStatus;
+  staged?: boolean;
 }
 
 type ViewMode = 'side-by-side' | 'inline';
@@ -139,7 +140,7 @@ export function SideBySideView({ hunks }: { hunks: GitDiffResult['hunks'] }) {
 
 // ─── DiffModal ───
 
-export function DiffModal({ open, onClose, projectPath, status }: DiffModalProps) {
+export function DiffModal({ open, onClose, projectPath, status, staged }: DiffModalProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('side-by-side');
   const [diffResult, setDiffResult] = useState<GitDiffResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -154,6 +155,7 @@ export function DiffModal({ open, onClose, projectPath, status }: DiffModalProps
     invoke<GitDiffResult>('get_git_diff', {
       projectPath,
       filePath: status.path,
+      staged: staged ?? false,
     })
       .then(setDiffResult)
       .catch((e) => setError(String(e)))

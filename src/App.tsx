@@ -153,7 +153,14 @@ export function App() {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-4 px-4 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
-        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+        onMouseDown={(e) => {
+          // 用 Tauri API 拖拽替代 -webkit-app-region: drag，
+          // 避免 WebView2 内部拖拽模态循环导致外部截图工具触发输入锁定
+          if (e.button === 0 && !(e.target as HTMLElement).closest('[data-no-drag]')) {
+            e.preventDefault();
+            getCurrentWindow().startDragging();
+          }
+        }}>
         <span className="font-semibold tracking-wide text-[var(--accent)] text-sm" style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}>
           MINI-TERM
         </span>
@@ -163,7 +170,7 @@ export function App() {
         {updateInfo && (
           <span
             className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--accent)]/15 text-[var(--accent)] cursor-pointer hover:bg-[var(--accent)]/25 transition-colors"
-            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            data-no-drag
             onClick={() => openUrl(updateInfo.url)}
             title={`新版本 ${updateInfo.version} 可用，点击前往下载`}
           >
@@ -171,7 +178,7 @@ export function App() {
           </span>
         )}
         <div className="w-px h-3.5 bg-[var(--border-default)]" />
-        <div className="flex items-center gap-3 text-[var(--text-muted)]" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+        <div className="flex items-center gap-3 text-[var(--text-muted)]" data-no-drag>
           <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150" onClick={() => setConfigOpen(true)}>设置</span>
         </div>
         <div className="flex-1" />

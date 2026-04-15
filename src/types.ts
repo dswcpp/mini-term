@@ -26,6 +26,7 @@ export interface AppConfig {
   aiCompletionPopup: boolean;
   aiCompletionTaskbarFlash: boolean;
   vscodePath?: string;
+  gitChangesViewMode: 'list' | 'tree';
 }
 
 export interface ProjectConfig {
@@ -150,6 +151,14 @@ export interface GitFileStatus {
   oldPath?: string;
   status: GitStatusType;
   statusLabel: string; // "M", "A", "D", "R", "?", "C"
+}
+
+export interface ChangeFileStatus {
+  path: string;
+  oldPath?: string;
+  stagedStatus?: GitStatusType;
+  unstagedStatus?: GitStatusType;
+  statusLabel: string;
 }
 
 export interface DiffHunk {

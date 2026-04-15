@@ -9,6 +9,11 @@ mod pty;
 
 use tauri::Manager;
 
+#[cfg(windows)]
+extern "system" {
+    fn ReleaseCapture() -> i32;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -24,6 +29,16 @@ pub fn run() {
             let pty_clone = pty_manager.inner().clone();
             process_monitor::start_monitor(app.handle().clone(), pty_clone);
             Ok(())
+        })
+        .on_window_event(|_window, event| {
+            // 窗口失焦时释放鼠标捕获，防止外部工具（截图等）与 WebView2
+            // 事件处理冲突导致输入锁定
+            if let tauri::WindowEvent::Focused(false) = event {
+                #[cfg(windows)]
+                unsafe {
+                    ReleaseCapture();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             config::load_config,
@@ -49,6 +64,13 @@ pub fn run() {
             git::get_commit_file_diff,
             git::git_pull,
             git::git_push,
+            git::get_changes_status,
+            git::git_stage,
+            git::git_unstage,
+            git::git_stage_all,
+            git::git_unstage_all,
+            git::git_commit,
+            git::git_discard_file,
             editor::open_in_vscode,
             clipboard::read_clipboard_image,
         ])

@@ -59,6 +59,8 @@ pub struct AppConfig {
     pub ai_completion_taskbar_flash: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vscode_path: Option<String>,
+    #[serde(default = "default_git_changes_view_mode")]
+    pub git_changes_view_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +140,9 @@ fn default_ai_completion_popup() -> bool {
 fn default_ai_completion_taskbar_flash() -> bool {
     true
 }
+fn default_git_changes_view_mode() -> String {
+    "list".into()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -157,6 +162,7 @@ impl Default for AppConfig {
             ai_completion_popup: default_ai_completion_popup(),
             ai_completion_taskbar_flash: default_ai_completion_taskbar_flash(),
             vscode_path: None,
+            git_changes_view_mode: default_git_changes_view_mode(),
         }
     }
 }
