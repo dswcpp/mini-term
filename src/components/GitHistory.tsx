@@ -68,8 +68,8 @@ export function GitHistory() {
         ))}
       </div>
 
-      {/* 仓库选择器（多仓库时显示） */}
-      {repos.length > 1 && (
+      {/* 仓库选择器（仅 Changes tab + 多仓库时显示） */}
+      {activeTab === 'changes' && repos.length > 1 && (
         <div className="px-3 pt-2 pb-0 flex-shrink-0">
           <select
             className="w-full text-sm bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-default)] rounded px-2 py-1"
