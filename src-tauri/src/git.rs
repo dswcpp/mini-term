@@ -29,6 +29,16 @@ pub struct GitFileStatus {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct ChangeFileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub staged_status: Option<GitStatus>,
+    pub unstaged_status: Option<GitStatus>,
+    pub status_label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct DiffHunk {
     pub old_start: u32,
     pub old_lines: u32,
@@ -95,6 +105,48 @@ fn status_label(status: &GitStatus) -> &'static str {
         GitStatus::Untracked => "?",
         GitStatus::Conflicted => "C",
     }
+}
+
+fn map_staged_status(status: Status) -> Option<GitStatus> {
+    if status.contains(Status::CONFLICTED) {
+        return Some(GitStatus::Conflicted);
+    }
+    if status.contains(Status::INDEX_RENAMED) {
+        return Some(GitStatus::Renamed);
+    }
+    if status.contains(Status::INDEX_NEW) {
+        return Some(GitStatus::Added);
+    }
+    if status.contains(Status::INDEX_MODIFIED) {
+        return Some(GitStatus::Modified);
+    }
+    if status.contains(Status::INDEX_DELETED) {
+        return Some(GitStatus::Deleted);
+    }
+    None
+}
+
+fn map_unstaged_status(status: Status, is_empty_repo: bool) -> Option<GitStatus> {
+    if status.contains(Status::CONFLICTED) {
+        return Some(GitStatus::Conflicted);
+    }
+    if status.contains(Status::WT_RENAMED) {
+        return Some(GitStatus::Renamed);
+    }
+    if status.contains(Status::WT_MODIFIED) {
+        return Some(GitStatus::Modified);
+    }
+    if status.contains(Status::WT_DELETED) {
+        return Some(GitStatus::Deleted);
+    }
+    if status.contains(Status::WT_NEW) {
+        if is_empty_repo {
+            return Some(GitStatus::Added);
+        } else {
+            return Some(GitStatus::Untracked);
+        }
+    }
+    None
 }
 
 fn collect_repo_status(
@@ -265,6 +317,60 @@ pub fn get_git_status(project_path: String) -> Result<Vec<GitFileStatus>, String
         }
     }
     Ok(all)
+}
+
+#[tauri::command]
+pub fn get_changes_status(repo_path: String) -> Result<Vec<ChangeFileStatus>, String> {
+    let path = Path::new(&repo_path);
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let is_empty_repo = repo.head().is_err();
+
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+
+    for entry in statuses.iter() {
+        let raw_path = entry.path().unwrap_or("").to_string();
+        let s = entry.status();
+
+        let staged = map_staged_status(s);
+        let unstaged = map_unstaged_status(s, is_empty_repo);
+
+        if staged.is_none() && unstaged.is_none() {
+            continue;
+        }
+
+        let label = staged
+            .as_ref()
+            .or(unstaged.as_ref())
+            .map(status_label)
+            .unwrap_or("")
+            .to_string();
+
+        let old_path = if s.contains(Status::INDEX_RENAMED) || s.contains(Status::WT_RENAMED) {
+            entry.head_to_index().and_then(|d| {
+                d.old_file()
+                    .path()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+        } else {
+            None
+        };
+
+        result.push(ChangeFileStatus {
+            path: raw_path,
+            old_path,
+            staged_status: staged,
+            unstaged_status: unstaged,
+            status_label: label,
+        });
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
