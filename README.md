@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.13-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.2.14-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="platform">
   <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-experimental-lightgrey" alt="platform-experimental">
   <img src="https://img.shields.io/badge/Tauri-v2-orange" alt="tauri">
@@ -63,6 +63,7 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 ### 项目管理
 
 - **项目列表** — 左侧边栏管理多个项目目录，一键切换工作区
+- **拖拽添加项目** — 从资源管理器拖拽文件夹到项目列表即可快速添加，自动识别文件 / 文件夹 / 重复项目并给出视觉反馈
 - **嵌套分组** — 最多 3 级项目分组，拖拽排序，折叠 / 展开
 - **文件树** — 集成目录浏览器，`.gitignore` 过滤，`notify` 文件监听实时刷新
 - **文件操作** — 文件树内新建文件 / 文件夹、重命名、查看内容（二进制与超大文件友好提示）
@@ -75,6 +76,7 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 - **提交历史** — 浏览仓库提交记录，游标分页加载（默认 30 条）
 - **提交 Diff** — 查看任意提交的文件变更，逐文件切换
 - **分支信息** — 本地 / 远程分支列表
+- **源码控制面板** — VS Code 风格 Changes 面板，Staged / Changes / Untracked 分组展示，支持单文件和全量 stage / unstage / discard，`Ctrl+Enter` 快速提交，列表与树形视图切换
 - **Pull / Push** — 仓库行内按钮一键同步远端
 - **多仓库发现** — 自动扫描项目目录下所有 Git 仓库（递归 5 层，跳过 `node_modules` 等）
 
@@ -157,6 +159,7 @@ mini-term/
 │   │   ├── TerminalInstance.tsx  # xterm.js 实例 + 右键菜单 + 文件拖拽
 │   │   ├── TabBar.tsx            # 标签栏
 │   │   ├── GitHistory.tsx        # Git 仓库树 + 提交历史 + Pull / Push
+│   │   ├── GitChanges.tsx       # 源码控制面板（stage / unstage / commit）
 │   │   ├── CommitDiffModal.tsx   # 提交 Diff 查看器
 │   │   ├── DiffModal.tsx         # 工作区文件 Diff 查看器
 │   │   ├── FileViewerModal.tsx   # 文件内容查看器
@@ -200,7 +203,7 @@ ai-working → ai-idle → Toast + DONE Tag + requestUserAttention
 
 ### Tauri 接口一览
 
-- **Commands（23 个）** — PTY: `create_pty` · `write_pty` · `resize_pty` · `kill_pty`；FS: `list_directory` · `read_file_content` · `watch_directory` · `unwatch_directory` · `create_file` · `create_directory` · `rename_entry`；Git: `get_git_status` · `get_git_diff` · `discover_git_repos` · `get_git_log` · `get_repo_branches` · `get_commit_files` · `get_commit_file_diff` · `git_pull` · `git_push`；Config: `load_config` · `save_config`；AI: `get_ai_sessions`
+- **Commands（33 个）** — PTY: `create_pty` · `write_pty` · `resize_pty` · `kill_pty`；FS: `list_directory` · `read_file_content` · `watch_directory` · `unwatch_directory` · `create_file` · `create_directory` · `rename_entry` · `filter_directories`；Git: `get_git_status` · `get_git_diff` · `discover_git_repos` · `get_git_log` · `get_repo_branches` · `get_commit_files` · `get_commit_file_diff` · `git_pull` · `git_push` · `get_changes_status` · `git_stage` · `git_unstage` · `git_stage_all` · `git_unstage_all` · `git_commit` · `git_discard_file`；Config: `load_config` · `save_config`；Editor: `open_in_vscode`；Clipboard: `read_clipboard_image`；AI: `get_ai_sessions`
 - **Events（后端 → 前端）** — `pty-output` · `pty-exit` · `pty-status-change` · `fs-change`
 
 ### 状态优先级
