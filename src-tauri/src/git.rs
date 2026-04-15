@@ -1060,3 +1060,65 @@ pub fn git_unstage_all(repo_path: String) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[tauri::command]
+pub fn git_commit(repo_path: String, message: String) -> Result<String, String> {
+    let repo = Path::new(&repo_path);
+    if !repo.is_dir() {
+        return Err(format!("不是有效目录:{}", repo_path));
+    }
+    if !repo.join(".git").exists() {
+        return Err(format!("不是 git 仓库(缺少 .git):{}", repo_path));
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["commit", "-m", &message])
+        .current_dir(&repo_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("启动 git commit 失败:{}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[tauri::command]
+pub fn git_discard_file(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let workdir = repo.workdir().ok_or("bare repo")?.to_path_buf();
+
+    for file in &files {
+        let abs_path = workdir.join(file);
+
+        // 检查是否 untracked (WT_NEW)
+        let mut opts = StatusOptions::new();
+        opts.pathspec(file);
+        let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+        let is_untracked = statuses.iter().any(|e| e.status().contains(Status::WT_NEW));
+
+        if is_untracked {
+            // untracked: 直接删除文件
+            if abs_path.exists() {
+                std::fs::remove_file(&abs_path).map_err(|e| e.to_string())?;
+            }
+        } else {
+            // tracked: 先 unstage（如果在暂存区），再 checkout HEAD 版本
+            let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+            if let Some(ref commit) = head {
+                // unstage
+                let _ = repo.reset_default(Some(commit.as_object()), [file.as_str()]);
+            }
+            // checkout from HEAD
+            repo.checkout_head(Some(
+                git2::build::CheckoutBuilder::new()
+                    .force()
+                    .path(file),
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
