@@ -142,6 +142,7 @@ export function PaneGroup({ node, projectPath, onSplit, onClosePane, onUpdateNod
       {/* Tab bar */}
       <div
         className="flex bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-[11px] overflow-x-auto select-none shrink-0"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         onMouseEnter={() => setHeaderHover(true)}
         onMouseLeave={() => setHeaderHover(false)}
       >
