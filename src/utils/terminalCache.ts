@@ -1,23 +1,23 @@
+/**
+ * 终端实例缓存：在 React 组件卸载/重新挂载期间保持 xterm.js Terminal 存活。
+ *
+ * 问题：分屏操作导致 SplitLayout 从 leaf 变为 split 节点，React 会卸载旧的
+ * TerminalInstance 并重建新的，xterm.js 实例被 dispose，终端内容丢失。
+ *
+ * 方案：Terminal 实例按 ptyId 缓存。组件 mount 时附着 wrapper 到容器，
+ * unmount 时仅分离 wrapper，不销毁 Terminal。仅在面板真正关闭时调用 dispose。
+ */
+
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
-import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { subscribeSessionOutput } from '../runtime/tauriEventHub';
-import {
-  takeTerminalStartupOutput,
-  writeTerminalInput,
-} from '../runtime/terminalApi';
-import { clearTerminalOutput, queueTerminalOutput } from '../runtime/terminalOutputScheduler';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { readText, readImage, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore } from '../store';
-import { resolveTheme } from '../theme';
-import {
-  applyTerminalInputData,
-  buildCompletionSequence,
-  createTerminalInputState,
-  markTerminalInputStateUnsafe,
-  type TerminalInputState,
-} from './terminalInputState';
-import { getSessionIdForPty } from './session';
+import type { PtyOutputPayload } from '../types';
+import { getResolvedTheme } from './themeManager';
+import { createPtyWriteQueue } from './ptyWriteQueue';
 
 export interface CachedTerminal {
   term: Terminal;
@@ -26,189 +26,87 @@ export interface CachedTerminal {
 }
 
 interface CachedEntry extends CachedTerminal {
-  sessionId: string;
-  currentPtyId: number;
   cleanup: () => void;
-  rebind: (ptyId: number) => void;
+  webglLoaded: boolean;
 }
 
-type TerminalIdentity = number | string;
-type InputListener = (value: string) => void;
-type InputStateListener = (state: TerminalInputState) => void;
-type KeyHandler = (event: KeyboardEvent) => boolean;
+export const DARK_TERMINAL_THEME = {
+  background: '#0a0908',
+  foreground: '#d8d4cc',
+  cursor: '#c8805a',
+  cursorAccent: '#0a0908',
+  selectionBackground: '#c8805a30',
+  selectionForeground: '#e5e0d8',
+  black: '#2a2824',
+  red: '#d4605a',
+  green: '#6bb87a',
+  yellow: '#d4a84a',
+  blue: '#6896c8',
+  magenta: '#b08cd4',
+  cyan: '#7dcfb8',
+  white: '#d8d4cc',
+  brightBlack: '#5c5850',
+  brightRed: '#e07060',
+  brightGreen: '#80d090',
+  brightYellow: '#e0b860',
+  brightBlue: '#80aad8',
+  brightMagenta: '#c0a0e0',
+  brightCyan: '#90e0c8',
+  brightWhite: '#e5e0d8',
+};
 
-const cache = new Map<string, CachedEntry>();
-const ptyToSessionKey = new Map<number, string>();
-const inputStates = new Map<string, TerminalInputState>();
-const inputListeners = new Map<string, Set<InputListener>>();
-const inputStateListeners = new Map<string, Set<InputStateListener>>();
-const keyHandlers = new Map<string, KeyHandler>();
+export const LIGHT_TERMINAL_THEME = {
+  background: '#fafafa',
+  foreground: '#1a1a1a',
+  cursor: '#b06830',
+  cursorAccent: '#fafafa',
+  selectionBackground: '#b0683030',
+  selectionForeground: '#1a1a1a',
+  black: '#1a1a1a',
+  red: '#c0392b',
+  green: '#2d8a46',
+  yellow: '#b08620',
+  blue: '#2860a0',
+  magenta: '#8a5cb8',
+  cyan: '#1a8a6a',
+  white: '#808080',
+  brightBlack: '#666666',
+  brightRed: '#e04030',
+  brightGreen: '#38a058',
+  brightYellow: '#c89830',
+  brightBlue: '#3870b8',
+  brightMagenta: '#a070d0',
+  brightCyan: '#28a080',
+  brightWhite: '#a0a0a0',
+};
 
-function resolveSessionKey(identity: TerminalIdentity) {
-  if (typeof identity === 'string') {
-    return identity;
+export function getTerminalTheme(terminalFollowTheme: boolean): typeof DARK_TERMINAL_THEME {
+  if (terminalFollowTheme && getResolvedTheme() === 'light') {
+    return LIGHT_TERMINAL_THEME;
   }
-
-  const state = useAppStore.getState();
-  return (
-    ptyToSessionKey.get(identity)
-    ?? state.sessionIdByPty.get(identity)
-    ?? state.sessions.get(identity)?.sessionId
-    ?? getSessionIdForPty(identity)
-  );
+  return DARK_TERMINAL_THEME;
 }
 
-function resolvePtyId(identity: TerminalIdentity, fallbackPtyId?: number) {
-  if (typeof identity === 'number') {
-    return identity;
-  }
+const cache = new Map<number, CachedEntry>();
+const enqueuePtyWrite = createPtyWriteQueue((ptyId, data) =>
+  invoke('write_pty', { ptyId, data })
+);
 
-  const cached = cache.get(identity);
-  if (cached) {
-    return cached.currentPtyId;
-  }
+export function getOrCreateTerminal(ptyId: number): CachedTerminal {
+  const existing = cache.get(ptyId);
+  if (existing) return existing;
 
-  const state = useAppStore.getState();
-  return fallbackPtyId
-    ?? state.ptyBySessionId.get(identity)
-    ?? state.terminalSessions.get(identity)?.ptyId
-    ?? -1;
-}
-
-function notifyInputListeners(sessionKey: string) {
-  const value = inputStates.get(sessionKey)?.text ?? '';
-  const listeners = inputListeners.get(sessionKey);
-  if (!listeners) {
-    return;
-  }
-
-  listeners.forEach((listener) => listener(value));
-}
-
-function notifyInputStateListeners(sessionKey: string) {
-  const state = inputStates.get(sessionKey) ?? createTerminalInputState();
-  const listeners = inputStateListeners.get(sessionKey);
-  if (!listeners) {
-    return;
-  }
-
-  listeners.forEach((listener) => listener(state));
-}
-
-function updateInputState(sessionKey: string, nextState: TerminalInputState) {
-  inputStates.set(sessionKey, nextState);
-  notifyInputListeners(sessionKey);
-  notifyInputStateListeners(sessionKey);
-}
-
-function resetInputState(sessionKey: string) {
-  updateInputState(sessionKey, createTerminalInputState());
-}
-
-export function mirrorTerminalInput(identity: TerminalIdentity, data: string): void {
-  const sessionKey = resolveSessionKey(identity);
-  updateInputState(sessionKey, applyTerminalInputData(inputStates.get(sessionKey), data));
-}
-
-export function subscribeTerminalInput(identity: TerminalIdentity, listener: InputListener): () => void {
-  const sessionKey = resolveSessionKey(identity);
-  const listeners = inputListeners.get(sessionKey) ?? new Set<InputListener>();
-  listeners.add(listener);
-  inputListeners.set(sessionKey, listeners);
-  listener(inputStates.get(sessionKey)?.text ?? '');
-
-  return () => {
-    const current = inputListeners.get(sessionKey);
-    if (!current) {
-      return;
-    }
-    current.delete(listener);
-    if (current.size === 0) {
-      inputListeners.delete(sessionKey);
-    }
-  };
-}
-
-export function subscribeTerminalInputState(
-  identity: TerminalIdentity,
-  listener: InputStateListener,
-): () => void {
-  const sessionKey = resolveSessionKey(identity);
-  const listeners = inputStateListeners.get(sessionKey) ?? new Set<InputStateListener>();
-  listeners.add(listener);
-  inputStateListeners.set(sessionKey, listeners);
-  listener(inputStates.get(sessionKey) ?? createTerminalInputState());
-
-  return () => {
-    const current = inputStateListeners.get(sessionKey);
-    if (!current) {
-      return;
-    }
-    current.delete(listener);
-    if (current.size === 0) {
-      inputStateListeners.delete(sessionKey);
-    }
-  };
-}
-
-export function getTerminalInputState(identity: TerminalIdentity): TerminalInputState {
-  return inputStates.get(resolveSessionKey(identity)) ?? createTerminalInputState();
-}
-
-export function registerTerminalKeyHandler(identity: TerminalIdentity, handler: KeyHandler): () => void {
-  const sessionKey = resolveSessionKey(identity);
-  keyHandlers.set(sessionKey, handler);
-  return () => {
-    if (keyHandlers.get(sessionKey) === handler) {
-      keyHandlers.delete(sessionKey);
-    }
-  };
-}
-
-export async function applyCompletionEdit(
-  identity: TerminalIdentity,
-  edit: Parameters<typeof buildCompletionSequence>[1],
-): Promise<boolean> {
-  const sessionKey = resolveSessionKey(identity);
-  const currentState = inputStates.get(sessionKey) ?? createTerminalInputState();
-  if (currentState.unsafe) {
-    return false;
-  }
-
-  const { data, nextState } = buildCompletionSequence(currentState, edit);
-  updateInputState(sessionKey, nextState);
-  try {
-    await writeTerminalInput(sessionKey, data);
-    return true;
-  } catch (error) {
-    updateInputState(sessionKey, currentState);
-    throw error;
-  }
-}
-
-export function markTerminalInputUnsafe(identity: TerminalIdentity) {
-  const sessionKey = resolveSessionKey(identity);
-  updateInputState(sessionKey, markTerminalInputStateUnsafe(inputStates.get(sessionKey)));
-}
-
-function removePtyBindingsForSession(sessionId: string) {
-  for (const [ptyId, mappedSessionId] of ptyToSessionKey.entries()) {
-    if (mappedSessionId === sessionId) {
-      ptyToSessionKey.delete(ptyId);
-    }
-  }
-}
-
-function createCachedEntry(ptyId: number, sessionId: string): CachedEntry {
+  // 创建 wrapper 容器，xterm.js 会在其中渲染
   const wrapper = document.createElement('div');
   wrapper.style.width = '100%';
   wrapper.style.height = '100%';
 
-  const config = useAppStore.getState().config;
-  const resolvedTheme = resolveTheme(config.theme);
+  const theme = getTerminalTheme(useAppStore.getState().config.terminalFollowTheme ?? true);
+  // 预设背景色，防止首帧渲染前闪屏；始终跟随系统主题 CSS 变量
+  wrapper.style.backgroundColor = 'var(--bg-terminal)';
 
   const term = new Terminal({
-    fontSize: config.terminalFontSize ?? 14,
+    fontSize: useAppStore.getState().config.terminalFontSize ?? 14,
     fontFamily: "'JetBrains Mono', 'Cascadia Code', Consolas, monospace",
     fontWeight: '400',
     fontWeightBold: '600',
@@ -218,190 +116,177 @@ function createCachedEntry(ptyId: number, sessionId: string): CachedEntry {
     scrollback: 100000,
     letterSpacing: 0,
     lineHeight: 1.35,
-    theme: resolvedTheme.preset.terminal,
+    theme,
   });
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  term.open(wrapper);
-  term.reset();
 
+  // 拦截 CSI 3J (ED3 - Erase Saved Lines)：保留 scrollback 缓冲区。
+  // codex/claude 等 TUI 应用在主缓冲区周期性发送此序列清空滚动历史，
+  // 导致用户向上滚动时看不到之前的对话内容。返回 true 让 xterm.js
+  // 跳过默认（清空 scrollback）行为；其余 Ps 值（0/1/2）走默认逻辑。
+  term.parser.registerCsiHandler({ final: 'J' }, (params) => params[0] === 3);
+
+  term.open(wrapper);
+
+  // 剪贴板快捷键
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== 'keydown') return true;
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
+      e.preventDefault();
+      void copyTerminalSelection(ptyId);
+      return false;
+    }
+    if (e.ctrlKey && e.shiftKey && e.code === 'KeyV') {
+      e.preventDefault();
+      void pasteToTerminal(ptyId);
+      return false;
+    }
+    return true;
+  });
+
+  // 用户输入 → PTY
+  const onDataDisp = term.onData((data) => {
+    term.scrollToBottom();
+    void enqueuePtyWrite(ptyId, data);
+  });
+
+  // 终端 resize → 同步到 PTY
+  const onResizeDisp = term.onResize(({ cols, rows }) => {
+    invoke('resize_pty', { ptyId, cols, rows });
+  });
+
+  // PTY 输出 → 终端
+  let cancelled = false;
+  let unlisten: (() => void) | undefined;
+  listen<PtyOutputPayload>('pty-output', (event) => {
+    if (event.payload.ptyId === ptyId) {
+      term.write(event.payload.data);
+    }
+  }).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+
+  const cleanup = () => {
+    cancelled = true;
+    unlisten?.();
+    onDataDisp.dispose();
+    onResizeDisp.dispose();
+    term.dispose();
+  };
+
+  const entry: CachedEntry = { term, fitAddon, wrapper, cleanup, webglLoaded: false };
+  cache.set(ptyId, entry);
+  return entry;
+}
+
+/** 在终端已挂载 DOM 并 fit 后激活 WebGL 渲染，降级时回退 Canvas */
+export function activateWebgl(ptyId: number): void {
+  const entry = cache.get(ptyId);
+  if (!entry || entry.webglLoaded) return;
+  entry.webglLoaded = true;
   try {
     const webgl = new WebglAddon();
     webgl.onContextLoss(() => {
       webgl.dispose();
-      term.refresh(0, term.rows - 1);
+      entry.term.refresh(0, entry.term.rows - 1);
     });
-    term.loadAddon(webgl);
+    entry.term.loadAddon(webgl);
   } catch {
-    // Fall back to canvas when WebGL is unavailable.
+    // WebGL 不支持
   }
-
-  let currentPtyId = ptyId;
-  let cancelled = false;
-  let startupOutputReceived = false;
-  let unlistenOutput: (() => void) | undefined;
-  let bootstrapTimers: number[] = [];
-
-  const bindOutput = (nextPtyId: number, resetTerminal = false) => {
-    const previousPtyId = currentPtyId;
-    currentPtyId = nextPtyId;
-    ptyToSessionKey.set(nextPtyId, sessionId);
-    if (previousPtyId !== nextPtyId) {
-      ptyToSessionKey.delete(previousPtyId);
-    }
-
-    if (resetTerminal) {
-      clearTerminalOutput(sessionId);
-      resetInputState(sessionId);
-      term.reset();
-      term.clear();
-    }
-
-    bootstrapTimers.forEach((timer) => window.clearTimeout(timer));
-    bootstrapTimers = [];
-    startupOutputReceived = false;
-    unlistenOutput?.();
-    unlistenOutput = subscribeSessionOutput(sessionId, (payload) => {
-      if (payload.data) {
-        startupOutputReceived = true;
-      }
-      queueTerminalOutput(sessionId, (chunk) => {
-        term.write(chunk);
-      }, payload.data);
-    });
-
-    bootstrapTimers = [
-      window.setTimeout(() => {
-        fitAddon.fit();
-        term.refresh(0, term.rows - 1);
-      }, 60),
-      window.setTimeout(() => {
-        fitAddon.fit();
-        term.refresh(0, term.rows - 1);
-      }, 180),
-    ];
-
-    void takeTerminalStartupOutput(sessionId)
-      .then((initialOutput) => {
-        if (cancelled || !initialOutput || startupOutputReceived) {
-          return;
-        }
-
-        startupOutputReceived = true;
-        queueTerminalOutput(sessionId, (chunk) => {
-          term.write(chunk);
-          term.scrollToBottom();
-          term.refresh(0, term.rows - 1);
-        }, initialOutput);
-      })
-      .catch(console.error);
-  };
-
-  term.attachCustomKeyEventHandler((event) => {
-    if (event.type !== 'keydown') {
-      return true;
-    }
-
-    const customHandler = keyHandlers.get(sessionId);
-    if (customHandler && !customHandler(event)) {
-      return false;
-    }
-
-    if (event.ctrlKey && event.shiftKey && event.code === 'KeyC') {
-      event.preventDefault();
-      const selection = term.getSelection();
-      if (selection) {
-        void writeText(selection);
-      }
-      return false;
-    }
-
-    if (event.ctrlKey && event.shiftKey && event.code === 'KeyV') {
-      event.preventDefault();
-      void readText().then((text) => {
-        if (text) {
-          mirrorTerminalInput(currentPtyId, text);
-          void writeTerminalInput(sessionId, text);
-        }
-      });
-      return false;
-    }
-
-    return true;
-  });
-
-  const onDataDisposable = term.onData((data) => {
-    term.scrollToBottom();
-    mirrorTerminalInput(currentPtyId, data);
-    void writeTerminalInput(sessionId, data);
-  });
-
-  bindOutput(ptyId);
-
-  const cleanup = () => {
-    cancelled = true;
-    bootstrapTimers.forEach((timer) => window.clearTimeout(timer));
-    clearTerminalOutput(sessionId);
-    unlistenOutput?.();
-    removePtyBindingsForSession(sessionId);
-    inputStates.delete(sessionId);
-    inputListeners.delete(sessionId);
-    inputStateListeners.delete(sessionId);
-    keyHandlers.delete(sessionId);
-    onDataDisposable.dispose();
-    term.dispose();
-  };
-
-  return {
-    term,
-    fitAddon,
-    wrapper,
-    sessionId,
-    currentPtyId: ptyId,
-    cleanup,
-    rebind: (nextPtyId: number) => {
-      const shouldReset = nextPtyId !== currentPtyId;
-      bindOutput(nextPtyId, shouldReset);
-    },
-  };
 }
 
-export function getOrCreateTerminal(identity: TerminalIdentity, nextPtyId?: number): CachedTerminal {
-  const sessionId = resolveSessionKey(identity);
-  const existing = cache.get(sessionId);
-  const ptyId = resolvePtyId(identity, nextPtyId);
-  if (existing) {
-    if (ptyId >= 0) {
-      existing.rebind(ptyId);
-    }
-    return existing;
-  }
-
-  if (ptyId < 0) {
-    throw new Error(`Unable to resolve PTY for terminal session ${sessionId}`);
-  }
-
-  const entry = createCachedEntry(ptyId, sessionId);
-  cache.set(sessionId, entry);
-  return entry;
+/** 获取已缓存的终端（不创建新的） */
+export function getCachedTerminal(ptyId: number): CachedTerminal | undefined {
+  return cache.get(ptyId);
 }
 
-export function getCachedTerminal(identity: TerminalIdentity): CachedTerminal | undefined {
-  return cache.get(resolveSessionKey(identity));
-}
-
-export function disposeTerminalBySession(sessionId: string): void {
-  const entry = cache.get(sessionId);
-  if (!entry) {
-    return;
-  }
-
+/** 彻底销毁终端（面板关闭 / kill_pty 后调用） */
+export function disposeTerminal(ptyId: number): void {
+  const entry = cache.get(ptyId);
+  if (!entry) return;
   entry.wrapper.remove();
   entry.cleanup();
-  cache.delete(sessionId);
+  cache.delete(ptyId);
 }
 
-export function disposeTerminal(identity: TerminalIdentity): void {
-  disposeTerminalBySession(resolveSessionKey(identity));
+export function updateAllTerminalThemes(terminalFollowTheme: boolean): void {
+  const theme = getTerminalTheme(terminalFollowTheme);
+  for (const entry of cache.values()) {
+    entry.term.options.theme = theme;
+  }
+}
+
+export function writePtyInput(ptyId: number, data: string): Promise<void> {
+  return enqueuePtyWrite(ptyId, data);
+}
+
+/** 复制当前终端选中文本到系统剪贴板。无选中则不操作。返回是否有内容被复制。 */
+export async function copyTerminalSelection(ptyId: number): Promise<boolean> {
+  const cached = cache.get(ptyId);
+  if (!cached) return false;
+  const sel = cached.term.getSelection();
+  if (!sel) return false;
+  await writeText(sel);
+  return true;
+}
+
+/** 检测剪贴板是否含图片（Tauri 插件 + 浏览器 Clipboard API 双重检测） */
+async function clipboardHasImage(): Promise<boolean> {
+  try {
+    await readImage();
+    return true;
+  } catch { /* Tauri 插件不支持该格式 */ }
+  try {
+    const items = await navigator.clipboard.read();
+    return items.some(item => item.types.some(t => t.startsWith('image/')));
+  } catch { /* 浏览器 Clipboard API 不可用 */ }
+  return false;
+}
+
+/** 长文本阈值：满足任一条件即转存为临时文件 */
+const LONG_TEXT_LINE_THRESHOLD = 10;
+const LONG_TEXT_CHAR_THRESHOLD = 2000;
+
+/** 判定剪贴板文本是否需要转存为临时文件（避免直接粘贴超长内容） */
+function isLongText(text: string): boolean {
+  if (text.length >= LONG_TEXT_CHAR_THRESHOLD) return true;
+  const lines = text.replace(/\r\n/g, '\n').split('\n').length;
+  return lines >= LONG_TEXT_LINE_THRESHOLD;
+}
+
+/** 读取系统剪贴板并写入终端 PTY。
+ * - 剪贴板含图片 → 保存为 temp PNG，粘贴带引号的路径（兼容含空格路径）
+ * - 文本长度 ≥ 2000 字符或 ≥ 10 行 → 保存为 temp .txt，粘贴带引号的路径
+ * - 否则直接粘贴文本
+ */
+export async function pasteToTerminal(ptyId: number): Promise<void> {
+  if (await clipboardHasImage()) {
+    // 优先：Win32 API 读取图片保存为 temp PNG，粘贴文件路径
+    // 兼容 PinPix 等 arboard 无法读取的非标准剪贴板格式
+    try {
+      const path: string = await invoke('read_clipboard_image');
+      await enqueuePtyWrite(ptyId, `"${path}"`);
+      return;
+    } catch { /* Win32 也读不到，回退 Alt+V */ }
+    // 回退：发送 Alt+V 转义序列让 AI 工具自行处理
+    await enqueuePtyWrite(ptyId, '\x1bv');
+    return;
+  }
+  const text = await readText().catch(() => null);
+  if (!text) return;
+
+  // 长文本：转存临时文件，粘贴路径；失败则回退到直接粘贴
+  if (isLongText(text)) {
+    try {
+      const path: string = await invoke('save_clipboard_text', { text });
+      await enqueuePtyWrite(ptyId, `"${path}"`);
+      return;
+    } catch { /* 写文件失败，回退到直接粘贴 */ }
+  }
+
+  await enqueuePtyWrite(ptyId, text);
 }

@@ -151,6 +151,15 @@ struct FsWatchHandle {
     _runtime_batcher: mpsc::Sender<runtime_mcp::RuntimeFsEventRecord>,
 }
 
+/// 过滤出有效的目录路径（用于拖拽添加项目时验证）
+#[tauri::command]
+pub fn filter_directories(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|p| Path::new(p).is_dir())
+        .collect()
+}
+
 #[cfg(test)]
 fn should_ignore(
     name: &str,
