@@ -488,7 +488,10 @@ pub struct SavedPane {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum SavedSplitNode {
     Leaf {
-        pane: SavedPane,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<SavedPane>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        panes: Vec<SavedPane>,
     },
     Split {
         direction: String,
@@ -1046,7 +1049,47 @@ fn normalize_agent_backends(mut config: AgentBackendsConfig) -> AgentBackendsCon
     config
 }
 
+fn normalize_split_node(node: &mut SavedSplitNode) {
+    match node {
+        SavedSplitNode::Leaf { pane, panes } => {
+            if pane.is_none() {
+                *pane = panes.first().cloned();
+            }
+            panes.clear();
+        }
+        SavedSplitNode::Split { children, .. } => {
+            for child in children.iter_mut() {
+                normalize_split_node(child);
+            }
+        }
+    }
+}
+
+fn normalize_saved_layout(layout: &mut SavedProjectLayout) {
+    for tab in layout.tabs.iter_mut() {
+        normalize_split_node(&mut tab.split_layout);
+    }
+}
+
 fn migrate_config(mut config: AppConfig) -> AppConfig {
+    for project in config.projects.iter_mut() {
+        if let Some(layout) = project.saved_layout.as_mut() {
+            normalize_saved_layout(layout);
+        }
+    }
+
+    for workspace in config.workspaces.iter_mut() {
+        if let Some(layout) = workspace.saved_layout.as_mut() {
+            normalize_saved_layout(layout);
+        }
+    }
+
+    for recent_workspace in config.recent_workspaces.iter_mut() {
+        if let Some(layout) = recent_workspace.saved_layout.as_mut() {
+            normalize_saved_layout(layout);
+        }
+    }
+
     if config.project_tree.is_some() {
         config.project_groups = None;
         config.project_ordering = None;
@@ -1355,18 +1398,20 @@ mod tests {
                     direction: "horizontal".into(),
                     children: vec![
                         SavedSplitNode::Leaf {
-                            pane: SavedPane {
+                            pane: Some(SavedPane {
                                 shell_name: "cmd".into(),
                                 run_command: None,
                                 run_profile: None,
-                            },
+                            }),
+                            panes: Vec::new(),
                         },
                         SavedSplitNode::Leaf {
-                            pane: SavedPane {
+                            pane: Some(SavedPane {
                                 shell_name: "powershell".into(),
                                 run_command: None,
                                 run_profile: None,
-                            },
+                            }),
+                            panes: Vec::new(),
                         },
                     ],
                     sizes: vec![50.0, 50.0],

@@ -1005,6 +1005,7 @@ export interface FileViewerOpenOptions {
 export interface GitRepoInfo {
   name: string;
   path: string;
+  currentBranch?: string;
 }
 
 export interface GitCompletionData {
@@ -1020,8 +1021,16 @@ export interface GitCommitInfo {
   hash: string;
   shortHash: string;
   message: string;
+  body?: string;
   author: string;
   timestamp: number;
+}
+
+export interface BranchInfo {
+  name: string;
+  isHead: boolean;
+  isRemote: boolean;
+  commitHash: string;
 }
 
 export interface GitFileHistoryEntry {

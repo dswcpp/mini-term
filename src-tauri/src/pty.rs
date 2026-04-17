@@ -883,29 +883,67 @@ fn create_pty_internal(
             }
 
             if !pending.is_empty() {
-                let data = String::from_utf8_lossy(&pending).into_owned();
-                if let Ok(mut startup) = startup_output.lock() {
-                    if let Some(buffer) = startup.get_mut(&pty_id_for_reader) {
-                        buffer.push_str(&data);
-                        if buffer.len() > STARTUP_OUTPUT_LIMIT {
-                            let excess = buffer.len() - STARTUP_OUTPUT_LIMIT;
-                            buffer.drain(..excess);
+                let valid_len = {
+                    let mut index = pending.len();
+
+                    while index > 0 {
+                        index -= 1;
+                        let byte = pending[index];
+                        if byte < 0x80 {
+                            index = pending.len();
+                            break;
                         }
+                        if byte >= 0xC0 {
+                            let expected_len = if byte >= 0xF0 {
+                                4
+                            } else if byte >= 0xE0 {
+                                3
+                            } else {
+                                2
+                            };
+                            let remaining = pending.len() - index;
+                            if remaining >= expected_len {
+                                index = pending.len();
+                            }
+                            break;
+                        }
+                    }
+
+                    index
+                };
+
+                if valid_len > 0 {
+                    let data = String::from_utf8_lossy(&pending[..valid_len]).into_owned();
+                    if let Ok(mut startup) = startup_output.lock() {
+                        if let Some(buffer) = startup.get_mut(&pty_id_for_reader) {
+                            buffer.push_str(&data);
+                            if buffer.len() > STARTUP_OUTPUT_LIMIT {
+                                let excess = buffer.len() - STARTUP_OUTPUT_LIMIT;
+                                buffer.drain(..excess);
+                            }
+                        }
+                    }
+
+                    let _ = app_flush.emit(
+                        "pty-output",
+                        PtyOutputPayload {
+                            session_id: session_id_for_reader.clone(),
+                            pty_id: pty_id_for_reader,
+                            data: data.clone(),
+                        },
+                    );
+                    let _ = runtime_mcp::append_pty_output(pty_id_for_reader, &data);
+                    if let Ok(mut map) = last_output.lock() {
+                        map.insert(pty_id_for_reader, Instant::now());
                     }
                 }
 
-                let _ = app_flush.emit(
-                    "pty-output",
-                    PtyOutputPayload {
-                        session_id: session_id_for_reader.clone(),
-                        pty_id: pty_id_for_reader,
-                        data: data.clone(),
-                    },
-                );
-                let _ = runtime_mcp::append_pty_output(pty_id_for_reader, &data);
-                pending.clear();
-                if let Ok(mut map) = last_output.lock() {
-                    map.insert(pty_id_for_reader, Instant::now());
+                if valid_len < pending.len() {
+                    let leftover = pending[valid_len..].to_vec();
+                    pending.clear();
+                    pending.extend(leftover);
+                } else {
+                    pending.clear();
                 }
             }
         }

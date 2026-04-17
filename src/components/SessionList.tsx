@@ -293,7 +293,11 @@ export function SessionList() {
                         <div
                           key={`${session.providerId}-${session.sessionId}`}
                           className="group rounded-[var(--radius-sm)] px-2.5 py-1.5 text-xs transition-colors hover:bg-[var(--border-subtle)]"
-                          title={`${session.providerId.toUpperCase()} | ${session.timestamp}`}
+                          title={
+                            session.title
+                              ? `${session.title}\n${formatTimestampLabel(session.timestamp)}`
+                              : formatTimestampLabel(session.timestamp)
+                          }
                           onContextMenu={(event) => {
                             event.preventDefault();
                             event.stopPropagation();

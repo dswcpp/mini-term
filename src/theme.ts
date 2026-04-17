@@ -74,6 +74,7 @@ const warmCarbon: ThemePresetDefinition = {
     '--diff-del-inline-bg': 'rgba(212, 96, 90, 0.28)',
     '--diff-del-inline-text': '#fee2de',
     '--color-ai': '#b08cd4',
+    '--color-ai-working': '#f5c518',
     '--color-ai-glow': '#b08cd480',
     '--app-shell-background':
       'radial-gradient(circle at top, rgba(255, 255, 255, 0.06), transparent 40%), linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(0, 0, 0, 0.08)), rgba(12, 11, 10, 0.44)',
@@ -156,6 +157,7 @@ const ghosttyDark: ThemePresetDefinition = {
     '--diff-del-inline-bg': 'rgba(224, 106, 106, 0.30)',
     '--diff-del-inline-text': '#ffe8e8',
     '--color-ai': '#9a8bff',
+    '--color-ai-working': '#f0c44c',
     '--color-ai-glow': '#9a8bff70',
     '--app-shell-background':
       'radial-gradient(circle at top, rgba(255, 255, 255, 0.04), transparent 38%), linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(0, 0, 0, 0.10)), rgba(9, 9, 10, 0.34)',
@@ -238,6 +240,7 @@ const ghosttyLight: ThemePresetDefinition = {
     '--diff-del-inline-bg': 'rgba(197, 77, 80, 0.22)',
     '--diff-del-inline-text': '#74171b',
     '--color-ai': '#6b60d8',
+    '--color-ai-working': '#c4521a',
     '--color-ai-glow': '#6b60d85a',
     '--app-shell-background':
       'radial-gradient(circle at top, rgba(255, 255, 255, 0.38), transparent 42%), linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(238, 241, 245, 0.55)), rgba(249, 250, 252, 0.60)',

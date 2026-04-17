@@ -197,6 +197,7 @@ fn collect_repo_status(
 pub struct GitRepoInfo {
     pub name: String,
     pub path: String,
+    pub current_branch: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -216,6 +217,7 @@ pub struct GitCommitInfo {
     pub hash: String,
     pub short_hash: String,
     pub message: String,
+    pub body: Option<String>,
     pub author: String,
     pub timestamp: i64,
 }
@@ -226,6 +228,15 @@ pub struct CommitFileInfo {
     pub path: String,
     pub status: String,
     pub old_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_head: bool,
+    pub is_remote: bool,
+    pub commit_hash: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -693,9 +704,23 @@ pub fn discover_git_repos(project_path: String) -> Result<Vec<GitRepoInfo>, Stri
     let repos = find_repos(path);
     Ok(repos
         .into_iter()
-        .map(|(name, abs_path, _)| GitRepoInfo {
-            name,
-            path: abs_path.to_string_lossy().to_string(),
+        .map(|(name, abs_path, repo)| {
+            let current_branch = repo.head().ok().and_then(|head| {
+                if head.is_branch() {
+                    head.shorthand().map(|value| value.to_string())
+                } else {
+                    head.target().map(|oid| {
+                        let hash = oid.to_string();
+                        format!("({})", &hash[..7.min(hash.len())])
+                    })
+                }
+            });
+
+            GitRepoInfo {
+                name,
+                path: abs_path.to_string_lossy().to_string(),
+                current_branch,
+            }
         })
         .collect())
 }
@@ -735,18 +760,73 @@ pub fn get_git_log(
         let hash = oid.to_string();
         let short_hash = hash[..7.min(hash.len())].to_string();
         let message = commit.summary().unwrap_or("").to_string();
+        let body = commit.body().map(|value| value.to_string());
         let author = commit.author().name().unwrap_or("unknown").to_string();
         let timestamp = commit.time().seconds();
         result.push(GitCommitInfo {
             hash,
             short_hash,
             message,
+            body,
             author,
             timestamp,
         });
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+pub fn get_repo_branches(repo_path: String) -> Result<Vec<BranchInfo>, String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let head_target = repo.head().ok().and_then(|head| head.target());
+
+    let mut branches = Vec::new();
+
+    for branch_result in repo
+        .branches(Some(BranchType::Local))
+        .map_err(|e| e.to_string())?
+    {
+        let (branch, _) = branch_result.map_err(|e| e.to_string())?;
+        let name = branch
+            .name()
+            .map_err(|e| e.to_string())?
+            .unwrap_or("")
+            .to_string();
+        if let Some(target) = branch.get().target() {
+            branches.push(BranchInfo {
+                name,
+                is_head: head_target == Some(target),
+                is_remote: false,
+                commit_hash: target.to_string(),
+            });
+        }
+    }
+
+    for branch_result in repo
+        .branches(Some(BranchType::Remote))
+        .map_err(|e| e.to_string())?
+    {
+        let (branch, _) = branch_result.map_err(|e| e.to_string())?;
+        let name = branch
+            .name()
+            .map_err(|e| e.to_string())?
+            .unwrap_or("")
+            .to_string();
+        if name.ends_with("/HEAD") {
+            continue;
+        }
+        if let Some(target) = branch.get().target() {
+            branches.push(BranchInfo {
+                name,
+                is_head: false,
+                is_remote: true,
+                commit_hash: target.to_string(),
+            });
+        }
+    }
+
+    Ok(branches)
 }
 
 #[tauri::command]
@@ -903,6 +983,38 @@ pub fn get_commit_file_diff(
         false,
         false,
     ))
+}
+
+#[tauri::command]
+pub async fn git_pull(repo_path: String) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("pull")
+        .current_dir(&repo_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("Failed to execute git pull: {error}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn git_push(repo_path: String) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("push")
+        .current_dir(&repo_path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("Failed to execute git push: {error}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
 }
 
 struct MatchedHistoryEntry {

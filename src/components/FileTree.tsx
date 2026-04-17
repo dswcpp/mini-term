@@ -65,6 +65,15 @@ function getPathDetail(path: string) {
   return segments.join('/');
 }
 
+function getParentPath(targetPath: string, rootPath: string) {
+  if (normalizePath(targetPath) === normalizePath(rootPath)) {
+    return rootPath;
+  }
+
+  const lastSeparatorIndex = Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf('\\'));
+  return lastSeparatorIndex > 0 ? targetPath.slice(0, lastSeparatorIndex) : rootPath;
+}
+
 function flattenEntries(
   root: WorkspaceRootConfig,
   entriesByDirectory: Map<string, FileEntry[]>,
@@ -561,6 +570,28 @@ export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
         },
       );
 
+      if (!isRoot) {
+        items.push(
+          { separator: true },
+          {
+            label: 'Rename',
+            onClick: async () => {
+              const nextName = await showPrompt('Rename', 'Enter a new name', entry.name);
+              if (!nextName?.trim() || nextName.trim() === entry.name) {
+                return;
+              }
+
+              await invoke('rename_entry', {
+                oldPath: entry.path,
+                newName: nextName.trim(),
+              });
+              await loadDirectory(root.path, getParentPath(entry.path, root.path));
+              await loadGitStatus(root);
+            },
+          },
+        );
+      }
+
       if (entry.isDir) {
         items.push(
           { separator: true },
@@ -620,6 +651,7 @@ export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
       handleOpenDiff,
       handleOpenFile,
       loadDirectory,
+      loadGitStatus,
       resolveFileHistoryMenuItem,
       workspace,
     ],

@@ -38,6 +38,7 @@ coverage
 
 # Brainstorm / temp files
 .superpowers
+.tmp-tests/*.js
 tmp
 temp
 
