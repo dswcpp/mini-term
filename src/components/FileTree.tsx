@@ -1,436 +1,760 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { message } from '@tauri-apps/plugin-dialog';
-import { revealItemInDir, openPath } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { useAppStore, isExpanded, toggleExpandedDir } from '../store';
-import { useTauriEvent } from '../hooks/useTauriEvent';
+import { openPath, revealItemInDir } from '@tauri-apps/plugin-opener';
+import { toggleExpandedDir, useAppStore, selectWorkspaceConfig } from '../store';
+import { retainProjectTreeWatch, subscribeProjectFs, subscribeProjectGitDirty } from '../runtime/workspaceRuntime';
+import type {
+  FileEntry,
+  GitFileHistoryResult,
+  GitFileStatus,
+  WorkspaceConfig,
+  WorkspaceRootConfig,
+} from '../types';
 import { showContextMenu } from '../utils/contextMenu';
+import { buildDirectoryStatusIndex } from '../utils/gitStatusDirectoryIndex';
+import { collectAffectedLoadedDirectories } from '../utils/fileTreeRefresh';
+import { isMarkdownFilePath } from '../utils/markdownPreview';
 import { showPrompt } from '../utils/prompt';
-import { DiffModal } from './DiffModal';
-import { FileViewerModal } from './FileViewerModal';
-import { initFileDrag } from '../utils/fileDragState';
-import type { FileEntry, FsChangePayload, GitFileStatus, PtyOutputPayload } from '../types';
 
-interface TreeNodeProps {
+const ROW_HEIGHT = 26;
+const OVERSCAN_ROWS = 10;
+
+interface FileTreeProps {
+  workspaceId: string | null | undefined;
+  isVisible?: boolean;
+}
+
+interface VisibleTreeNode {
   entry: FileEntry;
-  projectRoot: string;
   depth: number;
-  gitStatusMap: Map<string, GitFileStatus>;
-  onViewDiff: (status: GitFileStatus) => void;
-  onViewFile: (path: string) => void;
+  root: WorkspaceRootConfig;
+  isRoot: boolean;
+}
+
+function normalizePath(value: string) {
+  return value.replace(/[\\/]+/g, '/').replace(/\/$/, '');
 }
 
 function getRelativePath(targetPath: string, rootPath: string) {
-  const normalize = (value: string) => value.replace(/[\\/]+/g, '/').replace(/\/$/, '');
-  const normalizedRoot = normalize(rootPath);
-  const normalizedTarget = normalize(targetPath);
-  const sep = rootPath.includes('\\') ? '\\' : '/';
+  const normalizedRoot = normalizePath(rootPath);
+  const normalizedTarget = normalizePath(targetPath);
+  const separator = rootPath.includes('\\') ? '\\' : '/';
 
-  if (normalizedTarget === normalizedRoot) return '.';
-  if (!normalizedTarget.startsWith(`${normalizedRoot}/`)) return targetPath;
+  if (normalizedTarget === normalizedRoot) {
+    return '.';
+  }
 
-  return normalizedTarget.slice(normalizedRoot.length + 1).replace(/\//g, sep);
+  if (!normalizedTarget.startsWith(`${normalizedRoot}/`)) {
+    return targetPath;
+  }
+
+  return normalizedTarget.slice(normalizedRoot.length + 1).replace(/\//g, separator);
 }
 
-function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewFile }: TreeNodeProps) {
-  const activeProjectId = useAppStore((s) => s.activeProjectId);
-  const [expanded, setExpanded] = useState(() =>
-    activeProjectId ? isExpanded(activeProjectId, entry.path) : false
-  );
-  const [children, setChildren] = useState<FileEntry[]>([]);
+function belongsToRoot(path: string, rootPath: string) {
+  const normalizedRoot = normalizePath(rootPath);
+  const normalizedPath = normalizePath(path);
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
 
-  const loadChildren = useCallback(async () => {
-    const entries = await invoke<FileEntry[]>('list_directory', {
-      projectRoot,
-      path: entry.path,
-    });
-    setChildren(entries);
-  }, [entry.path, projectRoot]);
+function getPathDetail(path: string) {
+  const normalized = normalizePath(path);
+  const segments = normalized.split('/');
+  segments.pop();
+  return segments.join('/');
+}
 
-  // 恢复时自动加载子节点并注册监听
-  useEffect(() => {
-    if (expanded && entry.isDir) {
-      loadChildren();
-      invoke('watch_directory', { path: entry.path, projectPath: projectRoot });
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+function getParentPath(targetPath: string, rootPath: string) {
+  if (normalizePath(targetPath) === normalizePath(rootPath)) {
+    return rootPath;
+  }
 
-  const handleToggle = useCallback(async () => {
-    if (!entry.isDir) {
-      const rel = getRelativePath(entry.path, projectRoot).replace(/\\/g, '/');
-      const fileStatus = gitStatusMap.get(rel);
-      if (fileStatus) {
-        onViewDiff(fileStatus);
-      } else {
-        onViewFile(entry.path);
+  const lastSeparatorIndex = Math.max(targetPath.lastIndexOf('/'), targetPath.lastIndexOf('\\'));
+  return lastSeparatorIndex > 0 ? targetPath.slice(0, lastSeparatorIndex) : rootPath;
+}
+
+function flattenEntries(
+  root: WorkspaceRootConfig,
+  entriesByDirectory: Map<string, FileEntry[]>,
+  expandedPaths: Set<string>,
+  output: VisibleTreeNode[],
+) {
+  const walk = (entries: FileEntry[], depth: number) => {
+    for (const entry of entries) {
+      output.push({ entry, depth, root, isRoot: false });
+      if (!entry.isDir || !expandedPaths.has(entry.path)) {
+        continue;
       }
-      return;
+      const children = entriesByDirectory.get(entry.path);
+      if (!children || children.length === 0) {
+        continue;
+      }
+      walk(children, depth + 1);
     }
-    const next = !expanded;
-    if (next) {
-      await loadChildren();
-      invoke('watch_directory', { path: entry.path, projectPath: projectRoot });
-    } else {
-      invoke('unwatch_directory', { path: entry.path });
-    }
-    setExpanded(next);
-    if (activeProjectId) {
-      toggleExpandedDir(activeProjectId, entry.path, next);
-    }
-  }, [entry, expanded, loadChildren, projectRoot, gitStatusMap, onViewDiff, onViewFile, activeProjectId]);
+  };
 
-  useTauriEvent<FsChangePayload>('fs-change', useCallback((payload: FsChangePayload) => {
-    if (expanded && payload.path.startsWith(entry.path)) {
-      loadChildren();
-    }
-  }, [expanded, entry.path, loadChildren]));
+  output.push({
+    entry: {
+      name: root.name,
+      path: root.path,
+      isDir: true,
+    },
+    depth: 0,
+    root,
+    isRoot: true,
+  });
 
-  return (
-    <div>
-      <div
-        className={`flex items-center gap-1 py-[3px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 ${
-          entry.ignored ? 'text-[var(--text-muted)] opacity-50' : entry.isDir ? 'text-[var(--color-folder)]' : 'text-[var(--color-file)]'
-        }`}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
-        onClick={handleToggle}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          const relativePath = getRelativePath(entry.path, projectRoot);
-          const items: Parameters<typeof showContextMenu>[2] = [
-            {
-              label: '复制相对路径',
-              onClick: () => writeText(relativePath),
-            },
-            {
-              label: '复制绝对路径',
-              onClick: () => writeText(entry.path),
-            },
-            { separator: true },
-            {
-              label: '在文件夹中打开',
-              onClick: () => revealItemInDir(entry.path),
-            },
-          ];
-          if (!entry.isDir) {
-            items.unshift({
-              label: '使用默认工具打开',
-              onClick: () => openPath(entry.path),
-            });
-          }
-          items.push({ separator: true });
-          items.push({
-            label: '重命名',
-            onClick: async () => {
-              const newName = await showPrompt('重命名', '请输入新名称', entry.name);
-              if (!newName?.trim() || newName.trim() === entry.name) return;
-              try {
-                await invoke('rename_entry', { oldPath: entry.path, newName: newName.trim() });
-                loadChildren();
-              } catch (err) {
-                console.error('重命名失败:', err);
-              }
-            },
-          });
-          if (entry.isDir) {
-            items.push({ separator: true });
-            items.push({
-              label: '新建文件',
-              onClick: async () => {
-                const name = await showPrompt('新建文件', '请输入文件名');
-                if (!name?.trim()) return;
-                const sep = entry.path.includes('/') ? '/' : '\\';
-                await invoke('create_file', { path: `${entry.path}${sep}${name.trim()}` });
-                if (!expanded) handleToggle();
-                else loadChildren();
-              },
-            });
-            items.push({
-              label: '新建文件夹',
-              onClick: async () => {
-                const name = await showPrompt('新建文件夹', '请输入文件夹名');
-                if (!name?.trim()) return;
-                const sep = entry.path.includes('/') ? '/' : '\\';
-                await invoke('create_directory', { path: `${entry.path}${sep}${name.trim()}` });
-                if (!expanded) handleToggle();
-                else loadChildren();
-              },
-            });
-          }
-          // 查看变更菜单项
-          const relForGit = getRelativePath(entry.path, projectRoot).replace(/\\/g, '/');
-          const entryGitStatus = gitStatusMap.get(relForGit);
-          if (entryGitStatus && !entry.isDir) {
-            items.push({ separator: true });
-            items.push({
-              label: '查看变更',
-              onClick: () => onViewDiff(entryGitStatus),
-            });
-          }
-          showContextMenu(e.clientX, e.clientY, items);
-        }}
-        onMouseDown={(e) => {
-          if (e.button === 0) initFileDrag(entry.path, e.clientX, e.clientY);
-        }}
-      >
-        {entry.isDir && (
-          <span className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
-            style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', display: 'inline-block' }}>
-            ▾
-          </span>
-        )}
-        {!entry.isDir && <span className="w-3 text-center text-[var(--text-muted)] text-xs">·</span>}
-        <span className="truncate" title={entry.name}>{entry.name}</span>
-        {(() => {
-          const rel = getRelativePath(entry.path, projectRoot).replace(/\\/g, '/');
-          const fileStatus = gitStatusMap.get(rel);
-          const GIT_COLORS: Record<string, string> = {
-            M: 'text-[var(--color-warning)]',
-            A: 'text-[var(--color-success)]',
-            D: 'text-[var(--color-error)]',
-            R: 'text-[var(--color-info)]',
-            '?': 'text-[var(--color-success)]',
-            C: 'text-[var(--color-error)]',
-          };
-          if (fileStatus) {
-            return (
-              <span className={`ml-1.5 text-xs font-bold flex-shrink-0 ${GIT_COLORS[fileStatus.statusLabel] ?? 'text-[var(--text-muted)]'}`}>
-                {fileStatus.statusLabel}
-              </span>
-            );
-          }
-          if (entry.isDir) {
-            const prefix = rel.endsWith('/') ? rel : rel + '/';
-            const PRIORITY: Record<string, number> = { C: 6, D: 5, M: 4, A: 3, R: 2, '?': 1 };
-            let bestLabel = '';
-            let bestPriority = 0;
-            for (const [path, s] of gitStatusMap) {
-              if (path.startsWith(prefix)) {
-                const p = PRIORITY[s.statusLabel] ?? 0;
-                if (p > bestPriority) {
-                  bestPriority = p;
-                  bestLabel = s.statusLabel;
-                }
-              }
-            }
-            if (bestLabel) {
-              return (
-                <span className={`ml-1.5 text-xs font-bold flex-shrink-0 opacity-70 ${GIT_COLORS[bestLabel] ?? 'text-[var(--text-muted)]'}`}>
-                  {bestLabel}
-                </span>
-              );
-            }
-          }
-          return null;
-        })()}
-      </div>
+  if (!expandedPaths.has(root.path)) {
+    return;
+  }
 
-      {expanded &&
-        children.map((child) => (
-          <TreeNode
-            key={child.path}
-            entry={child}
-            projectRoot={projectRoot}
-            depth={depth + 1}
-            gitStatusMap={gitStatusMap}
-            onViewDiff={onViewDiff}
-            onViewFile={onViewFile}
-          />
-        ))}
-    </div>
-  );
+  walk(entriesByDirectory.get(root.path) ?? [], 1);
 }
 
-export function FileTree() {
-  const activeProjectId = useAppStore((s) => s.activeProjectId);
-  const config = useAppStore((s) => s.config);
-  const project = config.projects.find((p) => p.id === activeProjectId);
-
-  const handleOpenInVscode = useCallback(async () => {
-    if (!project) return;
-    // 前端做一次快速预检查(避免无意义的 invoke),后端会权威地再读一次 config
-    if (!(config.vscodePath ?? '').trim()) {
-      await message(
-        '请先在『设置 → 系统设置 → 外部编辑器』中配置 VS Code 可执行文件路径。',
-        { title: '未配置 VS Code 路径', kind: 'warning' },
-      );
-      return;
+function collectRootDirectoryPaths(rootPath: string, expandedPaths: Iterable<string>) {
+  const directoryPaths = new Set<string>([rootPath]);
+  for (const path of expandedPaths) {
+    if (belongsToRoot(path, rootPath)) {
+      directoryPaths.add(path);
     }
+  }
+  return Array.from(directoryPaths);
+}
+
+function buildInitialExpandedPaths(workspace: WorkspaceConfig) {
+  const expanded = new Set<string>();
+  for (const root of workspace.roots) {
+    expanded.add(root.path);
+    const persisted = workspace.expandedDirsByRoot?.[root.id] ?? [];
+    persisted.forEach((path) => expanded.add(path));
+  }
+  return expanded;
+}
+
+function buildWorkspaceTreeKey(workspace: WorkspaceConfig) {
+  return [
+    workspace.id,
+    ...workspace.roots.map((root) => `${root.id}:${normalizePath(root.path)}`),
+  ].join('|');
+}
+
+export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
+  const openFileViewer = useAppStore((state) => state.openFileViewer);
+  const openWorktreeDiff = useAppStore((state) => state.openWorktreeDiff);
+  const openFileHistory = useAppStore((state) => state.openFileHistory);
+  const createTerminalTab = useAppStore((state) => state.createTerminalTab);
+  const workspace = useAppStore(selectWorkspaceConfig(workspaceId));
+
+  const [entriesByDirectory, setEntriesByDirectory] = useState<Map<string, FileEntry[]>>(new Map());
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [gitStatusByRoot, setGitStatusByRoot] = useState<Map<string, Map<string, GitFileStatus>>>(new Map());
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(320);
+
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const expandedPathsRef = useRef(expandedPaths);
+  const directoryLoadRequestsRef = useRef<Map<string, Promise<FileEntry[]>>>(new Map());
+  const scrollTopRef = useRef(scrollTop);
+  const scrollFrameRef = useRef<number | null>(null);
+  const initializedRef = useRef(false);
+  const initializedWorkspaceKeyRef = useRef<string | null>(null);
+
+  expandedPathsRef.current = expandedPaths;
+  scrollTopRef.current = scrollTop;
+
+  const requestDirectoryEntries = useCallback(
+    async (rootPath: string, directoryPath: string) => {
+      const requestKey = `${normalizePath(rootPath)}::${normalizePath(directoryPath)}`;
+      const existingRequest = directoryLoadRequestsRef.current.get(requestKey);
+      if (existingRequest) {
+        return existingRequest;
+      }
+
+      const request = invoke<FileEntry[]>('list_directory', {
+        projectRoot: rootPath,
+        path: directoryPath,
+      }).finally(() => {
+        directoryLoadRequestsRef.current.delete(requestKey);
+      });
+
+      directoryLoadRequestsRef.current.set(requestKey, request);
+      return request;
+    },
+    [],
+  );
+
+  const loadDirectories = useCallback(
+    async (rootPath: string, directoryPaths: Iterable<string>) => {
+      const uniqueDirectoryPaths = Array.from(new Set(directoryPaths)).filter((path) => belongsToRoot(path, rootPath));
+      if (uniqueDirectoryPaths.length === 0) {
+        return;
+      }
+
+      const results = await Promise.allSettled(
+        uniqueDirectoryPaths.map(
+          async (directoryPath) => [directoryPath, await requestDirectoryEntries(rootPath, directoryPath)] as const,
+        ),
+      );
+
+      const successfulResults = results
+        .filter(
+          (result): result is PromiseFulfilledResult<readonly [string, FileEntry[]]> => result.status === 'fulfilled',
+        )
+        .map((result) => result.value);
+
+      if (successfulResults.length === 0) {
+        return;
+      }
+
+      setEntriesByDirectory((prev) => {
+        const next = new Map(prev);
+        for (const [directoryPath, entries] of successfulResults) {
+          next.set(directoryPath, entries);
+        }
+        return next;
+      });
+    },
+    [requestDirectoryEntries],
+  );
+
+  const loadDirectory = useCallback(
+    async (rootPath: string, directoryPath: string) => {
+      await loadDirectories(rootPath, [directoryPath]);
+    },
+    [loadDirectories],
+  );
+
+  const loadGitStatus = useCallback(async (root: WorkspaceRootConfig) => {
     try {
-      await invoke('open_in_vscode', { path: project.path });
-    } catch (err) {
-      const detail = typeof err === 'string' ? err : String(err);
-      console.error('打开 VS Code 失败:', err);
-      await message(detail, {
-        title: '打开 VS Code 失败',
-        kind: 'error',
+      const statuses = await invoke<GitFileStatus[]>('get_git_status', { projectPath: root.path });
+      const next = new Map<string, GitFileStatus>();
+      for (const status of statuses) {
+        next.set(normalizePath(status.path), status);
+      }
+      setGitStatusByRoot((prev) => {
+        const map = new Map(prev);
+        map.set(root.id, next);
+        return map;
+      });
+    } catch {
+      setGitStatusByRoot((prev) => {
+        const map = new Map(prev);
+        map.set(root.id, new Map());
+        return map;
       });
     }
-  }, [project, config.vscodePath]);
+  }, []);
 
-  const [rootEntries, setRootEntries] = useState<FileEntry[]>([]);
-  const [gitStatusMap, setGitStatusMap] = useState<Map<string, GitFileStatus>>(new Map());
-  const [diffTarget, setDiffTarget] = useState<GitFileStatus | null>(null);
-  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const loadGitStatus = useCallback(() => {
-    if (!project) return;
-    invoke<GitFileStatus[]>('get_git_status', { projectPath: project.path })
-      .then((statuses) => {
-        const map = new Map<string, GitFileStatus>();
-        for (const s of statuses) map.set(s.path, s);
-        setGitStatusMap(map);
-      })
-      .catch(() => setGitStatusMap(new Map()));
-  }, [project?.path]);
+  const clearPendingScrollFrame = useCallback(() => {
+    if (scrollFrameRef.current !== null) {
+      cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
-    loadGitStatus();
-  }, [loadGitStatus]);
-
-  const debouncedRefresh = useCallback(() => {
-    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(loadGitStatus, 500);
-  }, [loadGitStatus]);
-
-  const loadRootEntries = useCallback(() => {
-    if (!project) return;
-    invoke<FileEntry[]>('list_directory', {
-      projectRoot: project.path,
-      path: project.path,
-    }).then(setRootEntries);
-  }, [project?.path]);
-
-  useEffect(() => {
-    if (!project) {
-      setRootEntries([]);
+    if (!workspace) {
+      initializedRef.current = false;
+      initializedWorkspaceKeyRef.current = null;
+      directoryLoadRequestsRef.current.clear();
+      clearPendingScrollFrame();
+      scrollTopRef.current = 0;
+      setEntriesByDirectory(new Map());
+      setExpandedPaths(new Set());
+      setGitStatusByRoot(new Map());
+      setScrollTop(0);
       return;
     }
-    loadRootEntries();
-    invoke('watch_directory', { path: project.path, projectPath: project.path });
-    return () => { invoke('unwatch_directory', { path: project.path }); };
-  }, [project?.path, loadRootEntries]);
 
-  useTauriEvent<FsChangePayload>('fs-change', useCallback((payload: FsChangePayload) => {
-    if (project && payload.path === project.path) {
-      loadRootEntries();
+    if (!isVisible) {
+      return;
     }
-  }, [project?.path, loadRootEntries]));
 
-  useTauriEvent<FsChangePayload>('fs-change', useCallback((payload: FsChangePayload) => {
-    if (project && payload.projectPath === project.path) {
-      debouncedRefresh();
+    const nextWorkspaceKey = buildWorkspaceTreeKey(workspace);
+    const shouldReset = !initializedRef.current || initializedWorkspaceKeyRef.current !== nextWorkspaceKey;
+    const expandedToLoad = shouldReset ? buildInitialExpandedPaths(workspace) : new Set(expandedPathsRef.current);
+
+    initializedRef.current = true;
+    initializedWorkspaceKeyRef.current = nextWorkspaceKey;
+
+    if (shouldReset) {
+      directoryLoadRequestsRef.current.clear();
+      clearPendingScrollFrame();
+      scrollTopRef.current = 0;
+      setExpandedPaths(expandedToLoad);
+      setEntriesByDirectory(new Map());
+      setGitStatusByRoot(new Map());
+      setScrollTop(0);
+      listRef.current?.scrollTo({ top: 0 });
     }
-  }, [project?.path, debouncedRefresh]));
 
-  const GIT_PATTERNS = [/create mode/, /Switched to/, /Already up to date/, /insertions?\(\+\)/, /deletions?\(-\)/];
-  useTauriEvent<PtyOutputPayload>('pty-output', useCallback((payload: PtyOutputPayload) => {
-    if (GIT_PATTERNS.some((p) => p.test(payload.data))) {
-      debouncedRefresh();
+    for (const root of workspace.roots) {
+      void loadDirectories(root.path, collectRootDirectoryPaths(root.path, expandedToLoad));
+      void loadGitStatus(root);
     }
-  }, [debouncedRefresh]));
+  }, [clearPendingScrollFrame, isVisible, loadDirectories, loadGitStatus, workspace]);
 
-  const handleViewDiff = useCallback((status: GitFileStatus) => {
-    setDiffTarget(status);
+  useEffect(() => {
+    if (!workspace || !isVisible) {
+      return;
+    }
+
+    const disposers: Array<() => void> = [];
+    for (const root of workspace.roots) {
+      const releaseWatch = retainProjectTreeWatch(root.path);
+      const unsubscribeFs = subscribeProjectFs(root.path, (events) => {
+        const affectedDirectories = collectAffectedLoadedDirectories(
+          root.path,
+          collectRootDirectoryPaths(root.path, expandedPathsRef.current),
+          events,
+        );
+        if (affectedDirectories.length > 0) {
+          void loadDirectories(root.path, affectedDirectories);
+        }
+      });
+      const unsubscribeGitDirty = subscribeProjectGitDirty(root.path, () => {
+        void loadGitStatus(root);
+      });
+      disposers.push(() => {
+        unsubscribeFs();
+        unsubscribeGitDirty();
+        releaseWatch();
+      });
+    }
+
+    return () => {
+      disposers.forEach((dispose) => dispose());
+    };
+  }, [isVisible, loadDirectories, loadGitStatus, workspace]);
+
+  useEffect(() => {
+    const element = listRef.current;
+    if (!workspace || !isVisible || !element) {
+      return;
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const nextHeight = entries[0]?.contentRect.height ?? element.clientHeight;
+      setViewportHeight(Math.max(0, nextHeight));
+    });
+
+    observer.observe(element);
+    setViewportHeight(element.clientHeight);
+    return () => {
+      observer.disconnect();
+      clearPendingScrollFrame();
+    };
+  }, [clearPendingScrollFrame, isVisible, workspace?.id]);
+
+  const handleScroll = useCallback((nextScrollTop: number) => {
+    if (scrollTopRef.current === nextScrollTop && scrollFrameRef.current === null) {
+      return;
+    }
+
+    scrollTopRef.current = nextScrollTop;
+    if (scrollFrameRef.current !== null) {
+      return;
+    }
+
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      setScrollTop((previous) => (previous === scrollTopRef.current ? previous : scrollTopRef.current));
+    });
   }, []);
 
-  const [viewFilePath, setViewFilePath] = useState<string | null>(null);
-  const handleViewFile = useCallback((path: string) => {
-    setViewFilePath(path);
-  }, []);
+  const visibleNodes = useMemo(() => {
+    if (!workspace) {
+      return [];
+    }
 
-  const handleRootContextMenu = useCallback((e: React.MouseEvent) => {
-    if (!project) return;
-    e.preventDefault();
-    const sep = project.path.includes('/') ? '/' : '\\';
-    showContextMenu(e.clientX, e.clientY, [
-      {
-        label: '新建文件',
-        onClick: async () => {
-          const name = await showPrompt('新建文件', '请输入文件名');
-          if (!name?.trim()) return;
-          await invoke('create_file', { path: `${project.path}${sep}${name.trim()}` });
-          loadRootEntries();
-        },
-      },
-      {
-        label: '新建文件夹',
-        onClick: async () => {
-          const name = await showPrompt('新建文件夹', '请输入文件夹名');
-          if (!name?.trim()) return;
-          await invoke('create_directory', { path: `${project.path}${sep}${name.trim()}` });
-          loadRootEntries();
-        },
-      },
-    ]);
-  }, [project, loadRootEntries]);
+    const output: VisibleTreeNode[] = [];
+    for (const root of workspace.roots) {
+      flattenEntries(root, entriesByDirectory, expandedPaths, output);
+    }
+    return output;
+  }, [entriesByDirectory, expandedPaths, workspace]);
 
-  if (!project) {
+  const directoryStatusByRoot = useMemo(() => {
+    const next = new Map<string, Map<string, string>>();
+    for (const [rootId, gitStatusMap] of gitStatusByRoot) {
+      next.set(
+        rootId,
+        buildDirectoryStatusIndex(
+          Array.from(gitStatusMap, ([path, status]) => ({
+            path,
+            statusLabel: status.statusLabel,
+          })),
+        ),
+      );
+    }
+    return next;
+  }, [gitStatusByRoot]);
+
+  const visibleRange = useMemo(() => {
+    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN_ROWS);
+    const end = Math.min(visibleNodes.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN_ROWS);
+    return { start, end };
+  }, [scrollTop, viewportHeight, visibleNodes.length]);
+
+  const totalHeight = visibleNodes.length * ROW_HEIGHT;
+  const offsetTop = visibleRange.start * ROW_HEIGHT;
+  const renderedNodes = visibleNodes.slice(visibleRange.start, visibleRange.end);
+
+  const handleOpenFile = useCallback(
+    (filePath: string, options?: { initialPreview?: boolean }) => {
+      if (!workspace) {
+        return;
+      }
+      openFileViewer(workspace.id, filePath, {
+        initialMode: options?.initialPreview ? 'preview' : undefined,
+      });
+    },
+    [openFileViewer, workspace],
+  );
+
+  const handleOpenDiff = useCallback(
+    (root: WorkspaceRootConfig, status: GitFileStatus) => {
+      if (!workspace) {
+        return;
+      }
+      openWorktreeDiff(workspace.id, root.path, status);
+    },
+    [openWorktreeDiff, workspace],
+  );
+
+  const resolveFileHistoryMenuItem = useCallback(
+    async (root: WorkspaceRootConfig, entry: FileEntry, gitStatus?: GitFileStatus) => {
+      if (!workspace || entry.isDir) {
+        return null;
+      }
+
+      if (entry.ignored) {
+        return {
+          label: 'View History (Ignored)',
+          disabled: true,
+        };
+      }
+
+      if (gitStatus?.status === 'untracked') {
+        return {
+          label: 'View History (Untracked)',
+          disabled: true,
+        };
+      }
+
+      if (gitStatus?.status === 'added') {
+        return {
+          label: 'View History (No commits yet)',
+          disabled: true,
+        };
+      }
+
+      try {
+        const result = await invoke<GitFileHistoryResult>('get_file_git_history', {
+          projectPath: root.path,
+          filePath: entry.path,
+          beforeCommit: null,
+          limit: 1,
+        });
+
+        if (result.entries.length === 0) {
+          return {
+            label: 'View History (No commits yet)',
+            disabled: true,
+          };
+        }
+
+        return {
+          label: 'View History',
+          disabled: false,
+          onClick: () => openFileHistory(workspace.id, root.path, entry.path),
+        };
+      } catch {
+        return {
+          label: 'View History (Not in Git repo)',
+          disabled: true,
+        };
+      }
+    },
+    [openFileHistory, workspace],
+  );
+
+  const handleToggleEntry = useCallback(
+    async (node: VisibleTreeNode) => {
+      if (!workspace) {
+        return;
+      }
+
+      const { entry, root } = node;
+      if (!entry.isDir) {
+        const relativePath = normalizePath(getRelativePath(entry.path, root.path));
+        const fileStatus = gitStatusByRoot.get(root.id)?.get(relativePath);
+        if (fileStatus) {
+          handleOpenDiff(root, fileStatus);
+        } else {
+          handleOpenFile(entry.path);
+        }
+        return;
+      }
+
+      const nextExpanded = !expandedPaths.has(entry.path);
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        if (nextExpanded) {
+          next.add(entry.path);
+        } else {
+          next.delete(entry.path);
+        }
+        return next;
+      });
+      toggleExpandedDir(workspace.id, root.id, entry.path, nextExpanded);
+
+      if (nextExpanded) {
+        await loadDirectory(root.path, entry.path);
+      }
+    },
+    [expandedPaths, gitStatusByRoot, handleOpenDiff, handleOpenFile, loadDirectory, workspace],
+  );
+
+  const handleEntryContextMenu = useCallback(
+    async (event: React.MouseEvent, node: VisibleTreeNode) => {
+      if (!workspace) {
+        return;
+      }
+
+      const { entry, root, isRoot } = node;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const relativePath = getRelativePath(entry.path, root.path);
+      const normalizedRelativePath = normalizePath(relativePath);
+      const gitStatus = gitStatusByRoot.get(root.id)?.get(normalizedRelativePath);
+      const separator = root.path.includes('/') ? '/' : '\\';
+      const items: Parameters<typeof showContextMenu>[2] = [];
+
+      if (!entry.isDir) {
+        if (isMarkdownFilePath(entry.path)) {
+          items.push({
+            label: 'Markdown Preview',
+            onClick: () => handleOpenFile(entry.path, { initialPreview: true }),
+          });
+        }
+
+        items.push(
+          {
+            label: 'Open In App',
+            onClick: () => handleOpenFile(entry.path),
+          },
+          {
+            label: 'Open With Default App',
+            onClick: () => openPath(entry.path),
+          },
+          { separator: true },
+        );
+      }
+
+      items.push(
+        {
+          label: 'Copy Relative Path',
+          onClick: () => writeText(relativePath),
+        },
+        {
+          label: 'Copy Absolute Path',
+          onClick: () => writeText(entry.path),
+        },
+        { separator: true },
+        {
+          label: isRoot ? 'Reveal Root In Explorer' : 'Reveal In Explorer',
+          onClick: () => revealItemInDir(entry.path),
+        },
+      );
+
+      if (!isRoot) {
+        items.push(
+          { separator: true },
+          {
+            label: 'Rename',
+            onClick: async () => {
+              const nextName = await showPrompt('Rename', 'Enter a new name', entry.name);
+              if (!nextName?.trim() || nextName.trim() === entry.name) {
+                return;
+              }
+
+              await invoke('rename_entry', {
+                oldPath: entry.path,
+                newName: nextName.trim(),
+              });
+              await loadDirectory(root.path, getParentPath(entry.path, root.path));
+              await loadGitStatus(root);
+            },
+          },
+        );
+      }
+
+      if (entry.isDir) {
+        items.push(
+          { separator: true },
+          {
+            label: 'New Terminal Here',
+            onClick: () => {
+              void createTerminalTab(workspace.id, { cwd: entry.path });
+            },
+          },
+          {
+            label: 'New File',
+            onClick: async () => {
+              const name = await showPrompt('New File', 'Enter file name');
+              if (!name?.trim()) {
+                return;
+              }
+              await invoke('create_file', { path: `${entry.path}${separator}${name.trim()}` });
+              await loadDirectory(root.path, entry.path);
+            },
+          },
+          {
+            label: 'New Folder',
+            onClick: async () => {
+              const name = await showPrompt('New Folder', 'Enter folder name');
+              if (!name?.trim()) {
+                return;
+              }
+              await invoke('create_directory', { path: `${entry.path}${separator}${name.trim()}` });
+              await loadDirectory(root.path, entry.path);
+            },
+          },
+        );
+      }
+
+      if (!entry.isDir) {
+        const fileHistoryItem = await resolveFileHistoryMenuItem(root, entry, gitStatus);
+        if (fileHistoryItem) {
+          items.push({ separator: true }, fileHistoryItem);
+        }
+      }
+
+      if (gitStatus && !entry.isDir) {
+        items.push(
+          { separator: true },
+          {
+            label: 'View Diff',
+            onClick: () => handleOpenDiff(root, gitStatus),
+          },
+        );
+      }
+
+      showContextMenu(event.clientX, event.clientY, items);
+    },
+    [
+      createTerminalTab,
+      gitStatusByRoot,
+      handleOpenDiff,
+      handleOpenFile,
+      loadDirectory,
+      loadGitStatus,
+      resolveFileHistoryMenuItem,
+      workspace,
+    ],
+  );
+
+  if (!workspace) {
     return (
-      <div className="h-full bg-[var(--bg-surface)] flex items-center justify-center text-[var(--text-muted)] text-base">
-        选择一个项目
+      <div className="flex h-full items-center justify-center bg-[var(--bg-surface)] text-base text-[var(--text-muted)]">
+        Select a workspace
       </div>
     );
   }
 
   return (
-    <div className="h-full bg-[var(--bg-surface)] flex flex-col overflow-y-auto border-l border-[var(--border-subtle)]">
-      <div className="px-3 pt-3 pb-1.5 flex items-center justify-between gap-2">
-        <span className="text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium truncate">
-          Files — {project.name}
-        </span>
-        <button
-          type="button"
-          onClick={handleOpenInVscode}
-          title="使用 VS Code 打开该文件夹"
-          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors flex-shrink-0 leading-none"
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M10 2h4v4" />
-            <path d="M14 2L7 9" />
-            <path d="M12 9v4a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1h4" />
-          </svg>
-        </button>
+    <div className="flex h-full flex-col overflow-hidden border-l border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+      <div className="px-3 pt-3 pb-1.5 text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
+        Files / {workspace.name}
       </div>
-      <div className="flex-1 px-1" onContextMenu={handleRootContextMenu}>
-        {rootEntries.map((entry) => (
-          <TreeNode
-            key={entry.path}
-            entry={entry}
-            projectRoot={project.path}
-            depth={0}
-            gitStatusMap={gitStatusMap}
-            onViewDiff={handleViewDiff}
-            onViewFile={handleViewFile}
-          />
-        ))}
+
+      <div
+        ref={listRef}
+        className="flex-1 overflow-auto px-1"
+        onScroll={(event) => handleScroll(event.currentTarget.scrollTop)}
+      >
+        {visibleNodes.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
+            Empty workspace
+          </div>
+        ) : (
+          <div style={{ height: `${totalHeight}px`, position: 'relative' }}>
+            <div style={{ transform: `translateY(${offsetTop}px)` }}>
+              {renderedNodes.map((node, index) => {
+                const relativePath = normalizePath(getRelativePath(node.entry.path, node.root.path));
+                const gitStatus = gitStatusByRoot.get(node.root.id)?.get(relativePath);
+                const directoryStatusLabel = node.entry.isDir
+                  ? directoryStatusByRoot.get(node.root.id)?.get(relativePath)
+                  : undefined;
+                const statusLabel = gitStatus?.statusLabel ?? directoryStatusLabel;
+                const statusTone =
+                  statusLabel === 'M'
+                    ? 'text-[var(--color-warning)]'
+                    : statusLabel === 'A' || statusLabel === '?'
+                      ? 'text-[var(--color-success)]'
+                      : statusLabel === 'D' || statusLabel === 'C'
+                        ? 'text-[var(--color-error)]'
+                        : statusLabel === 'R'
+                          ? 'text-[var(--color-info)]'
+                          : 'text-[var(--text-muted)]';
+
+                return (
+                  <div
+                    key={`${node.root.id}:${node.entry.path}`}
+                    className={`flex cursor-pointer items-center gap-1 rounded-[var(--radius-sm)] py-[3px] text-base transition-colors duration-100 hover:bg-[var(--border-subtle)] ${
+                      node.entry.ignored
+                        ? 'text-[var(--text-muted)] opacity-50'
+                        : node.entry.isDir
+                          ? 'text-[var(--color-folder)]'
+                          : 'text-[var(--color-file)]'
+                    }`}
+                    style={{
+                      height: `${ROW_HEIGHT}px`,
+                      paddingLeft: `${node.depth * 16 + 8}px`,
+                    }}
+                    onClick={() => {
+                      void handleToggleEntry(node);
+                    }}
+                    onContextMenu={(event) => handleEntryContextMenu(event, node)}
+                    draggable={!node.entry.isDir}
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData('text/plain', node.entry.path);
+                      event.dataTransfer.effectAllowed = 'copy';
+                    }}
+                    title={!node.entry.isDir ? getPathDetail(relativePath) : node.entry.path}
+                    data-index={visibleRange.start + index}
+                  >
+                    {node.entry.isDir ? (
+                      <span
+                        className="w-3 text-center text-[13px] text-[var(--text-muted)] transition-transform duration-150"
+                        style={{
+                          transform: expandedPaths.has(node.entry.path) ? 'rotate(0deg)' : 'rotate(-90deg)',
+                          display: 'inline-block',
+                        }}
+                      >
+                        {'>'}
+                      </span>
+                    ) : (
+                      <span className="w-3 text-center text-xs text-[var(--text-muted)]">-</span>
+                    )}
+                    <span className="truncate">
+                      {node.isRoot ? `${node.entry.name} (${node.root.role})` : node.entry.name}
+                    </span>
+                    {statusLabel ? (
+                      <span className={`ml-1.5 flex-shrink-0 text-xs font-bold ${statusTone}`}>
+                        {statusLabel}
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
-      {viewFilePath && (
-        <FileViewerModal
-          open={!!viewFilePath}
-          onClose={() => setViewFilePath(null)}
-          filePath={viewFilePath}
-        />
-      )}
-      {diffTarget && (
-        <DiffModal
-          open={!!diffTarget}
-          onClose={() => setDiffTarget(null)}
-          projectPath={project.path}
-          status={diffTarget}
-        />
-      )}
     </div>
   );
 }
