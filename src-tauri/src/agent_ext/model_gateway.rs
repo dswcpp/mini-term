@@ -33,14 +33,6 @@ impl ModelGatewayProviderKind {
         }
     }
 
-    pub fn default_base_url(self) -> Option<&'static str> {
-        match self {
-            Self::Reference => None,
-            Self::OpenAiCompatible => Some(DEFAULT_OPENAI_COMPATIBLE_BASE_URL),
-            Self::Anthropic => Some(DEFAULT_ANTHROPIC_BASE_URL),
-        }
-    }
-
     pub fn requires_model(self) -> bool {
         !matches!(self, Self::Reference)
     }

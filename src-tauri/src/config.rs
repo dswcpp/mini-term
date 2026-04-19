@@ -1,9 +1,12 @@
 use crate::agent_ext::mcp_interop::{ExternalMcpCatalog, ExternalMcpSyncResult};
 use crate::agent_ext::model_gateway::{ModelGatewayProviderKind, PROVIDER_KIND_REFERENCE};
 use crate::agent_policy::AgentPoliciesConfig;
+#[cfg(target_os = "windows")]
+use crate::windows_shell::{cmd_utf8_bootstrap_command, powershell_utf8_bootstrap_script};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
@@ -72,6 +75,8 @@ pub struct AppConfig {
     pub agent_backends: Option<AgentBackendsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_mcp: Option<ExternalMcpInteropConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vscode_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -203,11 +208,10 @@ impl SidecarBackendConfig {
         }
 
         if matches!(self.startup_mode, SidecarStartupMode::Process)
-            && !self
+            && self
                 .command
                 .as_deref()
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
+                .map(str::trim).is_none_or(|value| value.is_empty())
         {
             return Some(
                 "Sidecar backend is enabled, but the launch command is missing.".to_string(),
@@ -226,11 +230,10 @@ impl SidecarBackendConfig {
         };
 
         if provider_kind.requires_model()
-            && !self
+            && self
                 .provider
                 .model
-                .as_deref()
-                .is_some_and(|value| !value.is_empty())
+                .as_deref().is_none_or(|value| value.is_empty())
         {
             return Some(format!(
                 "Sidecar provider `{}` requires a model.",
@@ -245,22 +248,17 @@ impl SidecarBackendConfig {
             ));
         }
 
-        if self
-            .provider
-            .base_url
-            .as_deref()
-            .is_some_and(|value| !value.starts_with("http://") && !value.starts_with("https://"))
-        {
-            return Some(
-                "Sidecar provider base URL must start with `http://` or `https://`.".to_string(),
-            );
+        if let Some(base_url) = self.provider.base_url.as_deref() {
+            if let Some(error) = base_url_policy_error(base_url) {
+                return Some(error);
+            }
         }
 
         None
     }
 
     pub fn resolved_env(&self) -> BTreeMap<String, String> {
-        merge_sidecar_provider_into_env(self.env.clone(), &self.provider)
+        merge_sidecar_provider_into_runtime_env(self.env.clone(), &self.provider)
     }
 
     pub fn redact_secrets_in_text(&self, text: &str) -> String {
@@ -581,14 +579,23 @@ fn current_timestamp_ms() -> u64 {
 }
 
 fn powershell_completion_bootstrap() -> String {
-    [
-        "Import-Module PSReadLine -ErrorAction SilentlyContinue",
-        "if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {",
-        "  Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete",
-        "  try { Set-PSReadLineOption -PredictionSource History -PredictionViewStyle ListView } catch {}",
-        "}",
-    ]
-    .join("; ")
+    let mut commands = vec![powershell_utf8_bootstrap_script()];
+    commands.push("Import-Module PSReadLine -ErrorAction SilentlyContinue".to_string());
+    commands.push(
+        "if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {".to_string(),
+    );
+    commands.push("  Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete".to_string());
+    commands.push(
+        "  try { Set-PSReadLineOption -PredictionSource History -PredictionViewStyle ListView } catch {}"
+            .to_string(),
+    );
+    commands.push("}".to_string());
+    commands.join("; ")
+}
+
+#[cfg(target_os = "windows")]
+fn cmd_utf8_bootstrap() -> String {
+    cmd_utf8_bootstrap_command()
 }
 
 fn default_theme_preset() -> String {
@@ -638,6 +645,7 @@ impl Default for AppConfig {
             agent_policies: Some(crate::agent_policy::default_agent_policies()),
             agent_backends: Some(AgentBackendsConfig::default()),
             external_mcp: Some(ExternalMcpInteropConfig::default()),
+            vscode_path: None,
         }
     }
 }
@@ -678,7 +686,7 @@ fn default_shells() -> Vec<ShellConfig> {
         ShellConfig {
             name: "cmd".into(),
             command: "cmd".into(),
-            args: None,
+            args: Some(vec!["/K".into(), cmd_utf8_bootstrap()]),
         },
     ]
 }
@@ -899,6 +907,7 @@ const SIDECAR_PROVIDER_MODEL_ENV_KEY: &str = "MINI_TERM_SIDECAR_MODEL";
 const SIDECAR_PROVIDER_API_KEY_ENV_KEY: &str = "MINI_TERM_SIDECAR_API_KEY";
 const SIDECAR_PROVIDER_TIMEOUT_ENV_KEY: &str = "MINI_TERM_SIDECAR_PROVIDER_TIMEOUT_MS";
 const SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY: &str = "MINI_TERM_SIDECAR_SYSTEM_PROMPT";
+const ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY: &str = "MINI_TERM_ALLOW_PRIVATE_BASE_URL";
 const SIDECAR_PROVIDER_ENV_KEYS: [&str; 6] = [
     SIDECAR_PROVIDER_ENV_KEY,
     SIDECAR_PROVIDER_BASE_URL_ENV_KEY,
@@ -912,6 +921,55 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn allow_private_sidecar_base_urls() -> bool {
+    std::env::var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY)
+        .ok()
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn is_disallowed_private_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(addr)) => {
+            addr.is_private() || addr.is_loopback() || addr.is_link_local() || addr.is_unspecified()
+        }
+        Ok(IpAddr::V6(addr)) => {
+            addr.is_loopback() || addr.is_unspecified() || addr.is_unique_local() || addr.is_unicast_link_local()
+        }
+        Err(_) => false,
+    }
+}
+
+fn base_url_policy_error(base_url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(base_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Some("Sidecar provider base URL must start with `http://` or `https://`.".to_string());
+    }
+
+    let Some(host) = parsed
+        .host_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Some("Sidecar provider base URL must include a host.".to_string());
+    };
+
+    if !allow_private_sidecar_base_urls() && is_disallowed_private_host(host) {
+        return Some(
+            "Sidecar provider base URL must not target loopback, localhost, link-local, or private network addresses.".to_string(),
+        );
+    }
+
+    None
 }
 
 fn env_string(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
@@ -963,7 +1021,7 @@ fn normalize_sidecar_provider_config(
     provider
 }
 
-fn merge_sidecar_provider_into_env(
+fn merge_sidecar_provider_into_persisted_env(
     mut env: BTreeMap<String, String>,
     provider: &SidecarProviderConfig,
 ) -> BTreeMap<String, String> {
@@ -976,9 +1034,6 @@ fn merge_sidecar_provider_into_env(
     if let Some(model) = normalize_optional_string(provider.model.clone()) {
         env.insert(SIDECAR_PROVIDER_MODEL_ENV_KEY.into(), model);
     }
-    if let Some(api_key) = provider.resolved_api_key() {
-        env.insert(SIDECAR_PROVIDER_API_KEY_ENV_KEY.into(), api_key);
-    }
     if let Some(timeout_ms) = provider.timeout_ms.filter(|value| *value > 0) {
         env.insert(
             SIDECAR_PROVIDER_TIMEOUT_ENV_KEY.into(),
@@ -989,6 +1044,17 @@ fn merge_sidecar_provider_into_env(
         env.insert(SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY.into(), system_prompt);
     }
 
+    env
+}
+
+fn merge_sidecar_provider_into_runtime_env(
+    mut env: BTreeMap<String, String>,
+    provider: &SidecarProviderConfig,
+) -> BTreeMap<String, String> {
+    env = merge_sidecar_provider_into_persisted_env(env, provider);
+    if let Some(api_key) = provider.resolved_api_key() {
+        env.insert(SIDECAR_PROVIDER_API_KEY_ENV_KEY.into(), api_key);
+    }
     env
 }
 
@@ -1019,10 +1085,25 @@ fn normalize_sidecar_config(mut config: SidecarBackendConfig) -> SidecarBackendC
         })
         .collect();
     config.provider = normalize_sidecar_provider_config(config.provider, &config.env);
-    config.env = merge_sidecar_provider_into_env(config.env, &config.provider);
+    config.env = merge_sidecar_provider_into_persisted_env(config.env, &config.provider);
     if config.connection_timeout_ms == 0 {
         config.connection_timeout_ms = default_sidecar_connection_timeout_ms();
     }
+    config
+}
+
+fn sanitize_persisted_sidecar_provider(provider: &mut SidecarProviderConfig) {
+    provider.api_key = None;
+}
+
+fn sanitize_persisted_config(mut config: AppConfig) -> AppConfig {
+    if let Some(agent_backends) = config.agent_backends.as_mut() {
+        sanitize_persisted_sidecar_provider(&mut agent_backends.claude_sidecar.provider);
+        agent_backends.claude_sidecar.env.retain(|key, _| {
+            key.as_str() != SIDECAR_PROVIDER_API_KEY_ENV_KEY
+        });
+    }
+
     config
 }
 
@@ -1209,6 +1290,7 @@ fn normalize_shell(mut shell: ShellConfig) -> ShellConfig {
             "-Command".into(),
             powershell_completion_bootstrap(),
         ]),
+        "cmd" | "cmd.exe" => Some(vec!["/K".into(), cmd_utf8_bootstrap()]),
         _ => None,
     };
 
@@ -1239,7 +1321,7 @@ pub fn load_config_from_path(path: &Path) -> AppConfig {
 }
 
 pub fn save_config_to_path(path: &Path, config: AppConfig) -> Result<(), String> {
-    let config = normalize_config(migrate_config(config));
+    let config = sanitize_persisted_config(normalize_config(migrate_config(config)));
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
 }
@@ -1263,6 +1345,10 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -1387,6 +1473,22 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg.contains("Set-PSReadLineKeyHandler")));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("[Console]::OutputEncoding = $miniTermUtf8")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn normalize_shell_adds_cmd_utf8_bootstrap_args() {
+        let shell = normalize_shell(ShellConfig {
+            name: "cmd".into(),
+            command: "cmd".into(),
+            args: None,
+        });
+
+        let args = shell.args.expect("cmd args should be added");
+        assert_eq!(args, vec!["/K".to_string(), "chcp 65001 > nul".to_string()]);
     }
 
     #[test]
@@ -1707,9 +1809,10 @@ mod tests {
                 .map(String::as_str),
             Some("gpt-4.1-mini")
         );
+        assert!(!sidecar.env.contains_key("MINI_TERM_SIDECAR_API_KEY"));
         assert_eq!(
             sidecar
-                .env
+                .resolved_env()
                 .get("MINI_TERM_SIDECAR_API_KEY")
                 .map(String::as_str),
             Some("sk-test")
@@ -1753,8 +1856,70 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_provider_validation_rejects_private_base_url_by_default() {
+        let _guard = lock_env();
+        std::env::remove_var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY);
+        let config = normalize_sidecar_config(SidecarBackendConfig {
+            enabled: true,
+            command: Some("node".into()),
+            args: vec![],
+            env: BTreeMap::new(),
+            provider: SidecarProviderConfig {
+                kind: "openai-compatible".into(),
+                model: Some("gpt-4.1-mini".into()),
+                api_key_env_var: Some("MINI_TERM_TEST_PROVIDER_API_KEY".into()),
+                api_key: None,
+                base_url: Some("http://127.0.0.1:11434/v1".into()),
+                timeout_ms: None,
+                system_prompt: None,
+            },
+            cwd: None,
+            startup_mode: SidecarStartupMode::Process,
+            connection_timeout_ms: 10_000,
+        });
+
+        std::env::set_var("MINI_TERM_TEST_PROVIDER_API_KEY", "env-secret");
+        assert_eq!(
+            config.provider_validation_error().as_deref(),
+            Some(
+                "Sidecar provider base URL must not target loopback, localhost, link-local, or private network addresses."
+            )
+        );
+        std::env::remove_var("MINI_TERM_TEST_PROVIDER_API_KEY");
+    }
+
+    #[test]
+    fn sidecar_provider_validation_allows_private_base_url_with_override() {
+        let _guard = lock_env();
+        std::env::set_var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY, "1");
+        std::env::set_var("MINI_TERM_TEST_PROVIDER_API_KEY", "env-secret");
+        let config = normalize_sidecar_config(SidecarBackendConfig {
+            enabled: true,
+            command: Some("node".into()),
+            args: vec![],
+            env: BTreeMap::new(),
+            provider: SidecarProviderConfig {
+                kind: "openai-compatible".into(),
+                model: Some("gpt-4.1-mini".into()),
+                api_key_env_var: Some("MINI_TERM_TEST_PROVIDER_API_KEY".into()),
+                api_key: None,
+                base_url: Some("http://127.0.0.1:11434/v1".into()),
+                timeout_ms: None,
+                system_prompt: None,
+            },
+            cwd: None,
+            startup_mode: SidecarStartupMode::Process,
+            connection_timeout_ms: 10_000,
+        });
+
+        assert_eq!(config.provider_validation_error(), None);
+        std::env::remove_var("MINI_TERM_TEST_PROVIDER_API_KEY");
+        std::env::remove_var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY);
+    }
+
+    #[test]
     fn sidecar_provider_can_resolve_api_key_from_env_var_reference() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let env_var = "MINI_TERM_TEST_PROVIDER_API_KEY";
         std::env::set_var(env_var, "env-secret");
         let sidecar = normalize_sidecar_config(SidecarBackendConfig {
@@ -1783,11 +1948,12 @@ mod tests {
         );
         assert_eq!(
             sidecar
-                .env
+                .resolved_env()
                 .get("MINI_TERM_SIDECAR_API_KEY")
                 .map(String::as_str),
             Some("env-secret")
         );
+        assert!(!sidecar.env.contains_key("MINI_TERM_SIDECAR_API_KEY"));
         assert!(sidecar.is_launchable());
 
         std::env::remove_var(env_var);
@@ -1795,7 +1961,7 @@ mod tests {
 
     #[test]
     fn sidecar_provider_redacts_resolved_secret_values_from_text() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = lock_env();
         let env_var = "MINI_TERM_TEST_PROVIDER_API_KEY_REDACT";
         std::env::set_var(env_var, "env-secret-redact");
         let provider = SidecarProviderConfig {

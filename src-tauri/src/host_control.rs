@@ -2,8 +2,10 @@ use crate::{pty, runtime_mcp};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::Command;
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Mutex, OnceLock};
@@ -12,10 +14,41 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-const CONTROL_HOST: &str = "127.0.0.1";
+#[cfg(unix)]
+use crate::agent_core::data_dir::app_data_dir;
+
+#[cfg(unix)]
+use std::fs;
+
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+
+#[cfg(unix)]
+use std::path::PathBuf;
+
+
+#[cfg(windows)]
+use std::os::windows::io::FromRawHandle;
+
+#[cfg(windows)]
+use windows::core::PCWSTR;
+
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
+
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+
+#[cfg(windows)]
+use windows::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+    PIPE_WAIT,
+};
+
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_STALE_AFTER_MS: u64 = 5_000;
 const HOST_CONTROL_EVENT: &str = "host-control-request";
+const CONTROL_FRAME_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,22 +111,6 @@ struct HostPtyIdInput {
     pty_id: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HttpRequest {
-    method: String,
-    path: String,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct HttpResponse {
-    status: &'static str,
-    content_type: &'static str,
-    body: Vec<u8>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OsProcessInfo {
@@ -121,26 +138,125 @@ struct ProcessTreeNode {
     children: Vec<ProcessTreeNode>,
 }
 
-fn pending_ui_requests() -> &'static Mutex<HashMap<String, SyncSender<Result<Value, String>>>> {
-    static PENDING: OnceLock<Mutex<HashMap<String, SyncSender<Result<Value, String>>>>> =
-        OnceLock::new();
+type HostControlResultSender = SyncSender<Result<Value, String>>;
+type PendingHostUiRequests = Mutex<HashMap<String, HostControlResultSender>>;
+
+fn pending_ui_requests() -> &'static PendingHostUiRequests {
+    static PENDING: OnceLock<PendingHostUiRequests> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn response_json(status: &'static str, value: Value) -> Result<HttpResponse, String> {
-    Ok(HttpResponse {
-        status,
-        content_type: "application/json",
-        body: serde_json::to_vec(&value).map_err(|err| err.to_string())?,
-    })
+fn map_host_transport_error(_: &std::io::Error) -> String {
+    "host connection unavailable".to_string()
 }
 
-fn response_text(status: &'static str, text: &str) -> HttpResponse {
-    HttpResponse {
-        status,
-        content_type: "text/plain; charset=utf-8",
-        body: text.as_bytes().to_vec(),
+fn write_framed_value<W: Write>(writer: &mut W, value: &impl Serialize) -> Result<(), String> {
+    let body = serde_json::to_vec(value).map_err(|_| "host control serialization failed".to_string())?;
+    if body.len() > CONTROL_FRAME_LIMIT_BYTES {
+        return Err("host control payload is too large".to_string());
     }
+    let length = (body.len() as u32).to_le_bytes();
+    writer
+        .write_all(&length)
+        .map_err(|error| map_host_transport_error(&error))?;
+    writer
+        .write_all(&body)
+        .map_err(|error| map_host_transport_error(&error))?;
+    writer
+        .flush()
+        .map_err(|error| map_host_transport_error(&error))
+}
+
+fn read_framed_value<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> Result<T, String> {
+    let mut length = [0u8; 4];
+    reader
+        .read_exact(&mut length)
+        .map_err(|error| map_host_transport_error(&error))?;
+    let body_len = u32::from_le_bytes(length) as usize;
+    if body_len == 0 || body_len > CONTROL_FRAME_LIMIT_BYTES {
+        return Err("host connection unavailable".to_string());
+    }
+    let mut body = vec![0u8; body_len];
+    reader
+        .read_exact(&mut body)
+        .map_err(|error| map_host_transport_error(&error))?;
+    serde_json::from_slice(&body).map_err(|_| "host connection unavailable".to_string())
+}
+
+#[cfg(windows)]
+fn to_wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn accept_named_pipe_connection(endpoint: &str) -> Result<File, String> {
+    let wide = to_wide_null(endpoint);
+    unsafe {
+        let handle = CreateNamedPipeW(
+            PCWSTR(wide.as_ptr()),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            CONTROL_FRAME_LIMIT_BYTES as u32,
+            CONTROL_FRAME_LIMIT_BYTES as u32,
+            0,
+            None,
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return Err("failed to start host control pipe".to_string());
+        }
+
+        if ConnectNamedPipe(handle, None).is_err() {
+            let error = GetLastError();
+            if error != ERROR_PIPE_CONNECTED {
+                let _ = CloseHandle(handle);
+                return Err("failed to accept host control connection".to_string());
+            }
+        }
+
+        Ok(File::from_raw_handle(handle.0 as *mut _))
+    }
+}
+
+#[cfg(windows)]
+fn connect_named_pipe(endpoint: &str) -> Result<File, String> {
+    for _ in 0..40 {
+        match OpenOptions::new().read(true).write(true).open(endpoint) {
+            Ok(file) => return Ok(file),
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::PermissionDenied)
+                    || matches!(error.raw_os_error(), Some(231 | 233)) =>
+            {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(map_host_transport_error(&error)),
+        }
+    }
+
+    Err("host connection unavailable".to_string())
+}
+
+#[cfg(windows)]
+fn host_control_transport() -> &'static str {
+    "named-pipe"
+}
+
+#[cfg(windows)]
+fn build_host_control_endpoint() -> String {
+    format!(r"\\.\pipe\mini-term-host-control-{}", Uuid::now_v7())
+}
+
+#[cfg(unix)]
+fn host_control_transport() -> &'static str {
+    "unix-socket"
+}
+
+#[cfg(unix)]
+fn build_host_control_endpoint() -> String {
+    app_data_dir()
+        .join(format!("host-control-{}.sock", Uuid::now_v7()))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<(usize, usize)> {
@@ -214,81 +330,6 @@ fn decode_chunked_body_from_slice(buffer: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>, String> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|err| err.to_string())?;
-
-    let mut buffer = Vec::new();
-    let mut temp = [0u8; 4096];
-    let (header_end, separator_len) = loop {
-        match stream.read(&mut temp) {
-            Ok(0) if buffer.is_empty() => return Ok(None),
-            Ok(0) => return Err("incomplete HTTP request".to_string()),
-            Ok(read) => {
-                buffer.extend_from_slice(&temp[..read]);
-                if let Some(result) = find_header_end(&buffer) {
-                    break result;
-                }
-            }
-            Err(err) => return Err(err.to_string()),
-        }
-    };
-
-    let header_text =
-        String::from_utf8(buffer[..header_end].to_vec()).map_err(|err| err.to_string())?;
-    let mut lines = header_text.lines();
-    let request_line = lines.next().ok_or("missing HTTP request line")?;
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts
-        .next()
-        .ok_or("missing HTTP method")?
-        .to_string();
-    let path = request_parts.next().ok_or("missing HTTP path")?.to_string();
-
-    let mut headers = BTreeMap::new();
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
-        }
-    }
-
-    let content_length = headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let body_start = header_end + separator_len;
-    while buffer.len() < body_start + content_length {
-        let read = stream.read(&mut temp).map_err(|err| err.to_string())?;
-        if read == 0 {
-            return Err("incomplete HTTP request body".to_string());
-        }
-        buffer.extend_from_slice(&temp[..read]);
-    }
-
-    Ok(Some(HttpRequest {
-        method,
-        path,
-        headers,
-        body: buffer[body_start..body_start + content_length].to_vec(),
-    }))
-}
-
-fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<(), String> {
-    write!(
-        stream,
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
-        response.status,
-        response.content_type,
-        response.body.len()
-    )
-    .map_err(|err| err.to_string())?;
-    stream
-        .write_all(&response.body)
-        .map_err(|err| err.to_string())?;
-    stream.flush().map_err(|err| err.to_string())
-}
-
 fn parse_http_status(header_text: &str) -> Result<u16, String> {
     let status_line = header_text
         .lines()
@@ -352,17 +393,6 @@ fn read_http_response(stream: &mut TcpStream) -> Result<(u16, Value), String> {
         buffer.extend_from_slice(&temp[..read]);
     }
     parse_http_response(&buffer)
-}
-
-fn require_authorization(headers: &BTreeMap<String, String>, token: &str) -> Result<(), String> {
-    let auth = headers
-        .get("authorization")
-        .ok_or("missing authorization header")?;
-    if auth == &format!("Bearer {token}") {
-        Ok(())
-    } else {
-        Err("invalid authorization token".to_string())
-    }
 }
 
 fn build_process_tree_node(
@@ -496,13 +526,15 @@ fn direct_host_action(
             let created = pty::create_terminal_session_for_host(
                 app,
                 state.inner(),
-                input.shell,
-                input.args,
-                input.cwd,
-                None,
-                input.mode,
-                input.cols,
-                input.rows,
+                pty::CreatePtyRequest {
+                    shell: input.shell,
+                    args: input.args,
+                    cwd: input.cwd,
+                    session_id: None,
+                    mode: input.mode,
+                    cols: input.cols,
+                    rows: input.rows,
+                },
             )?;
             Ok(Some(
                 serde_json::to_value(created).map_err(|err| err.to_string())?,
@@ -575,64 +607,33 @@ fn execute_host_action(app: &AppHandle, action: &str, payload: Value) -> Result<
     }
 }
 
-fn handle_host_control_request(
-    app: &AppHandle,
-    token: &str,
-    request: HttpRequest,
-) -> Result<HttpResponse, String> {
-    match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/health") => response_json(
-            "200 OK",
-            json!({
-                "ok": true,
-                "hostControl": true,
-            }),
-        ),
-        ("POST", "/host-control") => {
-            require_authorization(&request.headers, token)?;
-            let envelope: HostControlEnvelope =
-                serde_json::from_slice(&request.body).map_err(|err| err.to_string())?;
-            match execute_host_action(app, &envelope.action, envelope.payload) {
-                Ok(data) => response_json(
-                    "200 OK",
-                    serde_json::to_value(HostControlReply {
-                        ok: true,
-                        data: Some(data),
-                        error: None,
-                    })
-                    .map_err(|err| err.to_string())?,
-                ),
-                Err(error) => response_json(
-                    "200 OK",
-                    serde_json::to_value(HostControlReply {
-                        ok: false,
-                        data: None,
-                        error: Some(error),
-                    })
-                    .map_err(|err| err.to_string())?,
-                ),
-            }
-        }
-        _ => Ok(response_text("404 Not Found", "not found")),
+fn build_host_control_reply(app: &AppHandle, envelope: HostControlEnvelope) -> HostControlReply {
+    match execute_host_action(app, &envelope.action, envelope.payload) {
+        Ok(data) => HostControlReply {
+            ok: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => HostControlReply {
+            ok: false,
+            data: None,
+            error: Some(error),
+        },
     }
 }
 
-fn handle_connection(app: AppHandle, token: String, mut stream: TcpStream) -> Result<(), String> {
-    let request = match read_http_request(&mut stream)? {
-        Some(request) => request,
-        None => return Ok(()),
-    };
-    let response = handle_host_control_request(&app, &token, request)?;
-    write_http_response(&mut stream, response)
+fn handle_local_connection<S: Read + Write>(app: AppHandle, mut stream: S) -> Result<(), String> {
+    let envelope: HostControlEnvelope = read_framed_value(&mut stream)?;
+    let reply = build_host_control_reply(&app, envelope);
+    write_framed_value(&mut stream, &reply)
 }
 
 pub fn start_host_control_server(app: AppHandle) -> Result<(), String> {
-    let listener = TcpListener::bind((CONTROL_HOST, 0)).map_err(|err| err.to_string())?;
-    let port = listener.local_addr().map_err(|err| err.to_string())?.port();
-    let token = Uuid::now_v7().to_string();
+    let endpoint = build_host_control_endpoint();
     runtime_mcp::set_host_control_info(
-        format!("http://{CONTROL_HOST}:{port}/host-control"),
-        token.clone(),
+        host_control_transport().to_string(),
+        endpoint.clone(),
+        None,
         vec![
             "pty-control".to_string(),
             "runtime-observation-detail".to_string(),
@@ -640,22 +641,49 @@ pub fn start_host_control_server(app: AppHandle) -> Result<(), String> {
         ],
     )?;
 
+    #[cfg(windows)]
     thread::spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
+        loop {
+            match accept_named_pipe_connection(&endpoint) {
                 Ok(stream) => {
                     let app = app.clone();
-                    let token = token.clone();
                     thread::spawn(move || {
-                        if let Err(error) = handle_connection(app, token, stream) {
+                        if let Err(error) = handle_local_connection(app, stream) {
                             eprintln!("{error}");
                         }
                     });
                 }
-                Err(err) => eprintln!("{err}"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    thread::sleep(Duration::from_millis(50));
+                }
             }
         }
     });
+
+    #[cfg(unix)]
+    {
+        let socket_path = PathBuf::from(&endpoint);
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let listener = UnixListener::bind(&socket_path).map_err(|_| "failed to bind host control socket".to_string())?;
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let app = app.clone();
+                        thread::spawn(move || {
+                            if let Err(error) = handle_local_connection(app, stream) {
+                                eprintln!("{error}");
+                            }
+                        });
+                    }
+                    Err(error) => eprintln!("{error}"),
+                }
+            }
+        });
+    }
 
     Ok(())
 }
@@ -665,14 +693,11 @@ fn host_control_state() -> Result<runtime_mcp::RuntimeHostControlInfo, String> {
     let host = state
         .host
         .ok_or_else(|| "host connection unavailable".to_string())?;
-    if runtime_mcp::load_runtime_state().host.as_ref().map(|item| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or(0);
-        now.saturating_sub(item.last_heartbeat_at) <= CONTROL_STALE_AFTER_MS
-    }) != Some(true)
-    {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    if now.saturating_sub(host.last_heartbeat_at) > CONTROL_STALE_AFTER_MS {
         return Err("host connection unavailable".to_string());
     }
     host.host_control
@@ -691,34 +716,71 @@ fn split_base_url(base_url: &str) -> Result<(String, String), String> {
 
 pub fn call_host_control(action: &str, payload: Value) -> Result<Value, String> {
     let control = host_control_state()?;
-    let (authority, path) = split_base_url(&control.base_url)?;
-    let mut stream =
-        TcpStream::connect(&authority).map_err(|_| "host connection unavailable".to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|err| err.to_string())?;
+    let reply = match control.transport.as_str() {
+        #[cfg(windows)]
+        "named-pipe" => {
+            let mut stream = connect_named_pipe(&control.endpoint)?;
+            write_framed_value(
+                &mut stream,
+                &HostControlEnvelope {
+                    action: action.to_string(),
+                    payload,
+                },
+            )?;
+            read_framed_value::<_, HostControlReply>(&mut stream)?
+        }
+        #[cfg(unix)]
+        "unix-socket" => {
+            let mut stream =
+                UnixStream::connect(&control.endpoint).map_err(|_| "host connection unavailable".to_string())?;
+            write_framed_value(
+                &mut stream,
+                &HostControlEnvelope {
+                    action: action.to_string(),
+                    payload,
+                },
+            )?;
+            read_framed_value::<_, HostControlReply>(&mut stream)?
+        }
+        "http" => {
+            let (authority, path) = split_base_url(&control.endpoint)?;
+            let mut stream =
+                TcpStream::connect(&authority).map_err(|_| "host connection unavailable".to_string())?;
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .map_err(|_| "host connection unavailable".to_string())?;
 
-    let body = serde_json::to_vec(&HostControlEnvelope {
-        action: action.to_string(),
-        payload,
-    })
-    .map_err(|err| err.to_string())?;
+            let body = serde_json::to_vec(&HostControlEnvelope {
+                action: action.to_string(),
+                payload,
+            })
+            .map_err(|_| "host control serialization failed".to_string())?;
+            let token = control
+                .token
+                .as_deref()
+                .ok_or_else(|| "host connection unavailable".to_string())?;
 
-    write!(
-        stream,
-        "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        control.token,
-        body.len()
-    )
-    .map_err(|err| err.to_string())?;
-    stream.write_all(&body).map_err(|err| err.to_string())?;
-    stream.flush().map_err(|err| err.to_string())?;
+            write!(
+                stream,
+                "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .map_err(|_| "host connection unavailable".to_string())?;
+            stream
+                .write_all(&body)
+                .map_err(|_| "host connection unavailable".to_string())?;
+            stream
+                .flush()
+                .map_err(|_| "host connection unavailable".to_string())?;
 
-    let (status, value) = read_http_response(&mut stream)?;
-    if status != 200 {
-        return Err("host connection unavailable".to_string());
-    }
-    let reply: HostControlReply = serde_json::from_value(value).map_err(|err| err.to_string())?;
+            let (status, value) = read_http_response(&mut stream)?;
+            if status != 200 {
+                return Err("host connection unavailable".to_string());
+            }
+            serde_json::from_value(value).map_err(|_| "host connection unavailable".to_string())?
+        }
+        _ => return Err("host connection unavailable".to_string()),
+    };
     if reply.ok {
         Ok(reply.data.unwrap_or_else(|| json!({})))
     } else {
@@ -766,7 +828,12 @@ mod tests {
         app_data_dir().join("runtime_mcp_state.json")
     }
 
-    fn write_runtime_state(last_heartbeat_at: u64, base_url: String, token: &str) {
+    fn write_runtime_state(
+        last_heartbeat_at: u64,
+        transport: &str,
+        endpoint: String,
+        token: Option<&str>,
+    ) {
         let state = RuntimeMcpState {
             schema_version: 1,
             updated_at: last_heartbeat_at,
@@ -776,8 +843,9 @@ mod tests {
                 transport_mode: "app-data-snapshot".to_string(),
                 last_heartbeat_at,
                 host_control: Some(RuntimeHostControlInfo {
-                    base_url,
-                    token: token.to_string(),
+                    transport: transport.to_string(),
+                    endpoint,
+                    token: token.map(str::to_string),
                     capabilities: vec!["ui-control".to_string()],
                 }),
             }),
@@ -963,8 +1031,9 @@ mod tests {
         let base_url = "http://127.0.0.1:9/host-control".to_string();
         write_runtime_state(
             now_ms().saturating_sub(CONTROL_STALE_AFTER_MS + 50),
+            "http",
             base_url,
-            "stale-token",
+            Some("stale-token"),
         );
 
         let error = call_host_control("focus_workspace", json!({ "workspaceId": "workspace-1" }))
@@ -983,7 +1052,7 @@ mod tests {
                 "error": "unauthorized"
             }),
         );
-        write_runtime_state(now_ms(), base_url, "client-sent-token");
+        write_runtime_state(now_ms(), "http", base_url, Some("client-sent-token"));
 
         let error = call_host_control("focus_workspace", json!({ "workspaceId": "workspace-1" }))
             .unwrap_err();
@@ -1001,7 +1070,7 @@ mod tests {
                 "error": "tab not found"
             }),
         );
-        write_runtime_state(now_ms(), base_url, "shared-token");
+        write_runtime_state(now_ms(), "http", base_url, Some("shared-token"));
 
         let error = call_host_control(
             "close_tab",

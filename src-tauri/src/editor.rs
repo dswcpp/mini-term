@@ -9,7 +9,7 @@ use tauri::AppHandle;
 /// 拿到 invoke 能力的代码替换为任意可执行文件的风险。
 #[tauri::command]
 pub fn open_in_vscode(app: AppHandle, path: String) -> Result<(), String> {
-    let cfg = crate::config::read_config(&app);
+    let cfg = crate::config::load_config(app);
     let exe = cfg.vscode_path.as_deref().unwrap_or("").trim();
     if exe.is_empty() {
         return Err(

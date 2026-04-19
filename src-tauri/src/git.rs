@@ -32,6 +32,16 @@ pub struct GitFileStatus {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct ChangeFileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub staged_status: Option<GitStatus>,
+    pub unstaged_status: Option<GitStatus>,
+    pub status_label: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct DiffHunk {
     pub hunk_key: String,
     pub old_start: u32,
@@ -132,6 +142,48 @@ fn status_label(status: &GitStatus) -> &'static str {
         GitStatus::Untracked => "?",
         GitStatus::Conflicted => "C",
     }
+}
+
+fn map_staged_status(status: Status) -> Option<GitStatus> {
+    if status.contains(Status::CONFLICTED) {
+        return Some(GitStatus::Conflicted);
+    }
+    if status.contains(Status::INDEX_RENAMED) {
+        return Some(GitStatus::Renamed);
+    }
+    if status.contains(Status::INDEX_NEW) {
+        return Some(GitStatus::Added);
+    }
+    if status.contains(Status::INDEX_MODIFIED) {
+        return Some(GitStatus::Modified);
+    }
+    if status.contains(Status::INDEX_DELETED) {
+        return Some(GitStatus::Deleted);
+    }
+    None
+}
+
+fn map_unstaged_status(status: Status, is_empty_repo: bool) -> Option<GitStatus> {
+    if status.contains(Status::CONFLICTED) {
+        return Some(GitStatus::Conflicted);
+    }
+    if status.contains(Status::WT_RENAMED) {
+        return Some(GitStatus::Renamed);
+    }
+    if status.contains(Status::WT_MODIFIED) {
+        return Some(GitStatus::Modified);
+    }
+    if status.contains(Status::WT_DELETED) {
+        return Some(GitStatus::Deleted);
+    }
+    if status.contains(Status::WT_NEW) {
+        if is_empty_repo {
+            return Some(GitStatus::Added);
+        } else {
+            return Some(GitStatus::Untracked);
+        }
+    }
+    None
 }
 
 fn collect_repo_status(
@@ -290,7 +342,7 @@ pub struct GitFileBlameResult {
 fn find_repos(project_path: &Path) -> Vec<(String, PathBuf, Repository)> {
     let mut repos = Vec::new();
 
-    // 1) 项目路径自身是否为仓库（使用 discover 保持向上搜索能力）
+    // 1) 椤圭洰璺緞鑷韩鏄惁涓轰粨搴擄紙浣跨敤 discover 淇濇寔鍚戜笂鎼滅储鑳藉姏锛?
     if let Ok(repo) = Repository::discover(project_path) {
         if let Some(workdir) = repo.workdir() {
             let repo_root = workdir.to_path_buf();
@@ -303,7 +355,7 @@ fn find_repos(project_path: &Path) -> Vec<(String, PathBuf, Repository)> {
         }
     }
 
-    // 2) 递归扫描子目录查找 git 仓库（最多 5 层）
+    // 2) 閫掑綊鎵弿瀛愮洰褰曟煡鎵?git 浠撳簱锛堟渶澶?5 灞傦級
     const MAX_DEPTH: u32 = 5;
     const SKIP_DIRS: &[&str] = &[
         ".git",
@@ -340,7 +392,7 @@ fn find_repos(project_path: &Path) -> Vec<(String, PathBuf, Repository)> {
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
                         repos.push((name, sub, repo));
-                        continue; // 找到仓库后不再深入其内部
+                        continue; // 鎵惧埌浠撳簱鍚庝笉鍐嶆繁鍏ュ叾鍐呴儴
                     }
                 }
             }
@@ -374,6 +426,60 @@ fn map_delta_status(delta: git2::Delta) -> &'static str {
 
 fn short_hash(value: &str) -> String {
     value[..7.min(value.len())].to_string()
+}
+
+fn canonicalize_repo_workdir(repo: &Repository) -> Result<PathBuf, String> {
+    repo.workdir()
+        .ok_or("bare repositories are not supported".to_string())
+        .and_then(|path| path.canonicalize().map_err(|_| "repository worktree is unavailable".to_string()))
+}
+
+fn canonicalize_git_path_for_write(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return path
+            .canonicalize()
+            .map_err(|_| "path does not exist".to_string());
+    }
+
+    let parent = path.parent().ok_or("path has no parent".to_string())?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|_| "path does not exist".to_string())?;
+    let file_name = path.file_name().ok_or("path has no file name".to_string())?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn resolve_repo_relative_mutation_path(
+    repo: &Repository,
+    requested_path: &str,
+    allow_missing_leaf: bool,
+) -> Result<(PathBuf, String), String> {
+    let workdir = canonicalize_repo_workdir(repo)?;
+    let candidate = if Path::new(requested_path).is_absolute() {
+        PathBuf::from(requested_path)
+    } else {
+        workdir.join(requested_path)
+    };
+
+    let resolved = if allow_missing_leaf {
+        canonicalize_git_path_for_write(&candidate)?
+    } else {
+        candidate
+            .canonicalize()
+            .map_err(|_| "path does not exist".to_string())?
+    };
+
+    if !resolved.starts_with(&workdir) {
+        return Err("path is outside repository worktree".to_string());
+    }
+
+    let relative = resolved
+        .strip_prefix(&workdir)
+        .map_err(|_| "path is outside repository worktree".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    Ok((resolved, relative))
 }
 
 fn restore_error(code: &str, detail: impl Into<String>) -> String {
@@ -699,6 +805,68 @@ pub fn get_git_status(project_path: String) -> Result<Vec<GitFileStatus>, String
 }
 
 #[tauri::command]
+pub fn get_changes_status(repo_path: String) -> Result<Vec<ChangeFileStatus>, String> {
+    let path = Path::new(&repo_path);
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    let is_empty_repo = repo.head().is_err();
+
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+    let workdir = repo.workdir().unwrap_or_else(|| repo.path());
+
+    let mut result = Vec::new();
+    for entry in statuses.iter() {
+        let raw_path = entry.path().unwrap_or("").to_string();
+        let s = entry.status();
+
+        let staged = map_staged_status(s);
+        let unstaged = map_unstaged_status(s, is_empty_repo);
+
+        if staged.is_none() && unstaged.is_none() {
+            continue;
+        }
+
+        let label = staged
+            .as_ref()
+            .or(unstaged.as_ref())
+            .map(status_label)
+            .unwrap_or("")
+            .to_string();
+
+        let abs = workdir.join(&raw_path);
+        let display_path = diff_paths(&abs, path)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| raw_path.clone());
+
+        let old_path = if s.contains(Status::INDEX_RENAMED) || s.contains(Status::WT_RENAMED) {
+            entry
+                .head_to_index()
+                .and_then(|d| {
+                    d.old_file()
+                        .path()
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                })
+        } else {
+            None
+        };
+
+        result.push(ChangeFileStatus {
+            path: display_path,
+            old_path,
+            staged_status: staged,
+            unstaged_status: unstaged,
+            status_label: label,
+        });
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn discover_git_repos(project_path: String) -> Result<Vec<GitRepoInfo>, String> {
     let path = Path::new(&project_path);
     let repos = find_repos(path);
@@ -986,6 +1154,140 @@ pub fn get_commit_file_diff(
 }
 
 #[tauri::command]
+pub fn git_stage(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    for file in &files {
+        let (abs_path, relative_path) = resolve_repo_relative_mutation_path(&repo, file, true)?;
+        let path = Path::new(&relative_path);
+        if abs_path.exists() {
+            index.add_path(path).map_err(|e| e.to_string())?;
+        } else {
+            index.remove_path(path).map_err(|e| e.to_string())?;
+        }
+    }
+    index.write().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let head = match repo.head() {
+        Ok(h) => Some(h.peel_to_commit().map_err(|e| e.to_string())?),
+        Err(_) => None,
+    };
+    if let Some(ref commit) = head {
+        for file in &files {
+            let (_, relative_path) = resolve_repo_relative_mutation_path(&repo, file, true)?;
+            repo.reset_default(Some(commit.as_object()), [relative_path.as_str()])
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        let mut index = repo.index().map_err(|e| e.to_string())?;
+        for file in &files {
+            let (_, relative_path) = resolve_repo_relative_mutation_path(&repo, file, true)?;
+            index.remove_path(Path::new(&relative_path))
+                .map_err(|e| e.to_string())?;
+        }
+        index.write().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_stage_all(repo_path: String) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let mut index = repo.index().map_err(|e| e.to_string())?;
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .map_err(|e| e.to_string())?;
+    let workdir = repo.workdir().ok_or("bare repo")?;
+    let entries: Vec<String> = index
+        .iter()
+        .filter_map(|e| {
+            let path = String::from_utf8_lossy(&e.path).to_string();
+            if !workdir.join(&path).exists() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for path in entries {
+        index.remove_path(Path::new(&path)).map_err(|e| e.to_string())?;
+    }
+    index.write().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_unstage_all(repo_path: String) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    match repo.head() {
+        Ok(head) => {
+            let commit = head.peel_to_commit().map_err(|e| e.to_string())?;
+            repo.reset(commit.as_object(), git2::ResetType::Mixed, None)
+                .map_err(|e| e.to_string())?;
+        }
+        Err(_) => {
+            let mut index = repo.index().map_err(|e| e.to_string())?;
+            index.clear().map_err(|e| e.to_string())?;
+            index.write().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn git_commit(repo_path: String, message: String) -> Result<String, String> {
+    let repo = Repository::discover(Path::new(&repo_path))
+        .map_err(|_| "repository not found".to_string())?;
+    let workdir = canonicalize_repo_workdir(&repo)?;
+    let output = std::process::Command::new("git")
+        .args(["commit", "--message", &message, "--"])
+        .current_dir(workdir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|_| "failed to start git commit".to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
+#[tauri::command]
+pub fn git_discard_file(repo_path: String, files: Vec<String>) -> Result<(), String> {
+    let repo = Repository::open(Path::new(&repo_path)).map_err(|e| e.to_string())?;
+    let _workdir = canonicalize_repo_workdir(&repo)?;
+    for file in &files {
+        let (abs_path, relative_path) = resolve_repo_relative_mutation_path(&repo, file, true)?;
+        let mut opts = StatusOptions::new();
+        opts.pathspec(&relative_path);
+        let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
+        let is_untracked = statuses.iter().any(|e| e.status().contains(Status::WT_NEW));
+        if is_untracked {
+            if abs_path.exists() {
+                std::fs::remove_file(&abs_path).map_err(|e| e.to_string())?;
+            }
+        } else {
+            let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+            if let Some(ref commit) = head {
+                let _ = repo.reset_default(Some(commit.as_object()), [relative_path.as_str()]);
+            }
+            repo.checkout_head(Some(
+                git2::build::CheckoutBuilder::new()
+                    .force()
+                    .path(&relative_path),
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn git_pull(repo_path: String) -> Result<String, String> {
     let output = std::process::Command::new("git")
         .arg("pull")
@@ -1016,6 +1318,7 @@ pub async fn git_push(repo_path: String) -> Result<String, String> {
         Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
+
 
 struct MatchedHistoryEntry {
     entry: GitFileHistoryEntry,
@@ -1289,9 +1592,9 @@ pub fn get_file_git_blame(
             continue;
         };
         let blame_info = build_git_blame_info(&repo, &blame_hunk);
-        let start_line = blame_hunk.final_start_line() as usize;
+        let start_line = blame_hunk.final_start_line();
         let range_start = start_line.max(line_no);
-        let range_end = (start_line + (blame_hunk.lines_in_hunk() as usize).saturating_sub(1))
+        let range_end = (start_line + blame_hunk.lines_in_hunk().saturating_sub(1))
             .min(lines.len())
             .max(range_start);
         let commit_hash = blame_info.commit_id.clone().unwrap_or_default();
@@ -1562,10 +1865,7 @@ fn load_worktree_diff(
     };
 
     // Get HEAD content
-    let old_content = match get_head_content(&repo, &old_lookup)? {
-        None => String::new(), // empty repo
-        Some(s) => s,
-    };
+    let old_content: String = get_head_content(&repo, &old_lookup)?.unwrap_or_default();
 
     // Check blob binary via git2 as well
     // (already covered by UTF-8 check above for new content; old content checked in get_head_content)
@@ -2162,7 +2462,12 @@ mod tests {
             );
             let root = std::env::temp_dir().join(unique);
             fs::create_dir_all(&root).unwrap();
-            Repository::init(&root).unwrap();
+            let repo = Repository::init(&root).unwrap();
+            let mut config = repo.config().unwrap();
+            config.set_str("user.name", "MiniTerm").unwrap();
+            config
+                .set_str("user.email", "mini-term@example.com")
+                .unwrap();
             Self { root }
         }
 
@@ -2405,6 +2710,68 @@ mod tests {
             "alpha\nsame one\nBETA\nsame two\ngamma\n"
         );
         assert_eq!(result.hunks.len(), 1);
+    }
+
+    #[test]
+    fn git_stage_rejects_paths_outside_repository_workdir() {
+        let repo = TestRepo::new();
+        let outside = std::env::temp_dir().join(format!(
+            "mini-term-git-outside-stage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside, "outside\n").unwrap();
+
+        let error = git_stage(
+            repo.root.to_string_lossy().to_string(),
+            vec![outside.to_string_lossy().to_string()],
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "path is outside repository worktree");
+        let _ = fs::remove_file(outside);
+    }
+
+    #[test]
+    fn git_discard_file_rejects_paths_outside_repository_workdir() {
+        let repo = TestRepo::new();
+        let outside = std::env::temp_dir().join(format!(
+            "mini-term-git-outside-discard-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside, "outside\n").unwrap();
+
+        let error = git_discard_file(
+            repo.root.to_string_lossy().to_string(),
+            vec![outside.to_string_lossy().to_string()],
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "path is outside repository worktree");
+        let _ = fs::remove_file(outside);
+    }
+
+    #[test]
+    fn git_commit_accepts_dash_prefixed_message_and_discovers_repo_from_subdir() {
+        let repo = TestRepo::new();
+        repo.write_file("nested/file.txt", "hello\n");
+        git_stage_all(repo.root.to_string_lossy().to_string()).unwrap();
+
+        let nested = repo.path("nested");
+        git_commit(
+            nested.to_string_lossy().to_string(),
+            "-dash prefixed message".to_string(),
+        )
+        .unwrap();
+
+        let repository = repo.repo();
+        let head = repository.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.message(), Some("-dash prefixed message\n"));
     }
 
     #[test]

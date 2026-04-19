@@ -18,7 +18,7 @@ const INITIAL_STATE: DocumentContentState = {
   version: 0,
 };
 
-export function useDocumentContent(filePath: string, enabled: boolean) {
+export function useDocumentContent(filePath: string, projectPath: string | undefined, enabled: boolean) {
   const [state, setState] = useState<DocumentContentState>(INITIAL_STATE);
   const requestVersionRef = useRef(0);
 
@@ -35,7 +35,10 @@ export function useDocumentContent(filePath: string, enabled: boolean) {
     }));
 
     try {
-      const result = await invoke<DocumentPreviewResult>('read_document_preview', { path: filePath });
+      const result = await invoke<DocumentPreviewResult>('read_document_preview', {
+        projectRoot: projectPath ?? filePath,
+        path: filePath,
+      });
       if (requestVersionRef.current !== requestVersion) {
         return false;
       }
@@ -62,7 +65,7 @@ export function useDocumentContent(filePath: string, enabled: boolean) {
       }));
       return false;
     }
-  }, [filePath]);
+  }, [filePath, projectPath]);
 
   useEffect(() => {
     if (!enabled) {

@@ -21,12 +21,14 @@ function createDeferred<T>() {
 
 function HookHarness({
   filePath,
+  projectPath = 'D:/code/JavaScript/mini-term',
   enabled = true,
 }: {
   filePath: string;
+  projectPath?: string;
   enabled?: boolean;
 }) {
-  const state = useDocumentContent(filePath, enabled);
+  const state = useDocumentContent(filePath, projectPath, enabled);
 
   return (
     <div>

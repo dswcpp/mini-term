@@ -97,7 +97,8 @@ function createRuntimeState(workspaceRoot, hostControl) {
       ...(hostControl
         ? {
             hostControl: {
-              baseUrl: hostControl.baseUrl,
+              transport: hostControl.transport,
+              endpoint: hostControl.endpoint,
               token: hostControl.token,
               capabilities: hostControl.capabilities,
             },
@@ -329,7 +330,8 @@ async function startMockHostControlServer(workspaceRoot) {
   assert.ok(address && typeof address === 'object', 'mock host control must bind to a TCP port');
 
   return {
-    baseUrl: `http://127.0.0.1:${address.port}/host-control`,
+    transport: 'http',
+    endpoint: `http://127.0.0.1:${address.port}/host-control`,
     token,
     capabilities,
     requests,
@@ -500,7 +502,7 @@ function httpRequest({ port, method, pathName, headers = {}, body }) {
   });
 }
 
-function createHttpClient(binaryPath, env, port) {
+function createHttpClient(binaryPath, env, port, authToken) {
   const child = spawn(binaryPath, [], {
     cwd: repoRoot(),
     env: { ...process.env, ...env },
@@ -536,6 +538,7 @@ function createHttpClient(binaryPath, env, port) {
         pathName: '/mcp',
         headers: {
           'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
           ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
         },
         body: JSON.stringify(payload),
@@ -710,6 +713,7 @@ async function main() {
   const mockHost = await startMockHostControlServer(workspaceRoot);
   writeJson(path.join(dataDir, 'runtime_mcp_state.json'), createRuntimeState(workspaceRoot, mockHost));
   const port = 8876;
+  const httpToken = 'mini-term-http-smoke-token';
   const client = createHttpClient(
     stagedBinaryPath,
     {
@@ -719,8 +723,10 @@ async function main() {
       MINI_TERM_TEST_AGENT_SHIM: shimPath,
       MINI_TERM_MCP_HTTP_HOST: '127.0.0.1',
       MINI_TERM_MCP_HTTP_PORT: String(port),
+      MINI_TERM_MCP_HTTP_TOKEN: httpToken,
     },
     port,
+    httpToken,
   );
 
   const completed = [];
@@ -743,6 +749,8 @@ async function main() {
     assert.equal(serverInfo.data.hostConnection.status, 'connected');
     assert.equal(serverInfo.data.transport, 'http');
     assert.equal(serverInfo.data.hostConnection.mode, 'app-data-snapshot');
+    assert.equal(serverInfo.data.hostConnection.hostControl.transport, 'http');
+    assert.equal(serverInfo.data.hostConnection.hostControl.endpoint, mockHost.endpoint);
     assert.equal(serverInfo.data.hostConnection.hostControl.token, mockHost.token);
     completed.push('server_info');
 

@@ -377,9 +377,7 @@ fn descriptor_for_backend_id(
     backend_id: &str,
 ) -> Option<AgentBackendDescriptor> {
     AGENT_BACKENDS
-        .iter()
-        .cloned()
-        .find(|backend| backend.backend_id == backend_id)
+        .iter().find(|&backend| backend.backend_id == backend_id).cloned()
         .map(|backend| static_backend_descriptor(backend, config, false, false, None))
 }
 
@@ -388,11 +386,9 @@ fn builtin_backend_for_target(
     target: &TaskTarget,
 ) -> Option<AgentBackendDescriptor> {
     AGENT_BACKENDS
-        .iter()
-        .cloned()
-        .find(|backend| {
+        .iter().find(|&backend| {
             backend.target == target.clone() && backend.kind == AgentBackendKind::BuiltinCli
-        })
+        }).cloned()
         .map(|backend| static_backend_descriptor(backend, config, false, false, None))
 }
 
@@ -401,9 +397,7 @@ fn first_backend_for_target(
     target: &TaskTarget,
 ) -> Option<AgentBackendDescriptor> {
     AGENT_BACKENDS
-        .iter()
-        .cloned()
-        .find(|backend| backend.target == target.clone())
+        .iter().find(|&backend| backend.target == target.clone()).cloned()
         .map(|backend| static_backend_descriptor(backend, config, false, false, None))
 }
 
@@ -634,9 +628,7 @@ fn find_agent_backend_with_config(
     let codex_default_backend_id = resolved_default_backend_id(config, &TaskTarget::Codex);
     let claude_default_backend_id = resolved_default_backend_id(config, &TaskTarget::Claude);
     AGENT_BACKENDS
-        .iter()
-        .cloned()
-        .find(|backend| backend.backend_id == backend_id)
+        .iter().find(|&backend| backend.backend_id == backend_id).cloned()
         .map(|backend| {
             let (preferred_backend_id, default_backend_id, allow_builtin_fallback) =
                 match &backend.target {

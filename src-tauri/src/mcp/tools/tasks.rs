@@ -267,10 +267,14 @@ pub fn write_file_tool(args: Value) -> Result<Value, String> {
         ),
     ) {
         Ok(approval) => approval,
-        Err(pending) => return Ok(approval_pending_value("write_file", pending)),
+        Err(pending) => return Ok(approval_pending_value("write_file", *pending)),
     };
 
-    write_text_file(resolved_path.requested_path.clone(), content.to_string())?;
+    write_text_file(
+        resolved_path.root_path.clone(),
+        resolved_path.requested_path.clone(),
+        content.to_string(),
+    )?;
     mark_approval_executed(&approval.request_id);
     let _ = record_runtime_event(
         "file-written",
@@ -342,7 +346,7 @@ pub fn run_workspace_command_tool(args: Value) -> Result<Value, String> {
         ),
     ) {
         Ok(approval) => approval,
-        Err(pending) => return Ok(approval_pending_value("run_workspace_command", pending)),
+        Err(pending) => return Ok(approval_pending_value("run_workspace_command", *pending)),
     };
 
     let result = run_workspace_command(&validated.workspace_path, &validated.command)?;
@@ -1005,6 +1009,66 @@ done
         .unwrap();
 
         assert_eq!(result["status"], 0);
+    }
+
+    #[test]
+    fn run_workspace_command_restarts_approval_when_command_changes() {
+        let harness = TestHarness::new("run-command-command-mismatch");
+        let pending = run_workspace_command_tool(json!({
+            "workspacePath": harness.workspace_path(),
+            "command": "echo hello"
+        }))
+        .unwrap();
+        let request_id = pending["request"]["requestId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        set_approval_status(&request_id, ApprovalDecision::Approved).unwrap();
+        let restarted = run_workspace_command_tool(json!({
+            "workspacePath": harness.workspace_path(),
+            "command": "echo goodbye",
+            "approvalRequestId": request_id
+        }))
+        .unwrap();
+
+        assert_eq!(restarted["approvalRequired"], true);
+        assert_eq!(restarted["request"]["status"], "pending");
+        assert_ne!(
+            restarted["request"]["requestId"].as_str().unwrap(),
+            request_id
+        );
+    }
+
+    #[test]
+    fn run_workspace_command_restarts_approval_when_workspace_changes() {
+        let harness = TestHarness::new("run-command-workspace-change");
+        let nested = harness.workspace_root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let pending = run_workspace_command_tool(json!({
+            "workspacePath": harness.workspace_path(),
+            "command": "echo hello"
+        }))
+        .unwrap();
+        let request_id = pending["request"]["requestId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        set_approval_status(&request_id, ApprovalDecision::Approved).unwrap();
+        let restarted = run_workspace_command_tool(json!({
+            "workspacePath": nested.to_string_lossy(),
+            "command": "echo hello",
+            "approvalRequestId": request_id
+        }))
+        .unwrap();
+
+        assert_eq!(restarted["approvalRequired"], true);
+        assert_eq!(restarted["request"]["status"], "pending");
+        assert_ne!(
+            restarted["request"]["requestId"].as_str().unwrap(),
+            request_id
+        );
     }
 
     #[test]

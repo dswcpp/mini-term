@@ -524,6 +524,7 @@ export interface ApprovalRequest {
   status: ApprovalDecision;
   createdAt: number;
   updatedAt: number;
+  actionDigest?: string;
   approvalKey?: string;
 }
 
@@ -923,6 +924,14 @@ export interface GitFileStatus {
   path: string;
   oldPath?: string;
   status: GitStatusType;
+  statusLabel: string;
+}
+
+export interface ChangeFileStatus {
+  path: string;
+  oldPath?: string;
+  stagedStatus?: GitStatusType;
+  unstagedStatus?: GitStatusType;
   statusLabel: string;
 }
 

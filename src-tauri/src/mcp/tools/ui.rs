@@ -89,7 +89,7 @@ pub fn close_tab_tool(args: Value) -> Result<Value, String> {
         format!("Workspace: {workspace_id}\nTab: {tab_id}"),
     ) {
         Ok(approval) => approval,
-        Err(pending) => return Ok(approval_pending_value("close_tab", pending)),
+        Err(pending) => return Ok(approval_pending_value("close_tab", *pending)),
     };
 
     let result = call_host_control(
@@ -185,7 +185,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    fn start_mock_host_server() -> (String, Arc<Mutex<Vec<(String, Value)>>>) {
+    type MockHostRequests = Arc<Mutex<Vec<(String, Value)>>>;
+
+    fn start_mock_host_server() -> (String, MockHostRequests) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
@@ -287,8 +289,9 @@ mod tests {
         let harness = TestHarness::new("ui-host-success");
         let (base_url, requests) = start_mock_host_server();
         runtime_mcp::set_host_control_info(
+            "http".to_string(),
             base_url,
-            "mock-host-token".to_string(),
+            Some("mock-host-token".to_string()),
             vec!["ui-control".to_string()],
         )
         .unwrap();

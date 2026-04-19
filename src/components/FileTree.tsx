@@ -582,6 +582,7 @@ export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
               }
 
               await invoke('rename_entry', {
+                projectRoot: root.path,
                 oldPath: entry.path,
                 newName: nextName.trim(),
               });
@@ -608,7 +609,10 @@ export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
               if (!name?.trim()) {
                 return;
               }
-              await invoke('create_file', { path: `${entry.path}${separator}${name.trim()}` });
+              await invoke('create_file', {
+                projectRoot: root.path,
+                path: `${entry.path}${separator}${name.trim()}`,
+              });
               await loadDirectory(root.path, entry.path);
             },
           },
@@ -619,7 +623,10 @@ export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
               if (!name?.trim()) {
                 return;
               }
-              await invoke('create_directory', { path: `${entry.path}${separator}${name.trim()}` });
+              await invoke('create_directory', {
+                projectRoot: root.path,
+                path: `${entry.path}${separator}${name.trim()}`,
+              });
               await loadDirectory(root.path, entry.path);
             },
           },

@@ -126,9 +126,8 @@ fn classify_tool_error(tool_name: &str, message: &str) -> (&'static str, bool) {
         } else {
             ("INVALID_INPUT", false)
         }
-    } else if lower.contains("shell not found") {
-        ("INVALID_INPUT", false)
-    } else if lower.contains("required")
+    } else if lower.contains("shell not found")
+        || lower.contains("required")
         || lower.contains("invalid")
         || lower.contains("decision must be approved or rejected")
     {

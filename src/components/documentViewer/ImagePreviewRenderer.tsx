@@ -10,7 +10,7 @@ function withContentVersion(source: string, version: number) {
   return `${source}${source.includes('?') ? '&' : '?'}v=${version}`;
 }
 
-export default function ImagePreviewRenderer({ filePath, fileName, contentVersion, result }: PreviewRenderContext) {
+export default function ImagePreviewRenderer({ filePath, projectPath, fileName, contentVersion, result }: PreviewRenderContext) {
   const [fallbackSource, setFallbackSource] = useState<string | null>(null);
   const [loadError, setLoadError] = useState('');
   const [recovering, setRecovering] = useState(false);
@@ -70,7 +70,10 @@ export default function ImagePreviewRenderer({ filePath, fileName, contentVersio
             }
 
             setRecovering(true);
-            void invoke<string>('read_image_data_url', { path: filePath })
+            void invoke<string>('read_image_data_url', {
+              projectRoot: projectPath ?? filePath,
+              path: filePath,
+            })
               .then((dataUrl) => {
                 setFallbackSource(dataUrl);
                 setLoadError('');

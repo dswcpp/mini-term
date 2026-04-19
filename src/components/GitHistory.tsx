@@ -4,9 +4,12 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore, selectWorkspaceConfig } from '../store';
 import { subscribeProjectGitDirty } from '../runtime/workspaceRuntime';
 import { showContextMenu } from '../utils/contextMenu';
+import { getDefaultRepoGitView, summarizeGitChanges, type GitChangeSummary, type RepoGitView } from '../utils/gitChangesSummary';
 import { formatRelativeTime } from '../utils/timeFormat';
+import { GitChanges } from './GitChanges';
 import type {
   BranchInfo,
+  ChangeFileStatus,
   CommitFileInfo,
   GitCommitInfo,
   GitRepoInfo,
@@ -36,6 +39,13 @@ interface RootRepoGroup {
 }
 
 const GIT_ACTION_RESET_MS = 1500;
+const CHANGE_PANEL_HEIGHT_PX = 380;
+const EMPTY_GIT_CHANGE_SUMMARY: GitChangeSummary = {
+  changedFiles: 0,
+  stagedFiles: 0,
+  unstagedFiles: 0,
+  untrackedFiles: 0,
+};
 
 function buildWorkspaceHistoryKey(workspace: WorkspaceConfig) {
   return [workspace.id, ...workspace.roots.map((root) => `${root.id}:${root.path}`)].join('|');
@@ -127,6 +137,8 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
   const [repoStates, setRepoStates] = useState<Map<string, RepoState>>(new Map());
   const [repoBranches, setRepoBranches] = useState<Map<string, BranchInfo[]>>(new Map());
+  const [repoChangeSummaries, setRepoChangeSummaries] = useState<Map<string, GitChangeSummary>>(new Map());
+  const [repoContentModes, setRepoContentModes] = useState<Map<string, RepoGitView>>(new Map());
   const [pullState, setPullState] = useState<Map<string, RepoActionState>>(new Map());
   const [pushState, setPushState] = useState<Map<string, RepoActionState>>(new Map());
 
@@ -148,6 +160,45 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
     }
   }, []);
 
+  const loadChangeSummary = useCallback(async (repoPath: string) => {
+    try {
+      const changes = await invoke<ChangeFileStatus[]>('get_changes_status', { repoPath });
+      const summary = summarizeGitChanges(changes);
+
+      setRepoChangeSummaries((previous) => {
+        const next = new Map(previous);
+        next.set(repoPath, summary);
+        return next;
+      });
+
+      setRepoContentModes((previous) => {
+        if (previous.has(repoPath)) {
+          return previous;
+        }
+
+        const next = new Map(previous);
+        next.set(repoPath, getDefaultRepoGitView(summary));
+        return next;
+      });
+    } catch {
+      setRepoChangeSummaries((previous) => {
+        const next = new Map(previous);
+        next.set(repoPath, EMPTY_GIT_CHANGE_SUMMARY);
+        return next;
+      });
+
+      setRepoContentModes((previous) => {
+        if (previous.has(repoPath)) {
+          return previous;
+        }
+
+        const next = new Map(previous);
+        next.set(repoPath, 'history');
+        return next;
+      });
+    }
+  }, []);
+
   const loadRepos = useCallback(async () => {
     if (!workspace) {
       return;
@@ -165,6 +216,7 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
     );
 
     const liveRepoPaths = new Set(entries.flatMap(([, repos]) => repos.map((repo) => repo.path)));
+    const repoPaths = Array.from(liveRepoPaths);
     setReposByRoot(new Map(entries));
     setExpandedRepos((previous) => {
       const next = new Set(Array.from(previous).filter((repoPath) => liveRepoPaths.has(repoPath)));
@@ -182,6 +234,30 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
       }
       return changed ? next : previous;
     });
+    setRepoChangeSummaries((previous) => {
+      let changed = false;
+      const next = new Map<string, GitChangeSummary>();
+      for (const [repoPath, summary] of previous) {
+        if (!liveRepoPaths.has(repoPath)) {
+          changed = true;
+          continue;
+        }
+        next.set(repoPath, summary);
+      }
+      return changed ? next : previous;
+    });
+    setRepoContentModes((previous) => {
+      let changed = false;
+      const next = new Map<string, RepoGitView>();
+      for (const [repoPath, mode] of previous) {
+        if (!liveRepoPaths.has(repoPath)) {
+          changed = true;
+          continue;
+        }
+        next.set(repoPath, mode);
+      }
+      return changed ? next : previous;
+    });
     setRepoBranches((previous) => {
       let changed = false;
       const next = new Map<string, BranchInfo[]>();
@@ -194,7 +270,9 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
       }
       return changed ? next : previous;
     });
-  }, [workspace]);
+
+    await Promise.all(repoPaths.map((repoPath) => loadChangeSummary(repoPath)));
+  }, [loadChangeSummary, workspace]);
 
   const loadBranches = useCallback(async (repoPath: string) => {
     try {
@@ -263,6 +341,8 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
       setExpandedRepos(new Set());
       setRepoStates(new Map());
       setRepoBranches(new Map());
+      setRepoChangeSummaries(new Map());
+      setRepoContentModes(new Map());
       setPullState(new Map());
       setPushState(new Map());
       return;
@@ -285,6 +365,8 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
       setExpandedRepos(new Set());
       setRepoStates(new Map());
       setRepoBranches(new Map());
+      setRepoChangeSummaries(new Map());
+      setRepoContentModes(new Map());
       setPullState(new Map());
       setPushState(new Map());
       scrollRef.current?.scrollTo({ top: 0 });
@@ -295,9 +377,10 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
       for (const repoPath of expandedReposRef.current) {
         void loadCommits(repoPath);
         void loadBranches(repoPath);
+        void loadChangeSummary(repoPath);
       }
     }
-  }, [clearRefreshTimer, isVisible, loadBranches, loadCommits, loadRepos, workspace]);
+  }, [clearRefreshTimer, isVisible, loadBranches, loadChangeSummary, loadCommits, loadRepos, workspace]);
 
   useEffect(
     () => () => {
@@ -335,7 +418,8 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
     });
     void loadCommits(repoPath);
     void loadBranches(repoPath);
-  }, [loadBranches, loadCommits, reposByRoot, workspace]);
+    void loadChangeSummary(repoPath);
+  }, [loadBranches, loadChangeSummary, loadCommits, reposByRoot, workspace]);
 
   const toggleRepo = useCallback(
     (repoPath: string) => {
@@ -351,10 +435,11 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
           void loadCommits(repoPath);
         }
         void loadBranches(repoPath);
+        void loadChangeSummary(repoPath);
         return next;
       });
     },
-    [loadBranches, loadCommits],
+    [loadBranches, loadChangeSummary, loadCommits],
   );
 
   const handleScroll = useCallback(() => {
@@ -428,9 +513,10 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
       for (const repoPath of expandedReposRef.current) {
         void loadCommits(repoPath);
         void loadBranches(repoPath);
+        void loadChangeSummary(repoPath);
       }
     }, 500);
-  }, [clearRefreshTimer, loadBranches, loadCommits, loadRepos]);
+  }, [clearRefreshTimer, loadBranches, loadChangeSummary, loadCommits, loadRepos]);
 
   const handlePull = useCallback(
     async (repoPath: string) => {
@@ -447,6 +533,7 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
         await loadRepos();
         await loadCommits(repoPath);
         await loadBranches(repoPath);
+        await loadChangeSummary(repoPath);
       } catch (error) {
         setPullState((previous) =>
           new Map(previous).set(repoPath, { status: 'error', error: String(error) }),
@@ -461,7 +548,7 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
         });
       }, GIT_ACTION_RESET_MS);
     },
-    [loadBranches, loadCommits, loadRepos],
+    [loadBranches, loadChangeSummary, loadCommits, loadRepos],
   );
 
   const handlePush = useCallback(
@@ -478,6 +565,7 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
         setPushState((previous) => new Map(previous).set(repoPath, { status: 'success' }));
         await loadRepos();
         await loadBranches(repoPath);
+        await loadChangeSummary(repoPath);
       } catch (error) {
         setPushState((previous) =>
           new Map(previous).set(repoPath, { status: 'error', error: String(error) }),
@@ -492,8 +580,20 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
         });
       }, GIT_ACTION_RESET_MS);
     },
-    [loadBranches, loadRepos],
+    [loadBranches, loadChangeSummary, loadRepos],
   );
+
+  const setRepoContentMode = useCallback((repoPath: string, mode: RepoGitView) => {
+    setRepoContentModes((previous) => {
+      if (previous.get(repoPath) === mode) {
+        return previous;
+      }
+
+      const next = new Map(previous);
+      next.set(repoPath, mode);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!workspace || !isVisible) {
@@ -529,7 +629,7 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
     <div className="flex h-full flex-col border-t border-[var(--border-subtle)] bg-[var(--bg-surface)]">
       <div className="flex flex-shrink-0 items-center justify-between px-3 pt-3 pb-1.5">
         <span className="select-none text-sm font-medium uppercase tracking-[0.12em] text-[var(--text-muted)]">
-          Git History
+          Git
         </span>
         <button
           type="button"
@@ -563,6 +663,8 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
                   const isExpanded = expandedRepos.has(repo.path);
                   const state = repoStates.get(repo.path);
                   const branches = repoBranches.get(repo.path) ?? [];
+                  const changeSummary = repoChangeSummaries.get(repo.path) ?? EMPTY_GIT_CHANGE_SUMMARY;
+                  const contentMode = repoContentModes.get(repo.path) ?? getDefaultRepoGitView(changeSummary);
                   const pull = pullState.get(repo.path);
                   const push = pushState.get(repo.path);
                   const actionsDisabled = pull?.status === 'loading' || push?.status === 'loading';
@@ -589,6 +691,21 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
                               {repo.currentBranch}
                             </span>
                           ) : null}
+                          {changeSummary.stagedFiles > 0 ? (
+                            <span className="shrink-0 rounded border border-emerald-500/30 bg-emerald-500/12 px-1.5 text-[10px] leading-[18px] text-emerald-300">
+                              S {changeSummary.stagedFiles}
+                            </span>
+                          ) : null}
+                          {changeSummary.unstagedFiles > 0 ? (
+                            <span className="shrink-0 rounded border border-amber-500/30 bg-amber-500/12 px-1.5 text-[10px] leading-[18px] text-amber-300">
+                              M {changeSummary.unstagedFiles}
+                            </span>
+                          ) : null}
+                          {changeSummary.untrackedFiles > 0 ? (
+                            <span className="shrink-0 rounded border border-sky-500/30 bg-sky-500/12 px-1.5 text-[10px] leading-[18px] text-sky-300">
+                              ? {changeSummary.untrackedFiles}
+                            </span>
+                          ) : null}
                         </div>
 
                         <div className="flex flex-shrink-0 items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
@@ -613,41 +730,88 @@ export function GitHistory({ workspaceId, isVisible = true }: GitHistoryProps) {
 
                       {isExpanded ? (
                         <div>
-                          {state?.commits.map((commit) => {
-                            const commitBranches = branches.filter((branch) => branch.commitHash === commit.hash);
-                            const commitTitle = commit.body ? `${commit.message}\n\n${commit.body}` : commit.message;
+                          <div className="flex items-center gap-1 px-6 pb-1 pt-1.5">
+                            <button
+                              type="button"
+                              className={`rounded px-2 py-1 text-[11px] uppercase tracking-[0.08em] transition-colors ${
+                                contentMode === 'changes'
+                                  ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                              }`}
+                              onClick={() => setRepoContentMode(repo.path, 'changes')}
+                            >
+                              Changes{changeSummary.changedFiles > 0 ? ` (${changeSummary.changedFiles})` : ''}
+                            </button>
+                            <button
+                              type="button"
+                              className={`rounded px-2 py-1 text-[11px] uppercase tracking-[0.08em] transition-colors ${
+                                contentMode === 'history'
+                                  ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                              }`}
+                              onClick={() => setRepoContentMode(repo.path, 'history')}
+                            >
+                              History
+                            </button>
+                          </div>
 
-                            return (
+                          {contentMode === 'changes' ? (
+                            <div className="px-4 pb-3">
                               <div
-                                key={commit.hash}
-                                className="cursor-pointer rounded-[var(--radius-sm)] px-6 py-1.5 transition-colors duration-100 hover:bg-[var(--border-subtle)]"
-                                title={commitTitle}
-                                onContextMenu={(event) => handleCommitContextMenu(event, repo.path, commit)}
-                                onDoubleClick={() => {
-                                  void handleViewDiff(repo.path, commit);
-                                }}
+                                className="overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-base)]"
+                                style={{ height: `${CHANGE_PANEL_HEIGHT_PX}px` }}
                               >
-                                <div className="flex min-w-0 items-center gap-1 text-sm text-[var(--text-primary)]">
-                                  {commitBranches.map(renderBranchBadge)}
-                                  <span className="truncate">{commit.message}</span>
-                                </div>
-                                <div className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
-                                  <span>{commit.author}</span>
-                                  <span>|</span>
-                                  <span>{formatRelativeTime(commit.timestamp)}</span>
-                                  <span>|</span>
-                                  <span className="font-mono">{commit.shortHash}</span>
-                                </div>
+                                <GitChanges
+                                  projectPath={repo.path}
+                                  repoPath={repo.path}
+                                  onCommitSuccess={() => {
+                                    void loadRepos();
+                                    void loadChangeSummary(repo.path);
+                                    void loadCommits(repo.path);
+                                    void loadBranches(repo.path);
+                                  }}
+                                />
                               </div>
-                            );
-                          })}
+                            </div>
+                          ) : (
+                            <div>
+                              {state?.commits.map((commit) => {
+                                const commitBranches = branches.filter((branch) => branch.commitHash === commit.hash);
+                                const commitTitle = commit.body ? `${commit.message}\n\n${commit.body}` : commit.message;
 
-                          {state?.loading ? (
-                            <div className="py-2 text-center text-xs text-[var(--text-muted)]">Loading...</div>
-                          ) : null}
-                          {state && !state.loading && state.commits.length === 0 ? (
-                            <div className="py-2 text-center text-xs text-[var(--text-muted)]">No commits</div>
-                          ) : null}
+                                return (
+                                  <div
+                                    key={commit.hash}
+                                    className="cursor-pointer rounded-[var(--radius-sm)] px-6 py-1.5 transition-colors duration-100 hover:bg-[var(--border-subtle)]"
+                                    title={commitTitle}
+                                    onContextMenu={(event) => handleCommitContextMenu(event, repo.path, commit)}
+                                    onDoubleClick={() => {
+                                      void handleViewDiff(repo.path, commit);
+                                    }}
+                                  >
+                                    <div className="flex min-w-0 items-center gap-1 text-sm text-[var(--text-primary)]">
+                                      {commitBranches.map(renderBranchBadge)}
+                                      <span className="truncate">{commit.message}</span>
+                                    </div>
+                                    <div className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+                                      <span>{commit.author}</span>
+                                      <span>|</span>
+                                      <span>{formatRelativeTime(commit.timestamp)}</span>
+                                      <span>|</span>
+                                      <span className="font-mono">{commit.shortHash}</span>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+
+                              {state?.loading ? (
+                                <div className="py-2 text-center text-xs text-[var(--text-muted)]">Loading...</div>
+                              ) : null}
+                              {state && !state.loading && state.commits.length === 0 ? (
+                                <div className="py-2 text-center text-xs text-[var(--text-muted)]">No commits</div>
+                              ) : null}
+                            </div>
+                          )}
                         </div>
                       ) : null}
                     </div>

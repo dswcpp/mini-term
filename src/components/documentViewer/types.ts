@@ -8,6 +8,7 @@ export type MermaidViewportMode = ViewerLayoutMode | 'focus';
 
 export interface PreviewRenderContext {
   filePath: string;
+  projectPath?: string;
   fileName: string;
   mode: PreviewMode;
   layoutMode: ViewerLayoutMode;

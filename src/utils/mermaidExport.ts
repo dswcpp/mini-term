@@ -107,7 +107,7 @@ export async function exportMermaidDiagram(options: {
 
   const finalPath = ensureFileExtension(targetPath, format);
   if (format === 'svg') {
-    await invoke('write_text_file', {
+    await invoke('write_external_text_file', {
       path: finalPath,
       content: normalizeSvgMarkup(svgMarkup),
     });
@@ -115,7 +115,7 @@ export async function exportMermaidDiagram(options: {
   }
 
   const pngBytes = await svgMarkupToPngBytes(svgMarkup);
-  await invoke('write_binary_file', {
+  await invoke('write_external_binary_file', {
     path: finalPath,
     bytes: Array.from(pngBytes),
   });

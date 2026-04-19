@@ -89,7 +89,7 @@ export function DocumentViewerPanel({
   const fullscreenHostRef = useRef<HTMLDivElement | null>(null);
   const navigationHostRef = useRef<HTMLDivElement | null>(null);
 
-  const { result, loading, refreshing, error, reload, version } = useDocumentContent(filePath, active);
+  const { result, loading, refreshing, error, reload, version } = useDocumentContent(filePath, projectPath, active);
   const { feedback, clearFeedback, showRefreshing, showSuccess, showError } = useAutoRefreshFeedback();
   const fileName = useMemo(
     () => filePath.replace(/\\/g, '/').split('/').pop() ?? filePath,
@@ -224,6 +224,7 @@ export function DocumentViewerPanel({
 
     const context: PreviewRenderContext = {
       filePath,
+      projectPath,
       fileName,
       mode: previewMode,
       layoutMode,

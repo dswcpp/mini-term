@@ -1,31 +1,49 @@
-/// 通过 Win32 剪贴板 API 读取非标准格式的图片数据，保存为 temp PNG 文件。
-/// 用于兜底 Tauri 插件 readImage 无法识别的截图工具（如 PinPix）。
+//! Clipboard fallbacks for Mini-Term.
+//! On Windows we read screenshot-style image formats directly from Win32 and
+//! persist them into an app temp directory for terminal paste workflows.
+
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
+use uuid::Uuid;
+
+const CLIPBOARD_TEMP_DIR: &str = "mini-term-clipboard";
+const CLIPBOARD_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+
+fn clipboard_temp_dir() -> PathBuf {
+    std::env::temp_dir().join(CLIPBOARD_TEMP_DIR)
+}
+
+fn unique_clipboard_path(prefix: &str, extension: &str) -> PathBuf {
+    clipboard_temp_dir().join(format!("{prefix}-{}.{}", Uuid::now_v7(), extension))
+}
+
+fn ensure_clipboard_temp_dir() -> Result<PathBuf, String> {
+    let dir = clipboard_temp_dir();
+    std::fs::create_dir_all(&dir).map_err(|error| format!("failed to create clipboard temp dir: {error}"))?;
+    Ok(dir)
+}
 
 #[cfg(windows)]
 mod win {
-    use std::path::PathBuf;
-
+    use super::{ensure_clipboard_temp_dir, unique_clipboard_path};
+    use image::{ImageBuffer, RgbaImage};
+    use std::path::{Path, PathBuf};
     use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::Graphics::Gdi::{
-        BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, DeleteDC,
-        GetDIBits, GetObjectW, SelectObject, BITMAP, DIB_RGB_COLORS, HBITMAP,
+        BITMAP, BITMAPINFOHEADER, BI_RGB, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+        GetDIBits, GetObjectW, HBITMAP, SelectObject,
     };
     use windows::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     };
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 
-    use image::{ImageBuffer, RgbaImage};
-
     const CF_BITMAP: u32 = 2;
     const CF_DIB: u32 = 8;
 
-    /// 尝试从剪贴板读取图片（CF_DIB → CF_BITMAP），保存为 PNG 到 temp 目录。
     pub fn read_clipboard_to_png() -> Result<PathBuf, String> {
         unsafe {
-            if OpenClipboard(None).is_err() {
-                return Err("无法打开剪贴板".into());
-            }
+            OpenClipboard(None).map_err(|_| "failed to open clipboard".to_string())?;
             let result = read_inner();
             let _ = CloseClipboard();
             result
@@ -34,25 +52,25 @@ mod win {
 
     unsafe fn read_inner() -> Result<PathBuf, String> {
         if IsClipboardFormatAvailable(CF_DIB).is_ok() {
-            if let Ok(img) = read_dib() {
-                return save_png(&img);
+            if let Ok(image) = read_dib() {
+                return save_png(&image);
             }
         }
         if IsClipboardFormatAvailable(CF_BITMAP).is_ok() {
-            if let Ok(img) = read_bitmap() {
-                return save_png(&img);
+            if let Ok(image) = read_bitmap() {
+                return save_png(&image);
             }
         }
-        Err("剪贴板中没有可识别的图片数据".into())
+        Err("clipboard does not contain a supported image format".to_string())
     }
 
     unsafe fn read_dib() -> Result<RgbaImage, String> {
         let handle = GetClipboardData(CF_DIB)
-            .map_err(|e| format!("GetClipboardData(CF_DIB): {e}"))?;
+            .map_err(|error| format!("GetClipboardData(CF_DIB) failed: {error}"))?;
         let hglobal = HGLOBAL(handle.0);
         let ptr = GlobalLock(hglobal) as *const u8;
         if ptr.is_null() {
-            return Err("GlobalLock 失败".into());
+            return Err("GlobalLock failed".to_string());
         }
         let size = GlobalSize(hglobal);
         let result = parse_dib(ptr, size);
@@ -62,17 +80,19 @@ mod win {
 
     unsafe fn parse_dib(ptr: *const u8, size: usize) -> Result<RgbaImage, String> {
         if size < std::mem::size_of::<BITMAPINFOHEADER>() {
-            return Err("DIB 数据太短".into());
+            return Err("DIB payload is too short".to_string());
         }
 
         let header = &*(ptr as *const BITMAPINFOHEADER);
         let width = header.biWidth as u32;
         let height = header.biHeight.unsigned_abs();
         let bit_count = header.biBitCount;
-        let compression = header.biCompression;
 
-        if compression != BI_RGB.0 {
-            return Err(format!("不支持的 DIB 压缩格式: {compression}"));
+        if header.biCompression != BI_RGB.0 {
+            return Err(format!(
+                "unsupported DIB compression mode: {}",
+                header.biCompression
+            ));
         }
 
         let header_size = header.biSize as usize;
@@ -88,122 +108,132 @@ mod win {
         };
 
         if pixel_offset >= size {
-            return Err("像素数据偏移超出范围".into());
+            return Err("pixel data offset is out of range".to_string());
         }
 
         let pixels = ptr.add(pixel_offset);
-        let stride = ((width * bit_count as u32 + 31) / 32 * 4) as usize;
+        let stride = ((width * bit_count as u32).div_ceil(32) * 4) as usize;
         let bottom_up = header.biHeight > 0;
-
-        let mut img = RgbaImage::new(width, height);
+        let mut image = RgbaImage::new(width, height);
 
         for y in 0..height {
             let src_y = if bottom_up { height - 1 - y } else { y };
             let row = pixels.add(src_y as usize * stride);
-
             for x in 0..width {
                 let (r, g, b, a) = match bit_count {
                     32 => {
-                        let off = (x * 4) as usize;
-                        (*row.add(off + 2), *row.add(off + 1), *row.add(off), *row.add(off + 3))
+                        let offset = (x * 4) as usize;
+                        (
+                            *row.add(offset + 2),
+                            *row.add(offset + 1),
+                            *row.add(offset),
+                            *row.add(offset + 3),
+                        )
                     }
                     24 => {
-                        let off = (x * 3) as usize;
-                        (*row.add(off + 2), *row.add(off + 1), *row.add(off), 255)
+                        let offset = (x * 3) as usize;
+                        (
+                            *row.add(offset + 2),
+                            *row.add(offset + 1),
+                            *row.add(offset),
+                            255,
+                        )
                     }
-                    _ => return Err(format!("不支持的位深: {bit_count}")),
+                    _ => return Err(format!("unsupported bitmap depth: {bit_count}")),
                 };
-                img.put_pixel(x, y, image::Rgba([r, g, b, a]));
+                image.put_pixel(x, y, image::Rgba([r, g, b, a]));
             }
         }
 
-        Ok(img)
+        Ok(image)
     }
 
     unsafe fn read_bitmap() -> Result<RgbaImage, String> {
         let handle = GetClipboardData(CF_BITMAP)
-            .map_err(|e| format!("GetClipboardData(CF_BITMAP): {e}"))?;
+            .map_err(|error| format!("GetClipboardData(CF_BITMAP) failed: {error}"))?;
         let hbitmap = HBITMAP(handle.0);
 
-        let mut bmp = BITMAP::default();
-        let ret = GetObjectW(
+        let mut bitmap = BITMAP::default();
+        let read = GetObjectW(
             hbitmap,
             std::mem::size_of::<BITMAP>() as i32,
-            Some(&mut bmp as *mut _ as *mut _),
+            Some(&mut bitmap as *mut _ as *mut _),
         );
-        if ret == 0 {
-            return Err("GetObjectW 失败".into());
+        if read == 0 {
+            return Err("GetObjectW failed".to_string());
         }
 
-        let width = bmp.bmWidth as u32;
-        let height = bmp.bmHeight as u32;
-
+        let width = bitmap.bmWidth as u32;
+        let height = bitmap.bmHeight as u32;
         let hdc = CreateCompatibleDC(None);
         let old = SelectObject(hdc, hbitmap);
 
-        let mut bi = BITMAPINFOHEADER {
+        let mut info = BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width as i32,
-            biHeight: -(height as i32), // top-down
+            biHeight: -(height as i32),
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
             ..std::mem::zeroed()
         };
 
-        let mut buf = vec![0u8; (width * height * 4) as usize];
-
-        let ret = GetDIBits(
+        let mut buffer = vec![0u8; (width * height * 4) as usize];
+        let read = GetDIBits(
             hdc,
             hbitmap,
             0,
             height,
-            Some(buf.as_mut_ptr() as *mut _),
-            &mut bi as *mut _ as *mut _,
+            Some(buffer.as_mut_ptr() as *mut _),
+            &mut info as *mut _ as *mut _,
             DIB_RGB_COLORS,
         );
 
         SelectObject(hdc, old);
         let _ = DeleteDC(hdc);
 
-        if ret == 0 {
-            return Err("GetDIBits 失败".into());
+        if read == 0 {
+            return Err("GetDIBits failed".to_string());
         }
 
-        // BGRA → RGBA
-        for chunk in buf.chunks_exact_mut(4) {
+        for chunk in buffer.chunks_exact_mut(4) {
             chunk.swap(0, 2);
         }
 
-        ImageBuffer::from_raw(width, height, buf)
-            .ok_or_else(|| "构建图像缓冲区失败".into())
+        ImageBuffer::from_raw(width, height, buffer)
+            .ok_or_else(|| "failed to build image buffer".to_string())
     }
 
-    fn save_png(img: &RgbaImage) -> Result<PathBuf, String> {
-        let dir = std::env::temp_dir().join("mini-term-clipboard");
-        std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
-
-        let path = dir.join(format!(
-            "clip-{}.png",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        ));
-
-        img.save(&path).map_err(|e| format!("保存 PNG 失败: {e}"))?;
+    fn save_png(image: &RgbaImage) -> Result<PathBuf, String> {
+        ensure_clipboard_temp_dir()?;
+        let path = unique_clipboard_path("clip", "png");
+        image
+            .save(&path)
+            .map_err(|error| format!("failed to save PNG: {error}"))?;
         Ok(path)
+    }
+
+    #[allow(dead_code)]
+    pub fn debug_save_path(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
     }
 }
 
-/// 清理 temp 目录中超过 24 小时的剪贴板截图文件，启动时调用一次。
 pub fn cleanup_old_clipboard_images() {
-    let dir = std::env::temp_dir().join("mini-term-clipboard");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
-    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    let dir = clipboard_temp_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let cutoff = SystemTime::now()
+        .checked_sub(CLIPBOARD_RETENTION)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
         if modified < cutoff {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -217,27 +247,45 @@ pub fn read_clipboard_image() -> Result<String, String> {
         let path = win::read_clipboard_to_png()?;
         Ok(path.to_string_lossy().into_owned())
     }
+
     #[cfg(not(windows))]
     {
-        Err("仅支持 Windows 平台".into())
+        Err("clipboard image fallback is only supported on Windows".to_string())
     }
 }
 
-/// 将长文本剪贴板内容保存为 temp 目录下的 .txt 文件，返回绝对路径。
-/// 与图片粘贴共用 `mini-term-clipboard` 目录，清理逻辑自动覆盖。
 #[tauri::command]
 pub fn save_clipboard_text(text: String) -> Result<String, String> {
-    let dir = std::env::temp_dir().join("mini-term-clipboard");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败: {e}"))?;
-
-    let path = dir.join(format!(
-        "paste-{}.txt",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-
-    std::fs::write(&path, text.as_bytes()).map_err(|e| format!("写入临时文件失败: {e}"))?;
+    ensure_clipboard_temp_dir()?;
+    let path = unique_clipboard_path("paste", "txt");
+    std::fs::write(&path, text.as_bytes())
+        .map_err(|error| format!("failed to write clipboard temp file: {error}"))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn save_clipboard_text_uses_unique_unpredictable_paths() {
+        let first = save_clipboard_text("one".to_string()).unwrap();
+        let second = save_clipboard_text("two".to_string()).unwrap();
+
+        assert_ne!(first, second);
+        assert!(Path::new(&first).file_name().unwrap().to_string_lossy().starts_with("paste-"));
+        assert!(Path::new(&second).file_name().unwrap().to_string_lossy().starts_with("paste-"));
+
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
+    }
+
+    #[test]
+    fn save_clipboard_text_persists_contents() {
+        let path = save_clipboard_text("clipboard payload".to_string()).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "clipboard payload");
+        let _ = std::fs::remove_file(path);
+    }
 }

@@ -1,4 +1,5 @@
 use super::models::{ReadFileResult, SearchFileMatch};
+use super::workspace_context::resolve_workspace_path;
 use crate::fs::read_file_content;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,9 +18,10 @@ const SEARCH_SKIP_DIRS: &[&str] = &[
 ];
 
 pub fn read_file(path: String) -> Result<ReadFileResult, String> {
+    let resolved = resolve_workspace_path(&path)?;
     Ok(ReadFileResult {
         path: path.clone(),
-        file: read_file_content(path)?,
+        file: read_file_content(resolved.root_path, path)?,
     })
 }
 

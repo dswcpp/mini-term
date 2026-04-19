@@ -93,9 +93,7 @@ mod tests {
     fn encode_project_path(project_path: &str) -> String {
         project_path
             .trim_end_matches(['\\', '/'])
-            .replace(':', "-")
-            .replace('\\', "-")
-            .replace('/', "-")
+            .replace([':', '\\', '/'], "-")
     }
 
     fn write_lines(path: &Path, lines: &[String]) {
@@ -154,7 +152,7 @@ mod tests {
             ],
         );
 
-        let sessions = collect_ai_sessions(&home.path, &[project_path.clone()]);
+        let sessions = collect_ai_sessions(&home.path, std::slice::from_ref(&project_path));
 
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].session_type, "codex");

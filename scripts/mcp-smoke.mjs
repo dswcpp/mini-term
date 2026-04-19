@@ -93,7 +93,8 @@ function createRuntimeState(workspaceRoot, hostControl) {
       ...(hostControl
         ? {
             hostControl: {
-              baseUrl: hostControl.baseUrl,
+              transport: hostControl.transport,
+              endpoint: hostControl.endpoint,
               token: hostControl.token,
               capabilities: hostControl.capabilities,
             },
@@ -325,7 +326,8 @@ async function startMockHostControlServer(workspaceRoot) {
   assert.ok(address && typeof address === 'object', 'mock host control must bind to a TCP port');
 
   return {
-    baseUrl: `http://127.0.0.1:${address.port}/host-control`,
+    transport: 'http',
+    endpoint: `http://127.0.0.1:${address.port}/host-control`,
     token,
     capabilities,
     requests,
@@ -676,6 +678,8 @@ async function main() {
     const serverInfo = await client.callTool('server_info');
     assert.equal(serverInfo.data.hostConnection.status, 'connected');
     assert.equal(serverInfo.data.hostConnection.mode, 'app-data-snapshot');
+    assert.equal(serverInfo.data.hostConnection.hostControl.transport, 'http');
+    assert.equal(serverInfo.data.hostConnection.hostControl.endpoint, mockHost.endpoint);
     assert.equal(serverInfo.data.hostConnection.hostControl.token, mockHost.token);
     completed.push('server_info');
 

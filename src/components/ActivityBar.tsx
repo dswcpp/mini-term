@@ -1,5 +1,6 @@
-import { useAppStore, STATUS_PRIORITY, getHighestStatus } from '../store';
-import type { PaneStatus } from '../types';
+import { useMemo } from 'react';
+import { useAppStore } from '../store';
+import type { PaneStatus, WorkspaceTab } from '../types';
 
 const STATUS_COLORS: Record<PaneStatus, string> = {
   idle: 'var(--text-muted)',
@@ -8,111 +9,119 @@ const STATUS_COLORS: Record<PaneStatus, string> = {
   error: 'var(--color-error)',
 };
 
-interface PanelDef {
-  key: 'projects' | 'sessions' | 'files' | 'git';
-  title: string;
-  icon: React.ReactNode;
+const STATUS_PRIORITY: Record<PaneStatus, number> = {
+  error: 3,
+  'ai-working': 2,
+  'ai-idle': 1,
+  idle: 0,
+};
+
+function getTabStatus(tab: WorkspaceTab, tabRuntimeAggregate: Map<string, PaneStatus>): PaneStatus {
+  switch (tab.kind) {
+    case 'terminal':
+      return tabRuntimeAggregate.get(tab.id) ?? tab.status;
+    case 'file-viewer':
+    case 'agent-tasks':
+      return tab.status;
+    default:
+      return 'idle';
+  }
 }
 
-const PANELS: PanelDef[] = [
-  {
-    key: 'projects',
-    title: 'Projects',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M2 4h5l1.5-2H14v11H2z" />
-      </svg>
-    ),
-  },
-  {
-    key: 'sessions',
-    title: 'Sessions',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M2 3h12v8H5l-3 3V3z" />
-      </svg>
-    ),
-  },
-  {
-    key: 'files',
-    title: 'Files',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" />
-        <path d="M9 1v4h4" />
-      </svg>
-    ),
-  },
-  {
-    key: 'git',
-    title: 'Git',
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="5" cy="4" r="1.5" />
-        <circle cx="11" cy="4" r="1.5" />
-        <circle cx="5" cy="12" r="1.5" />
-        <path d="M5 5.5v5M11 5.5v1a2 2 0 01-2 2H5" />
-      </svg>
-    ),
-  },
-];
-
-const VISIBLE_KEY_MAP = {
-  projects: 'projectsVisible',
-  sessions: 'sessionsVisible',
-  files: 'filesVisible',
-  git: 'gitVisible',
-} as const;
+function getStatusLabel(status: PaneStatus) {
+  switch (status) {
+    case 'error':
+      return 'Error';
+    case 'ai-working':
+      return 'AI Running';
+    case 'ai-idle':
+      return 'AI Ready';
+    default:
+      return 'Idle';
+  }
+}
 
 export function ActivityBar() {
-  const config = useAppStore((s) => s.config);
-  const projectStates = useAppStore((s) => s.projectStates);
-  const togglePanel = useAppStore((s) => s.togglePanel);
+  const workspaces = useAppStore((state) => state.config.workspaces);
+  const workspaceStates = useAppStore((state) => state.workspaceStates);
+  const tabRuntimeAggregate = useAppStore((state) => state.tabRuntimeAggregate);
+  const activeWorkspaceId = useAppStore((state) => state.activeWorkspaceId);
+  const openSettings = useAppStore((state) => state.openSettings);
 
-  // 聚合所有项目的最高 AI 状态
-  let globalStatus: PaneStatus = 'idle';
-  for (const ps of projectStates.values()) {
-    for (const tab of ps.tabs) {
-      const s = getHighestStatus(tab.splitLayout);
-      if (STATUS_PRIORITY[s] > STATUS_PRIORITY[globalStatus]) {
-        globalStatus = s;
+  const summary = useMemo(() => {
+    let globalStatus: PaneStatus = 'idle';
+    let tabCount = 0;
+
+    for (const workspaceState of workspaceStates.values()) {
+      tabCount += workspaceState.tabs.length;
+      for (const tab of workspaceState.tabs) {
+        const status = getTabStatus(tab, tabRuntimeAggregate);
+        if (STATUS_PRIORITY[status] > STATUS_PRIORITY[globalStatus]) {
+          globalStatus = status;
+        }
       }
     }
-  }
+
+    return { globalStatus, tabCount };
+  }, [tabRuntimeAggregate, workspaceStates]);
 
   return (
-    <div className="h-full bg-[var(--bg-surface)] flex flex-col items-center pt-2 gap-1 border-r border-[var(--border-subtle)] select-none"
-      style={{ width: 40 }}>
-      {PANELS.map((panel) => {
-        const isActive = config[VISIBLE_KEY_MAP[panel.key]];
-        const showBadge = panel.key === 'projects' && globalStatus !== 'idle';
+    <div
+      className="flex h-full w-10 flex-col items-center border-r border-[var(--border-subtle)] bg-[var(--bg-surface)] py-2 text-[10px] select-none"
+      aria-label="Legacy activity bar"
+    >
+      <div
+        className="flex h-8 w-8 items-center justify-center rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)]"
+        title={`Global status: ${getStatusLabel(summary.globalStatus)}`}
+      >
+        <span
+          className={`h-2.5 w-2.5 rounded-full ${summary.globalStatus === 'ai-working' ? 'animate-blink' : ''}`}
+          style={{ backgroundColor: STATUS_COLORS[summary.globalStatus] }}
+        />
+      </div>
 
-        return (
-          <button
-            key={panel.key}
-            className={`relative w-8 h-8 flex items-center justify-center rounded transition-colors ${
-              isActive
-                ? 'text-[var(--text-primary)] bg-[var(--border-subtle)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]/50'
-            }`}
-            onClick={() => togglePanel(panel.key)}
-            title={panel.title}
+      <div className="mt-3 flex flex-col items-center gap-2 text-[var(--text-muted)]">
+        <div className="flex h-8 w-8 flex-col items-center justify-center rounded border border-[var(--border-subtle)]">
+          <span className="text-[9px] uppercase tracking-[0.08em]">WS</span>
+          <span className="text-[11px] text-[var(--text-primary)]">{workspaces.length}</span>
+        </div>
+        <div className="flex h-8 w-8 flex-col items-center justify-center rounded border border-[var(--border-subtle)]">
+          <span className="text-[9px] uppercase tracking-[0.08em]">Tab</span>
+          <span className="text-[11px] text-[var(--text-primary)]">{summary.tabCount}</span>
+        </div>
+      </div>
+
+      <div className="mt-auto flex flex-col items-center gap-2">
+        {activeWorkspaceId ? (
+          <span
+            className="max-w-8 truncate text-center text-[9px] uppercase tracking-[0.08em] text-[var(--text-muted)]"
+            title={activeWorkspaceId}
           >
-            {panel.icon}
-            {isActive && (
-              <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 rounded-full bg-[var(--accent)]" />
-            )}
-            {showBadge && (
-              <span
-                className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full border border-[var(--bg-surface)] ${
-                  globalStatus === 'ai-working' ? 'animate-blink' : ''
-                }`}
-                style={{ backgroundColor: STATUS_COLORS[globalStatus] }}
-              />
-            )}
-          </button>
-        );
-      })}
+            {activeWorkspaceId}
+          </span>
+        ) : null}
+
+        <button
+          type="button"
+          className="flex h-8 w-8 items-center justify-center rounded border border-[var(--border-subtle)] text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+          onClick={() => openSettings()}
+          title="Open settings"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <circle cx="8" cy="8" r="2.2" />
+            <path d="M8 1.8v1.5M8 12.7v1.5M14.2 8h-1.5M3.3 8H1.8M12.4 3.6l-1 1M4.6 11.4l-1 1M12.4 12.4l-1-1M4.6 4.6l-1-1" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }

@@ -22,7 +22,7 @@ async function ensureUniqueDirectory(baseDirectory: string, folderName: string) 
   for (const candidate of candidates) {
     const fullPath = `${baseDirectory}/${candidate}`;
     try {
-      await invoke('create_directory', { path: fullPath });
+      await invoke('create_external_directory', { path: fullPath });
       return fullPath;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -36,7 +36,7 @@ async function ensureUniqueDirectory(baseDirectory: string, folderName: string) 
 }
 
 async function writeText(path: string, content: string) {
-  await invoke('write_text_file', { path, content });
+  await invoke('write_external_text_file', { path, content });
 }
 
 export async function exportAgentPolicyBundleFiles(bundle: AgentPolicyExportBundle) {

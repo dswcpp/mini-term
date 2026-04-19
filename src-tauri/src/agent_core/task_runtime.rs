@@ -112,12 +112,12 @@ fn generate_id(prefix: &str) -> String {
 }
 
 #[cfg(test)]
-fn bind_thread_data_dir(data_dir: &PathBuf) {
-    crate::agent_core::data_dir::set_thread_data_dir(data_dir.clone());
+fn bind_thread_data_dir(data_dir: &Path) {
+    crate::agent_core::data_dir::set_thread_data_dir(data_dir.to_path_buf());
 }
 
 #[cfg(not(test))]
-fn bind_thread_data_dir(_: &PathBuf) {}
+fn bind_thread_data_dir(_: &Path) {}
 
 fn clamp_excerpt(text: &str, max_len: usize) -> String {
     let mut chars = text.chars().rev().take(max_len).collect::<Vec<_>>();
@@ -538,7 +538,12 @@ fn mark_task_retry_superseded(task_id: &str, successor_task_id: &str) -> Result<
 }
 
 fn approval_matches_action(request: &ApprovalRequest, tool_name: &str, approval_key: &str) -> bool {
-    request.tool_name == tool_name && request.approval_key.as_deref() == Some(approval_key)
+    request.tool_name == tool_name
+        && request
+            .action_digest
+            .as_deref()
+            .or(request.approval_key.as_deref())
+            == Some(approval_key)
 }
 
 fn task_event_payload(summary: &TaskSummary) -> serde_json::Value {
@@ -1363,7 +1368,7 @@ pub fn request_or_validate_approval(
     reason: &str,
     risk_level: ApprovalRiskLevel,
     payload_preview: String,
-) -> Result<ApprovalRequest, PendingApprovalResult> {
+) -> Result<ApprovalRequest, Box<PendingApprovalResult>> {
     let approval_key = super::approval::build_approval_key(tool_name, &payload_preview);
 
     if let Some(request_id) = request_id {
@@ -1371,18 +1376,18 @@ pub fn request_or_validate_approval(
             if approval_matches_action(&request, tool_name, &approval_key) {
                 return match request.status {
                     ApprovalDecision::Approved => Ok(request),
-                    ApprovalDecision::Rejected => Err(PendingApprovalResult {
+                    ApprovalDecision::Rejected => Err(Box::new(PendingApprovalResult {
                         approval_required: true,
                         request,
-                    }),
-                    ApprovalDecision::Pending => Err(PendingApprovalResult {
+                    })),
+                    ApprovalDecision::Pending => Err(Box::new(PendingApprovalResult {
                         approval_required: true,
                         request,
-                    }),
-                    ApprovalDecision::Executed => Err(PendingApprovalResult {
+                    })),
+                    ApprovalDecision::Executed => Err(Box::new(PendingApprovalResult {
                         approval_required: true,
                         request,
-                    }),
+                    })),
                 };
             }
         }
@@ -1391,10 +1396,10 @@ pub fn request_or_validate_approval(
     if let Some(request) = get_approval_by_key(&approval_key) {
         match request.status {
             ApprovalDecision::Pending | ApprovalDecision::Rejected | ApprovalDecision::Approved => {
-                return Err(PendingApprovalResult {
+                return Err(Box::new(PendingApprovalResult {
                     approval_required: true,
                     request,
-                });
+                }));
             }
             ApprovalDecision::Executed => {}
         }
@@ -1402,10 +1407,10 @@ pub fn request_or_validate_approval(
 
     let request = create_approval_request(tool_name, reason, risk_level, payload_preview)
         .expect("approval creation should succeed");
-    Err(PendingApprovalResult {
+    Err(Box::new(PendingApprovalResult {
         approval_required: true,
         request,
-    })
+    }))
 }
 
 pub fn mark_approval_executed(request_id: &str) {
@@ -1989,8 +1994,8 @@ mod tests {
         insert_running_task("task-child");
 
         let pending = request_task_close("task-parent", None, true).unwrap();
-        assert_eq!(pending.ok, false);
-        assert_eq!(pending.approval_required, true);
+        assert!(!pending.ok);
+        assert!(pending.approval_required);
         assert_eq!(
             pending
                 .request

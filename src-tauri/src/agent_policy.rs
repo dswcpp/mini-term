@@ -921,16 +921,28 @@ fn append_workspace_override(base: String, workspace_override_prompt: &str) -> S
     }
 }
 
-fn render_prompt_sections(
-    profile: &AgentPolicyProfile,
-    workspace_id: &str,
-    workspace_name: &str,
-    target: &TaskTarget,
-    preset: &TaskContextPreset,
-    prompt_style: &PromptStyle,
-    extra_instructions: &str,
-    task_preset_prompt: &str,
-) -> RenderedPromptSections {
+struct RenderPromptSectionsInput<'a> {
+    profile: &'a AgentPolicyProfile,
+    workspace_id: &'a str,
+    workspace_name: &'a str,
+    target: &'a TaskTarget,
+    preset: &'a TaskContextPreset,
+    prompt_style: &'a PromptStyle,
+    extra_instructions: &'a str,
+    task_preset_prompt: &'a str,
+}
+
+fn render_prompt_sections(input: RenderPromptSectionsInput<'_>) -> RenderedPromptSections {
+    let RenderPromptSectionsInput {
+        profile,
+        workspace_id,
+        workspace_name,
+        target,
+        preset,
+        prompt_style,
+        extra_instructions,
+        task_preset_prompt,
+    } = input;
     let platform_prompt = render_template(
         &profile.platform_prompt_template,
         workspace_id,
@@ -1078,7 +1090,7 @@ fn resolve_binary_launch(binary_name: &str, transport: &str) -> Option<McpLaunch
     #[cfg(target_os = "windows")]
     {
         let binary_str = binary.to_string_lossy().to_string();
-        return Some(McpLaunchInfo {
+        Some(McpLaunchInfo {
             status: "resolved".to_string(),
             transport: transport.to_string(),
             command: Some(
@@ -1095,7 +1107,7 @@ fn resolve_binary_launch(binary_name: &str, transport: &str) -> Option<McpLaunch
             notes: Some(format!(
                 "This launch command uses Windows PowerShell to start a locally built {binary_name} binary."
             )),
-        });
+        })
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1185,7 +1197,7 @@ pub(crate) fn resolve_mcp_launch() -> McpLaunchInfo {
             ),
             None => "Start the HTTP wrapper locally and point Codex at this URL instead of the stdio bridge.".to_string(),
         });
-        return launch;
+        launch
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1516,16 +1528,16 @@ fn build_task_injection_preview_from_config(
 
     let injection_policy = &policies.task_injection;
     let task_preset_prompt = preset_template(injection_policy, &target, &preset).to_string();
-    let rendered_sections = render_prompt_sections(
-        &profile,
+    let rendered_sections = render_prompt_sections(RenderPromptSectionsInput {
+        profile: &profile,
         workspace_id,
-        &workspace.name,
-        &target,
-        &preset,
-        &prompt_style,
-        &extra_instructions,
-        &task_preset_prompt,
-    );
+        workspace_name: &workspace.name,
+        target: &target,
+        preset: &preset,
+        prompt_style: &prompt_style,
+        extra_instructions: &extra_instructions,
+        task_preset_prompt: &task_preset_prompt,
+    });
     let mut sections = vec![
         rendered_sections.platform_prompt.clone(),
         rendered_sections.tool_policy_prompt.clone(),
@@ -1685,20 +1697,17 @@ fn export_policy_bundle_from_config(
         AgentClientType::Claude => TaskTarget::Claude,
         _ => TaskTarget::Codex,
     };
-    let rendered_sections = render_prompt_sections(
-        &profile,
-        workspace_id_value.as_deref().unwrap_or("workspace"),
-        &workspace_name,
-        &target,
-        &TaskContextPreset::Standard,
-        &prompt_style,
-        &extra_instructions,
-        preset_template(
-            &policies.task_injection,
-            &target,
-            &TaskContextPreset::Standard,
-        ),
-    );
+    let preview_preset = TaskContextPreset::Standard;
+    let rendered_sections = render_prompt_sections(RenderPromptSectionsInput {
+        profile: &profile,
+        workspace_id: workspace_id_value.as_deref().unwrap_or("workspace"),
+        workspace_name: &workspace_name,
+        target: &target,
+        preset: &preview_preset,
+        prompt_style: &prompt_style,
+        extra_instructions: &extra_instructions,
+        task_preset_prompt: preset_template(&policies.task_injection, &target, &preview_preset),
+    });
     let platform_prompt = rendered_sections.platform_prompt.clone();
     let tool_policy_prompt = rendered_sections.tool_policy_prompt.clone();
     let client_wrapper_prompt = rendered_sections.client_wrapper_prompt.clone();
@@ -1871,25 +1880,26 @@ mod tests {
         workspace_root: &std::path::Path,
         policies: Option<AgentPoliciesConfig>,
     ) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.workspaces = vec![WorkspaceConfig {
-            id: "workspace-1".into(),
-            name: "mini-term".into(),
-            roots: vec![WorkspaceRootConfig {
-                id: "root-1".into(),
+        AppConfig {
+            workspaces: vec![WorkspaceConfig {
+                id: "workspace-1".into(),
                 name: "mini-term".into(),
-                path: workspace_root.to_string_lossy().to_string(),
-                role: "primary".into(),
+                roots: vec![WorkspaceRootConfig {
+                    id: "root-1".into(),
+                    name: "mini-term".into(),
+                    path: workspace_root.to_string_lossy().to_string(),
+                    role: "primary".into(),
+                }],
+                pinned: false,
+                accent: None,
+                saved_layout: None,
+                expanded_dirs_by_root: BTreeMap::new(),
+                created_at: 1,
+                last_opened_at: 1,
             }],
-            pinned: false,
-            accent: None,
-            saved_layout: None,
-            expanded_dirs_by_root: BTreeMap::new(),
-            created_at: 1,
-            last_opened_at: 1,
-        }];
-        config.agent_policies = Some(policies.unwrap_or_else(default_agent_policies));
-        config
+            agent_policies: Some(policies.unwrap_or_else(default_agent_policies)),
+            ..AppConfig::default()
+        }
     }
 
     fn setup_config() -> (AppConfig, std::path::PathBuf) {

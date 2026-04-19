@@ -199,8 +199,10 @@ pub struct RuntimeHostInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeHostControlInfo {
-    pub base_url: String,
-    pub token: String,
+    pub transport: String,
+    pub endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
 }
@@ -756,8 +758,9 @@ pub fn update_pty_root_pid(pty_id: u32, root_pid: Option<u32>) -> Result<(), Str
 }
 
 pub fn set_host_control_info(
-    base_url: String,
-    token: String,
+    transport: String,
+    endpoint: String,
+    token: Option<String>,
     capabilities: Vec<String>,
 ) -> Result<(), String> {
     mutate_state(|state| {
@@ -769,7 +772,8 @@ pub fn set_host_control_info(
             host_control: None,
         });
         host.host_control = Some(RuntimeHostControlInfo {
-            base_url,
+            transport,
+            endpoint,
             token,
             capabilities,
         });

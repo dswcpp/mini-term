@@ -19,6 +19,7 @@ mod pty;
 pub mod reference_sidecar;
 mod reference_sidecar_provider;
 mod runtime_mcp;
+mod windows_shell;
 
 use tauri::Manager;
 
@@ -96,6 +97,9 @@ pub fn run() {
             fs::read_binary_preview_base64,
             fs::write_text_file,
             fs::write_binary_file,
+            fs::create_external_directory,
+            fs::write_external_text_file,
+            fs::write_external_binary_file,
             ai_sessions::get_ai_sessions,
             agent_ext::session_import::list_external_sessions,
             agent_ext::session_import::get_external_session_messages,

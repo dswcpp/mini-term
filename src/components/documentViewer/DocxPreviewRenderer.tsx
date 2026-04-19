@@ -32,7 +32,7 @@ const DOCX_CSS = `
 }
 `;
 
-export default function DocxPreviewRenderer({ active, contentVersion, filePath, result }: PreviewRenderContext) {
+export default function DocxPreviewRenderer({ active, contentVersion, filePath, projectPath, result }: PreviewRenderContext) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const styleRef = useRef<HTMLDivElement | null>(null);
   const [loading, setLoading] = useState(true);
@@ -72,7 +72,10 @@ export default function DocxPreviewRenderer({ active, contentVersion, filePath, 
         }
         return await response.arrayBuffer();
       } catch (_reason) {
-        const payload = await invoke<string>('read_binary_preview_base64', { path: filePath });
+        const payload = await invoke<string>('read_binary_preview_base64', {
+          projectRoot: projectPath ?? filePath,
+          path: filePath,
+        });
         return decodeBase64ToUint8Array(payload);
       }
     };
@@ -103,7 +106,7 @@ export default function DocxPreviewRenderer({ active, contentVersion, filePath, 
       bodyHost.innerHTML = '';
       styleHost.innerHTML = '';
     };
-  }, [active, contentVersion, result.tooLarge, source]);
+  }, [active, contentVersion, filePath, projectPath, result.tooLarge, source]);
 
   if (result.tooLarge) {
     return (

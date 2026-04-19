@@ -1,7 +1,7 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "0.2.17",
+  "version": "0.2.18",
   "type": "module",
   "scripts": {
     "dev": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vite/bin/vite.js",

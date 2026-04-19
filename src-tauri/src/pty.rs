@@ -1,7 +1,7 @@
 use git2::Repository;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 use crate::runtime_mcp;
+#[cfg(target_os = "windows")]
+use crate::windows_shell::{cmd_utf8_bootstrap_command, powershell_utf8_bootstrap_script};
+
+#[cfg(windows)]
+use windows::Win32::Globalization::{GetACP, GetOEMCP, MultiByteToWideChar, MB_ERR_INVALID_CHARS};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +97,19 @@ enum EscapeState {
     Ss3,
 }
 
+type PtyWriteBurstQueue = VecDeque<(Instant, usize)>;
+type PtyWriteBursts = Arc<Mutex<HashMap<u32, PtyWriteBurstQueue>>>;
+
+pub(crate) struct CreatePtyRequest {
+    pub(crate) shell: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) mode: Option<String>,
+    pub(crate) cols: Option<u16>,
+    pub(crate) rows: Option<u16>,
+}
+
 #[derive(Default)]
 pub struct TrackInputOutcome {
     commands: Vec<String>,
@@ -103,6 +121,9 @@ const NON_INTERACTIVE_FLAGS: &[&str] = &["-v", "--version", "-h", "--help", "-p"
 const AI_EXIT_COMMANDS: &[&str] = &["/exit", "exit", "/quit", "quit", ":quit", "/logout"];
 const DOUBLE_CTRLC_WINDOW: Duration = Duration::from_millis(1000);
 const MAX_TRACKED_INPUT_LEN: usize = 4096;
+const MAX_PTY_WRITE_BYTES: usize = 64 * 1024;
+const PTY_WRITE_BURST_WINDOW: Duration = Duration::from_secs(1);
+const MAX_PTY_WRITE_BURST_BYTES: usize = 256 * 1024;
 
 fn now_timestamp_ms() -> u64 {
     SystemTime::now()
@@ -147,6 +168,180 @@ fn normalize_path_string(path: &Path) -> String {
     }
 
     value
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_runtime_utf8_bootstrap() -> String {
+    powershell_utf8_bootstrap_script()
+}
+
+#[cfg(target_os = "windows")]
+fn cmd_runtime_utf8_bootstrap() -> String {
+    cmd_utf8_bootstrap_command()
+}
+
+#[cfg(target_os = "windows")]
+fn is_powershell_command_flag(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "-command" | "-c" | "/c"
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn is_powershell_script_flag(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "-file" | "-f" | "-encodedcommand" | "-enc" | "-e"
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn is_cmd_command_flag(value: &str) -> bool {
+    matches!(value.to_ascii_lowercase().as_str(), "/k" | "/c")
+}
+
+#[cfg(target_os = "windows")]
+fn augment_windows_shell_args(shell_kind: &str, args: &[String]) -> Vec<String> {
+    match shell_kind {
+        "powershell" | "pwsh" => {
+            if args
+                .iter()
+                .any(|arg| arg.contains("$miniTermUtf8") || arg.contains("[Console]::OutputEncoding"))
+            {
+                return args.to_vec();
+            }
+
+            if let Some(index) = args.iter().position(|arg| is_powershell_command_flag(arg)) {
+                let mut next = args.to_vec();
+                if let Some(command) = next.get_mut(index + 1) {
+                    *command = format!("{}; {}", powershell_runtime_utf8_bootstrap(), command);
+                }
+                return next;
+            }
+
+            if args.iter().any(|arg| is_powershell_script_flag(arg)) {
+                return args.to_vec();
+            }
+
+            let mut next = args.to_vec();
+            if !next.iter().any(|arg| arg.eq_ignore_ascii_case("-noexit")) {
+                next.push("-NoExit".into());
+            }
+            next.push("-Command".into());
+            next.push(powershell_runtime_utf8_bootstrap());
+            next
+        }
+        "cmd" => {
+            if args.iter().any(|arg| arg.contains("chcp 65001")) {
+                return args.to_vec();
+            }
+
+            if let Some(index) = args.iter().position(|arg| is_cmd_command_flag(arg)) {
+                let mut next = args.to_vec();
+                if let Some(command) = next.get_mut(index + 1) {
+                    *command = format!("{} & {}", cmd_runtime_utf8_bootstrap(), command);
+                }
+                return next;
+            }
+
+            let mut next = args.to_vec();
+            next.push("/K".into());
+            next.push(cmd_runtime_utf8_bootstrap());
+            next
+        }
+        _ => args.to_vec(),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn augment_windows_shell_args(_shell_kind: &str, args: &[String]) -> Vec<String> {
+    args.to_vec()
+}
+
+#[cfg(windows)]
+fn decode_windows_code_page(bytes: &[u8], code_page: u32) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    unsafe {
+        let required = MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, bytes, None);
+        if required <= 0 {
+            return None;
+        }
+
+        let mut wide = vec![0u16; required as usize];
+        let written =
+            MultiByteToWideChar(code_page, MB_ERR_INVALID_CHARS, bytes, Some(wide.as_mut_slice()));
+        if written <= 0 {
+            return None;
+        }
+
+        Some(String::from_utf16_lossy(&wide[..written as usize]))
+    }
+}
+
+#[cfg(windows)]
+fn decode_windows_terminal_text(bytes: &[u8]) -> Option<String> {
+    let code_pages = unsafe {
+        let oem = GetOEMCP();
+        let acp = GetACP();
+        if oem == acp {
+            vec![oem]
+        } else {
+            vec![oem, acp]
+        }
+    };
+
+    code_pages
+        .into_iter()
+        .find_map(|code_page| decode_windows_code_page(bytes, code_page))
+}
+
+fn decode_terminal_output_prefix(bytes: &[u8]) -> Option<(String, usize)> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    match std::str::from_utf8(bytes) {
+        Ok(value) => Some((value.to_string(), bytes.len())),
+        Err(error) => {
+            let valid_up_to = error.valid_up_to();
+            if valid_up_to > 0 {
+                let value = unsafe { std::str::from_utf8_unchecked(&bytes[..valid_up_to]) };
+                return Some((value.to_string(), valid_up_to));
+            }
+
+            error.error_len()?;
+
+            #[cfg(windows)]
+            if let Some(value) = decode_windows_terminal_text(bytes) {
+                return Some((value, bytes.len()));
+            }
+
+            Some((String::from_utf8_lossy(bytes).into_owned(), bytes.len()))
+        }
+    }
+}
+
+fn decode_terminal_output_lossy(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    if let Some((value, consumed)) = decode_terminal_output_prefix(bytes) {
+        if consumed == bytes.len() {
+            return Some(value);
+        }
+    }
+
+    #[cfg(windows)]
+    if let Some(value) = decode_windows_terminal_text(bytes) {
+        return Some(value);
+    }
+
+    Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
 fn escape_char_for_shell(shell_kind: &str, quote: Option<char>) -> Option<char> {
@@ -348,6 +543,7 @@ pub struct PtyManager {
     ai_sessions: Arc<Mutex<HashSet<u32>>>,
     input_buffers: Arc<Mutex<HashMap<u32, TrackedInputState>>>,
     last_ctrlc: Arc<Mutex<HashMap<u32, Instant>>>,
+    write_bursts: PtyWriteBursts,
     session_cwds: Arc<Mutex<HashMap<u32, String>>>,
     session_roots: Arc<Mutex<HashMap<u32, String>>>,
     shell_kinds: Arc<Mutex<HashMap<u32, String>>>,
@@ -486,6 +682,7 @@ impl PtyManager {
             ai_sessions: Arc::new(Mutex::new(HashSet::new())),
             input_buffers: Arc::new(Mutex::new(HashMap::new())),
             last_ctrlc: Arc::new(Mutex::new(HashMap::new())),
+            write_bursts: Arc::new(Mutex::new(HashMap::new())),
             session_cwds: Arc::new(Mutex::new(HashMap::new())),
             session_roots: Arc::new(Mutex::new(HashMap::new())),
             shell_kinds: Arc::new(Mutex::new(HashMap::new())),
@@ -503,7 +700,7 @@ impl PtyManager {
     pub fn has_recent_output(&self, pty_id: u32, within: Duration) -> bool {
         let map = self.last_output.lock().unwrap();
         map.get(&pty_id)
-            .map_or(false, |timestamp| timestamp.elapsed() < within)
+            .is_some_and(|timestamp| timestamp.elapsed() < within)
     }
 
     #[cfg(test)]
@@ -524,7 +721,7 @@ impl PtyManager {
     pub fn has_recent_command_activity(&self, pty_id: u32, within: Duration) -> bool {
         let map = self.last_command_activity.lock().unwrap();
         map.get(&pty_id)
-            .map_or(false, |timestamp| timestamp.elapsed() < within)
+            .is_some_and(|timestamp| timestamp.elapsed() < within)
     }
 
     pub fn get_session_id(&self, pty_id: u32) -> String {
@@ -650,7 +847,7 @@ impl PtyManager {
                             });
                             let has_non_interactive_flag = is_ai_command
                                 && words.any(|word| {
-                                    NON_INTERACTIVE_FLAGS.iter().any(|&flag| word == flag)
+                                    NON_INTERACTIVE_FLAGS.contains(&word)
                                 });
                             if is_ai_command && !has_non_interactive_flag {
                                 enter_ai = true;
@@ -685,6 +882,27 @@ impl PtyManager {
     }
 }
 
+fn record_pty_write_burst(bursts: &PtyWriteBursts, pty_id: u32, bytes: usize) -> Result<(), String> {
+    let now = Instant::now();
+    let mut map = bursts.lock().unwrap();
+    let queue = map.entry(pty_id).or_default();
+
+    while queue
+        .front()
+        .is_some_and(|(timestamp, _)| now.duration_since(*timestamp) > PTY_WRITE_BURST_WINDOW)
+    {
+        queue.pop_front();
+    }
+
+    let used = queue.iter().map(|(_, value)| *value).sum::<usize>();
+    if used.saturating_add(bytes) > MAX_PTY_WRITE_BURST_BYTES {
+        return Err("PTY write rate limit exceeded".to_string());
+    }
+
+    queue.push_back((now, bytes));
+    Ok(())
+}
+
 fn link_session(state: &PtyManager, pty_id: u32, session_id: &str) {
     state
         .session_id_by_pty
@@ -709,17 +927,13 @@ fn unlink_session(state: &PtyManager, pty_id: u32, session_id: &str) {
 fn create_pty_internal(
     app: &AppHandle,
     state: &PtyManager,
-    shell: String,
-    args: Vec<String>,
-    cwd: String,
-    session_id: Option<String>,
-    mode: Option<String>,
-    cols: Option<u16>,
-    rows: Option<u16>,
+    request: CreatePtyRequest,
 ) -> Result<PtySessionCreatedPayload, String> {
     let pty_system = native_pty_system();
-    let cols = cols.unwrap_or(80);
-    let rows = rows.unwrap_or(24);
+    let cols = request.cols.unwrap_or(80);
+    let rows = request.rows.unwrap_or(24);
+    let shell_kind = infer_shell_kind(&request.shell);
+    let effective_args = augment_windows_shell_args(&shell_kind, &request.args);
     let pair = pty_system
         .openpty(PtySize {
             rows,
@@ -729,11 +943,11 @@ fn create_pty_internal(
         })
         .map_err(|error| error.to_string())?;
 
-    let mut cmd = CommandBuilder::new(&shell);
-    for arg in &args {
+    let mut cmd = CommandBuilder::new(&request.shell);
+    for arg in &effective_args {
         cmd.arg(arg);
     }
-    cmd.cwd(&cwd);
+    cmd.cwd(&request.cwd);
 
     // Advertise terminal capabilities so TUI apps (Claude Code, etc.)
     // enable colors and advanced cursor rendering.
@@ -742,6 +956,8 @@ fn create_pty_internal(
     // Ensure UTF-8 encoding for proper CJK/emoji rendering.
     // Only set LC_CTYPE to avoid overriding the user's locale preferences.
     cmd.env("LC_CTYPE", "UTF-8");
+    cmd.env("PYTHONUTF8", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let root_pid = child.process_id();
@@ -762,8 +978,10 @@ fn create_pty_internal(
         .try_clone_reader()
         .map_err(|error| error.to_string())?;
     let master = pair.master;
-    let session_id = session_id.unwrap_or_else(|| session_id_for_pty(pty_id));
-    let mode = mode.unwrap_or_else(|| "human".to_string());
+    let session_id = request
+        .session_id
+        .unwrap_or_else(|| session_id_for_pty(pty_id));
+    let mode = request.mode.unwrap_or_else(|| "human".to_string());
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let instances_clone = state.instances.clone();
@@ -794,6 +1012,7 @@ fn create_pty_internal(
     let ai_sessions = state.ai_sessions.clone();
     let input_buffers = state.input_buffers.clone();
     let last_ctrlc = state.last_ctrlc.clone();
+    let write_bursts = state.write_bursts.clone();
     let session_cwds = state.session_cwds.clone();
     let session_roots = state.session_roots.clone();
     let shell_kinds = state.shell_kinds.clone();
@@ -812,16 +1031,17 @@ fn create_pty_internal(
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if !pending.is_empty() {
-                        let data = String::from_utf8_lossy(&pending).into_owned();
-                        let _ = app_flush.emit(
-                            "pty-output",
-                            PtyOutputPayload {
-                                session_id: session_id_for_reader.clone(),
-                                pty_id: pty_id_for_reader,
-                                data: data.clone(),
-                            },
-                        );
-                        let _ = runtime_mcp::append_pty_output(pty_id_for_reader, &data);
+                        if let Some(data) = decode_terminal_output_lossy(&pending) {
+                            let _ = app_flush.emit(
+                                "pty-output",
+                                PtyOutputPayload {
+                                    session_id: session_id_for_reader.clone(),
+                                    pty_id: pty_id_for_reader,
+                                    data: data.clone(),
+                                },
+                            );
+                            let _ = runtime_mcp::append_pty_output(pty_id_for_reader, &data);
+                        }
                     }
 
                     let exit_code = {
@@ -875,6 +1095,7 @@ fn create_pty_internal(
                     ai_sessions.lock().unwrap().remove(&pty_id_for_reader);
                     input_buffers.lock().unwrap().remove(&pty_id_for_reader);
                     last_ctrlc.lock().unwrap().remove(&pty_id_for_reader);
+                    write_bursts.lock().unwrap().remove(&pty_id_for_reader);
                     session_cwds.lock().unwrap().remove(&pty_id_for_reader);
                     session_roots.lock().unwrap().remove(&pty_id_for_reader);
                     shell_kinds.lock().unwrap().remove(&pty_id_for_reader);
@@ -883,37 +1104,7 @@ fn create_pty_internal(
             }
 
             if !pending.is_empty() {
-                let valid_len = {
-                    let mut index = pending.len();
-
-                    while index > 0 {
-                        index -= 1;
-                        let byte = pending[index];
-                        if byte < 0x80 {
-                            index = pending.len();
-                            break;
-                        }
-                        if byte >= 0xC0 {
-                            let expected_len = if byte >= 0xF0 {
-                                4
-                            } else if byte >= 0xE0 {
-                                3
-                            } else {
-                                2
-                            };
-                            let remaining = pending.len() - index;
-                            if remaining >= expected_len {
-                                index = pending.len();
-                            }
-                            break;
-                        }
-                    }
-
-                    index
-                };
-
-                if valid_len > 0 {
-                    let data = String::from_utf8_lossy(&pending[..valid_len]).into_owned();
+                if let Some((data, consumed)) = decode_terminal_output_prefix(&pending) {
                     if let Ok(mut startup) = startup_output.lock() {
                         if let Some(buffer) = startup.get_mut(&pty_id_for_reader) {
                             buffer.push_str(&data);
@@ -936,14 +1127,13 @@ fn create_pty_internal(
                     if let Ok(mut map) = last_output.lock() {
                         map.insert(pty_id_for_reader, Instant::now());
                     }
-                }
-
-                if valid_len < pending.len() {
-                    let leftover = pending[valid_len..].to_vec();
-                    pending.clear();
-                    pending.extend(leftover);
-                } else {
-                    pending.clear();
+                    if consumed < pending.len() {
+                        let leftover = pending[consumed..].to_vec();
+                        pending.clear();
+                        pending.extend(leftover);
+                    } else {
+                        pending.clear();
+                    }
                 }
             }
         }
@@ -969,26 +1159,26 @@ fn create_pty_internal(
         .session_cwds
         .lock()
         .unwrap()
-        .insert(pty_id, normalize_path_string(Path::new(&cwd)));
+        .insert(pty_id, normalize_path_string(Path::new(&request.cwd)));
     state
         .session_roots
         .lock()
         .unwrap()
-        .insert(pty_id, normalize_path_string(Path::new(&cwd)));
+        .insert(pty_id, normalize_path_string(Path::new(&request.cwd)));
     state
         .shell_kinds
         .lock()
         .unwrap()
-        .insert(pty_id, infer_shell_kind(&shell));
+        .insert(pty_id, shell_kind.clone());
     link_session(state, pty_id, &session_id);
 
     let now = now_timestamp_ms();
     let payload = PtySessionCreatedPayload {
         session_id,
         pty_id,
-        shell: shell.clone(),
-        shell_kind: infer_shell_kind(&shell),
-        cwd,
+        shell: request.shell.clone(),
+        shell_kind,
+        cwd: request.cwd,
         mode,
         phase: "starting".to_string(),
         created_at: now,
@@ -1016,6 +1206,17 @@ fn write_pty_internal(
     pty_id: u32,
     data: String,
 ) -> Result<(), String> {
+    if data.contains('\0') {
+        return Err("PTY input contains unsupported NUL bytes".to_string());
+    }
+
+    let byte_len = data.len();
+    if byte_len > MAX_PTY_WRITE_BYTES {
+        return Err("PTY input exceeds the maximum write size".to_string());
+    }
+
+    record_pty_write_burst(&state.write_bursts, pty_id, byte_len)?;
+
     let instance = state.get_instance(pty_id).ok_or("PTY not found")?;
     let mut instance = instance.lock().unwrap();
     instance
@@ -1129,6 +1330,7 @@ fn kill_pty_internal(state: &PtyManager, pty_id: u32) -> Result<(), String> {
     state.ai_sessions.lock().unwrap().remove(&pty_id);
     state.input_buffers.lock().unwrap().remove(&pty_id);
     state.last_ctrlc.lock().unwrap().remove(&pty_id);
+    state.write_bursts.lock().unwrap().remove(&pty_id);
     state.session_cwds.lock().unwrap().remove(&pty_id);
     state.session_roots.lock().unwrap().remove(&pty_id);
     state.shell_kinds.lock().unwrap().remove(&pty_id);
@@ -1145,15 +1347,9 @@ fn take_startup_output_internal(state: &PtyManager, pty_id: u32) -> Result<Strin
 pub(crate) fn create_terminal_session_for_host(
     app: &AppHandle,
     state: &PtyManager,
-    shell: String,
-    args: Vec<String>,
-    cwd: String,
-    session_id: Option<String>,
-    mode: Option<String>,
-    cols: Option<u16>,
-    rows: Option<u16>,
+    request: CreatePtyRequest,
 ) -> Result<PtySessionCreatedPayload, String> {
-    create_pty_internal(app, state, shell, args, cwd, session_id, mode, cols, rows)
+    create_pty_internal(app, state, request)
 }
 
 pub(crate) fn write_pty_for_host(
@@ -1189,13 +1385,15 @@ pub fn create_pty(
     create_pty_internal(
         &app,
         state.inner(),
-        shell,
-        args,
-        cwd,
-        None,
-        None,
-        None,
-        None,
+        CreatePtyRequest {
+            shell,
+            args,
+            cwd,
+            session_id: None,
+            mode: None,
+            cols: None,
+            rows: None,
+        },
     )
     .map(|payload| payload.pty_id)
 }
@@ -1213,13 +1411,15 @@ pub fn create_terminal_session(
     create_pty_internal(
         &app,
         state.inner(),
-        shell,
-        args,
-        cwd,
-        session_id,
-        mode,
-        None,
-        None,
+        CreatePtyRequest {
+            shell,
+            args,
+            cwd,
+            session_id,
+            mode,
+            cols: None,
+            rows: None,
+        },
     )
 }
 
@@ -1316,13 +1516,15 @@ pub fn restart_terminal_session(
     create_pty_internal(
         &app,
         state.inner(),
-        shell,
-        args,
-        cwd,
-        Some(session_id),
-        mode,
-        None,
-        None,
+        CreatePtyRequest {
+            shell,
+            args,
+            cwd,
+            session_id: Some(session_id),
+            mode,
+            cols: None,
+            rows: None,
+        },
     )
 }
 
@@ -1726,6 +1928,60 @@ mod tests {
         let mgr = PtyManager::new();
         let tracked = mgr.track_input(1, "git stats\x1b[Du\r");
         assert_eq!(tracked.commands, vec!["git status".to_string()]);
+    }
+
+    #[test]
+    fn decode_terminal_output_prefix_waits_for_incomplete_utf8_sequence() {
+        assert_eq!(decode_terminal_output_prefix(&[0xE4, 0xB8]), None);
+    }
+
+    #[test]
+    fn decode_terminal_output_prefix_decodes_complete_utf8_sequence() {
+        let decoded = decode_terminal_output_prefix(&[0xE4, 0xB8, 0xAD]).unwrap();
+        assert_eq!(decoded, ("中".to_string(), 3));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decode_terminal_output_prefix_falls_back_to_windows_code_page() {
+        let decoded = decode_terminal_output_prefix(&[0xD6, 0xD0, 0xCE, 0xC4]).unwrap();
+        assert_eq!(decoded, ("中文".to_string(), 4));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn augment_windows_shell_args_prefixes_powershell_command_bootstrap() {
+        let args = vec!["-NoLogo".to_string(), "-Command".to_string(), "Get-Location".to_string()];
+        let augmented = augment_windows_shell_args("powershell", &args);
+        assert_eq!(augmented[0], "-NoLogo");
+        assert_eq!(augmented[1], "-Command");
+        assert!(augmented[2].contains("$miniTermUtf8"));
+        assert!(augmented[2].contains("Get-Location"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn augment_windows_shell_args_prefixes_cmd_command_bootstrap() {
+        let args = vec!["/K".to_string(), "dir".to_string()];
+        let augmented = augment_windows_shell_args("cmd", &args);
+        assert_eq!(augmented[0], "/K");
+        assert_eq!(augmented[1], "chcp 65001 > nul & dir");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn augment_windows_shell_args_keeps_powershell_file_invocations_unchanged() {
+        let args = vec!["-File".to_string(), "script.ps1".to_string()];
+        let augmented = augment_windows_shell_args("powershell", &args);
+        assert_eq!(augmented, args);
+    }
+
+    #[test]
+    fn pty_write_burst_rejects_excessive_data() {
+        let bursts = Arc::new(Mutex::new(HashMap::new()));
+        record_pty_write_burst(&bursts, 1, MAX_PTY_WRITE_BURST_BYTES).unwrap();
+        let error = record_pty_write_burst(&bursts, 1, 1).unwrap_err();
+        assert_eq!(error, "PTY write rate limit exceeded");
     }
 
     #[test]

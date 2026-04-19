@@ -169,6 +169,8 @@ pub struct ApprovalRequest {
     pub created_at: u64,
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_key: Option<String>,
 }
 

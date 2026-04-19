@@ -20,7 +20,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString();
 
-export default function PdfPreviewRenderer({ contentVersion, filePath, result }: PreviewRenderContext) {
+export default function PdfPreviewRenderer({ contentVersion, filePath, projectPath, result }: PreviewRenderContext) {
   const [pageCount, setPageCount] = useState<number | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [scale, setScale] = useState(1);
@@ -52,7 +52,10 @@ export default function PdfPreviewRenderer({ contentVersion, filePath, result }:
     setDocumentBytes(null);
     setLoadingDocument(true);
 
-    void invoke<string>('read_binary_preview_base64', { path: filePath })
+    void invoke<string>('read_binary_preview_base64', {
+      projectRoot: projectPath ?? filePath,
+      path: filePath,
+    })
       .then((payload) => {
         if (cancelled) {
           return;
@@ -71,7 +74,7 @@ export default function PdfPreviewRenderer({ contentVersion, filePath, result }:
     return () => {
       cancelled = true;
     };
-  }, [contentVersion, filePath]);
+  }, [contentVersion, filePath, projectPath]);
 
   if (result.tooLarge) {
     return (

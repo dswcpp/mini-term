@@ -64,7 +64,10 @@ async function readPackageScripts(projectPath: string, cwd: string) {
     }
 
     try {
-      const result = await invoke<FileContentResult>('read_file_content', { path: packagePath });
+      const result = await invoke<FileContentResult>('read_file_content', {
+        projectRoot: projectPath,
+        path: packagePath,
+      });
       if (result.isBinary || result.tooLarge || !result.content) {
         continue;
       }

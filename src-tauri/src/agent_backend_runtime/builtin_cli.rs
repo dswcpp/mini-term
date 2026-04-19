@@ -36,7 +36,7 @@ fn shim_command_for(target: &str) -> Option<CommandBuilder> {
     {
         let mut builder = wrap_windows_command(&shim);
         builder.arg(target);
-        return Some(builder);
+        Some(builder)
     }
 
     #[cfg(not(windows))]

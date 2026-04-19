@@ -4,6 +4,8 @@ use notify::{Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -11,6 +13,8 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+use crate::agent_core::data_dir::config_path;
+use crate::config::load_config_from_path;
 use crate::runtime_mcp;
 
 #[derive(Debug, Clone, Serialize)]
@@ -20,6 +24,125 @@ pub struct FileEntry {
     pub path: String,
     pub is_dir: bool,
     pub ignored: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GuardedWorkspacePath {
+    root_path: PathBuf,
+    target_path: PathBuf,
+}
+
+fn display_path(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        let normalized = if let Some(rest) = raw.strip_prefix("\\\\?\\UNC\\") {
+            format!("\\\\{rest}")
+        } else if let Some(rest) = raw.strip_prefix("\\\\?\\") {
+            rest.to_string()
+        } else {
+            raw.to_string()
+        };
+        normalized.replace('/', "\\")
+    }
+
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().to_string()
+    }
+}
+
+fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|_| "path does not exist".to_string())
+}
+
+fn canonicalize_path_for_write(path: &Path) -> Result<PathBuf, String> {
+    if path.exists() {
+        return canonicalize_existing_path(path);
+    }
+
+    let parent = path.parent().ok_or("path has no parent".to_string())?;
+    let canonical_parent = canonicalize_existing_path(parent)?;
+    let file_name = path.file_name().ok_or("path has no file name".to_string())?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn resolve_project_root(project_root: &str) -> Result<PathBuf, String> {
+    let requested_root = canonicalize_existing_path(Path::new(project_root))
+        .map_err(|_| "workspace root does not exist".to_string())?;
+    if !requested_root.is_dir() {
+        return Err("workspace root must be a directory".to_string());
+    }
+
+    let config = load_config_from_path(&config_path());
+    for workspace in &config.workspaces {
+        for root in &workspace.roots {
+            let Ok(configured_root) = canonicalize_existing_path(Path::new(&root.path)) else {
+                continue;
+            };
+            if configured_root == requested_root {
+                return Ok(requested_root);
+            }
+        }
+    }
+
+    Err("workspace root is outside configured roots".to_string())
+}
+
+fn resolve_workspace_path_in_root(
+    project_root: &str,
+    path: &str,
+    allow_missing_leaf: bool,
+) -> Result<GuardedWorkspacePath, String> {
+    let root_path = resolve_project_root(project_root)?;
+    let target_path = if allow_missing_leaf {
+        canonicalize_path_for_write(Path::new(path))
+    } else {
+        canonicalize_existing_path(Path::new(path))
+    }
+    .map_err(|_| "path does not exist".to_string())?;
+
+    if !target_path.starts_with(&root_path) {
+        return Err("path is outside workspace root".to_string());
+    }
+
+    Ok(GuardedWorkspacePath {
+        root_path,
+        target_path,
+    })
+}
+
+fn resolve_existing_directory_in_root(project_root: &str, path: &str) -> Result<GuardedWorkspacePath, String> {
+    let guarded = resolve_workspace_path_in_root(project_root, path, false)?;
+    if !guarded.target_path.is_dir() {
+        return Err("target must be a directory".to_string());
+    }
+    Ok(guarded)
+}
+
+fn resolve_existing_file_in_root(project_root: &str, path: &str) -> Result<GuardedWorkspacePath, String> {
+    let guarded = resolve_workspace_path_in_root(project_root, path, false)?;
+    if !guarded.target_path.is_file() {
+        return Err("target must be a file".to_string());
+    }
+    Ok(guarded)
+}
+
+fn map_fs_write_error(error: &std::io::Error) -> String {
+    match error.kind() {
+        ErrorKind::AlreadyExists => "target already exists".to_string(),
+        ErrorKind::NotFound => "parent directory does not exist".to_string(),
+        ErrorKind::PermissionDenied => "permission denied".to_string(),
+        _ => "filesystem write failed".to_string(),
+    }
+}
+
+fn map_fs_read_error(error: &std::io::Error) -> String {
+    match error.kind() {
+        ErrorKind::NotFound => "path does not exist".to_string(),
+        ErrorKind::PermissionDenied => "permission denied".to_string(),
+        _ => "filesystem read failed".to_string(),
+    }
 }
 
 fn sort_entries(entries: &mut [FileEntry]) {
@@ -151,7 +274,7 @@ struct FsWatchHandle {
     _runtime_batcher: mpsc::Sender<runtime_mcp::RuntimeFsEventRecord>,
 }
 
-/// 过滤出有效的目录路径（用于拖拽添加项目时验证）
+/// 鏉╁洦鎶ら崙鐑樻箒閺佸牏娈戦惄顔肩秿鐠侯垰绶為敍鍫㈡暏娴滃孩瀚嬮幏鑺ュ潑閸旂娀銆嶉惄顔芥妤犲矁鐦夐敍?
 #[tauri::command]
 pub fn filter_directories(paths: Vec<String>) -> Vec<String> {
     paths
@@ -178,19 +301,16 @@ fn should_ignore(
 
 #[tauri::command]
 pub fn list_directory(project_root: String, path: String) -> Result<Vec<FileEntry>, String> {
-    let dir = Path::new(&path);
-    if !dir.is_dir() {
-        return Err(format!("Not a directory: {}", path));
-    }
-    let gitignore = build_gitignore(Path::new(&project_root));
-    let mut entries: Vec<FileEntry> = fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
+    let guarded = resolve_existing_directory_in_root(&project_root, &path)?;
+    let gitignore = build_gitignore(&guarded.root_path);
+    let mut entries: Vec<FileEntry> = fs::read_dir(&guarded.target_path)
+        .map_err(|e| map_fs_read_error(&e))?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = entry.file_type().ok()?.is_dir();
             let full_path = entry.path();
-            // ALWAYS_IGNORE 目录仍然完全隐藏
+            // ALWAYS_IGNORE 閻╊喖缍嶆禒宥囧姧鐎瑰苯鍙忛梾鎰
             if is_dir && ALWAYS_IGNORE.contains(&name.as_str()) {
                 return None;
             }
@@ -265,12 +385,13 @@ pub fn watch_directory(
     project_path: String,
     recursive: Option<bool>,
 ) -> Result<(), String> {
-    let watch_path = PathBuf::from(&path);
+    let guarded_watch = resolve_existing_directory_in_root(&project_path, &path)?;
+    let watch_path = guarded_watch.target_path.clone();
     let project_path_clone = project_path.clone();
     let app_clone = app.clone();
     let filter = Arc::new(WatchFilter {
-        project_root: PathBuf::from(&project_path),
-        gitignore: build_gitignore(Path::new(&project_path)),
+        project_root: guarded_watch.root_path.clone(),
+        gitignore: build_gitignore(&guarded_watch.root_path),
     });
     let runtime_batcher = start_runtime_batcher(project_path.clone());
     let runtime_batcher_clone = runtime_batcher.clone();
@@ -320,8 +441,8 @@ pub fn watch_directory(
         },
     );
     let _ = runtime_mcp::register_fs_watch(
-        &watch_path.to_string_lossy(),
-        &project_path,
+        &display_path(&watch_path),
+        &display_path(&guarded_watch.root_path),
         recursive.unwrap_or(false),
     );
     Ok(())
@@ -516,12 +637,10 @@ fn read_utf8_preview(
 }
 
 #[tauri::command]
-pub fn read_file_content(path: String) -> Result<FileContentResult, String> {
-    let p = Path::new(&path);
-    if !p.is_file() {
-        return Err(format!("不是文件: {}", path));
-    }
-    let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
+pub fn read_file_content(project_root: String, path: String) -> Result<FileContentResult, String> {
+    let guarded = resolve_existing_file_in_root(&project_root, &path)?;
+    let p = guarded.target_path.as_path();
+    let metadata = fs::metadata(p).map_err(|e| map_fs_read_error(&e))?;
     if metadata.len() > MAX_FILE_VIEW_SIZE {
         return Ok(FileContentResult {
             content: String::new(),
@@ -529,7 +648,7 @@ pub fn read_file_content(path: String) -> Result<FileContentResult, String> {
             too_large: true,
         });
     }
-    let bytes = fs::read(p).map_err(|e| e.to_string())?;
+    let bytes = fs::read(p).map_err(|e| map_fs_read_error(&e))?;
     match String::from_utf8(bytes) {
         Ok(s) => Ok(FileContentResult {
             content: s,
@@ -545,13 +664,10 @@ pub fn read_file_content(path: String) -> Result<FileContentResult, String> {
 }
 
 #[tauri::command]
-pub fn read_document_preview(path: String) -> Result<DocumentPreviewResult, String> {
-    let p = Path::new(&path);
-    if !p.is_file() {
-        return Err(format!("Not a file: {}", path));
-    }
-
-    let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
+pub fn read_document_preview(project_root: String, path: String) -> Result<DocumentPreviewResult, String> {
+    let guarded = resolve_existing_file_in_root(&project_root, &path)?;
+    let p = guarded.target_path.as_path();
+    let metadata = fs::metadata(p).map_err(|e| map_fs_read_error(&e))?;
     let byte_length = metadata.len();
     let extension = normalized_extension(p);
     let file_name = normalized_file_name(p);
@@ -751,13 +867,10 @@ pub fn read_document_preview(path: String) -> Result<DocumentPreviewResult, Stri
 }
 
 #[tauri::command]
-pub fn read_image_data_url(path: String) -> Result<String, String> {
-    let p = Path::new(&path);
-    if !p.is_file() {
-        return Err(format!("Not a file: {}", path));
-    }
-
-    let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
+pub fn read_image_data_url(project_root: String, path: String) -> Result<String, String> {
+    let guarded = resolve_existing_file_in_root(&project_root, &path)?;
+    let p = guarded.target_path.as_path();
+    let metadata = fs::metadata(p).map_err(|e| map_fs_read_error(&e))?;
     let byte_length = metadata.len();
     let extension = normalized_extension(p);
     let mime_type = mime_type_for_extension(&extension)
@@ -771,19 +884,16 @@ pub fn read_image_data_url(path: String) -> Result<String, String> {
         ));
     }
 
-    let bytes = fs::read(p).map_err(|e| e.to_string())?;
+    let bytes = fs::read(p).map_err(|e| map_fs_read_error(&e))?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     Ok(format!("data:{};base64,{}", mime_type, encoded))
 }
 
 #[tauri::command]
-pub fn read_binary_preview_base64(path: String) -> Result<String, String> {
-    let p = Path::new(&path);
-    if !p.is_file() {
-        return Err(format!("Not a file: {}", path));
-    }
-
-    let metadata = fs::metadata(p).map_err(|e| e.to_string())?;
+pub fn read_binary_preview_base64(project_root: String, path: String) -> Result<String, String> {
+    let guarded = resolve_existing_file_in_root(&project_root, &path)?;
+    let p = guarded.target_path.as_path();
+    let metadata = fs::metadata(p).map_err(|e| map_fs_read_error(&e))?;
     let byte_length = metadata.len();
     let extension = normalized_extension(p);
 
@@ -798,36 +908,8 @@ pub fn read_binary_preview_base64(path: String) -> Result<String, String> {
         ));
     }
 
-    let bytes = fs::read(p).map_err(|e| e.to_string())?;
+    let bytes = fs::read(p).map_err(|e| map_fs_read_error(&e))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
-}
-
-#[tauri::command]
-pub fn create_file(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    if p.exists() {
-        return Err(format!("已存在: {}", path));
-    }
-    fs::write(p, "").map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn create_directory(path: String) -> Result<(), String> {
-    let p = Path::new(&path);
-    if p.exists() {
-        return Err(format!("已存在: {}", path));
-    }
-    fs::create_dir(p).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn write_text_file(path: String, content: String) -> Result<(), String> {
-    fs::write(Path::new(&path), content).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn write_binary_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
-    fs::write(Path::new(&path), bytes).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -842,18 +924,64 @@ pub fn unwatch_directory(
 }
 
 #[tauri::command]
-pub fn rename_entry(old_path: String, new_name: String) -> Result<String, String> {
-    let p = Path::new(&old_path);
-    if !p.exists() {
-        return Err(format!("路径不存在: {}", old_path));
-    }
-    let parent = p.parent().ok_or("无法获取父目录")?;
-    let new_path = parent.join(&new_name);
-    if new_path.exists() {
-        return Err(format!("目标已存在: {}", new_path.display()));
-    }
-    fs::rename(p, &new_path).map_err(|e| e.to_string())?;
-    Ok(new_path.to_string_lossy().to_string())
+pub fn create_file(project_root: String, path: String) -> Result<(), String> {
+    let guarded = resolve_workspace_path_in_root(&project_root, &path, true)?;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&guarded.target_path)
+        .map(|_| ())
+        .map_err(|e| map_fs_write_error(&e))
+}
+
+#[tauri::command]
+pub fn create_directory(project_root: String, path: String) -> Result<(), String> {
+    let guarded = resolve_workspace_path_in_root(&project_root, &path, true)?;
+    fs::create_dir(&guarded.target_path).map_err(|e| map_fs_write_error(&e))
+}
+
+#[tauri::command]
+pub fn write_text_file(project_root: String, path: String, content: String) -> Result<(), String> {
+    let guarded = resolve_workspace_path_in_root(&project_root, &path, true)?;
+    fs::write(&guarded.target_path, content).map_err(|e| map_fs_write_error(&e))
+}
+
+#[tauri::command]
+pub fn write_binary_file(project_root: String, path: String, bytes: Vec<u8>) -> Result<(), String> {
+    let guarded = resolve_workspace_path_in_root(&project_root, &path, true)?;
+    fs::write(&guarded.target_path, bytes).map_err(|e| map_fs_write_error(&e))
+}
+
+#[tauri::command]
+pub fn rename_entry(project_root: String, old_path: String, new_name: String) -> Result<String, String> {
+    let guarded_old = resolve_workspace_path_in_root(&project_root, &old_path, false)?;
+    let parent = guarded_old
+        .target_path
+        .parent()
+        .ok_or("path has no parent".to_string())?;
+    let guarded_new = resolve_workspace_path_in_root(
+        &project_root,
+        &parent.join(&new_name).to_string_lossy(),
+        true,
+    )?;
+    fs::rename(&guarded_old.target_path, &guarded_new.target_path)
+        .map_err(|e| map_fs_write_error(&e))?;
+    Ok(display_path(&guarded_new.target_path))
+}
+
+#[tauri::command]
+pub fn create_external_directory(path: String) -> Result<(), String> {
+    fs::create_dir(&path).map_err(|e| map_fs_write_error(&e))
+}
+
+#[tauri::command]
+pub fn write_external_text_file(path: String, content: String) -> Result<(), String> {
+    fs::write(&path, content).map_err(|e| map_fs_write_error(&e))
+}
+
+#[tauri::command]
+pub fn write_external_binary_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    fs::write(&path, bytes).map_err(|e| map_fs_write_error(&e))
 }
 
 #[cfg(test)]
@@ -870,6 +998,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mini-term-fs-{label}-{unique}"));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn workspace_test_root(label: &str) -> (TestHarness, PathBuf, String) {
+        let harness = TestHarness::new(label);
+        let root = harness.workspace_root.clone();
+        let project_root = harness.workspace_path();
+        (harness, root, project_root)
     }
 
     #[test]
@@ -1008,7 +1143,7 @@ mod tests {
 
     #[test]
     fn read_document_preview_detects_markdown_and_text() {
-        let root = create_temp_dir("preview-markdown");
+        let (_harness, root, project_root) = workspace_test_root("preview-markdown");
         let markdown_path = root.join("README.md");
         let text_path = root.join("notes.txt");
         let mermaid_path = root.join("flow.mmd");
@@ -1016,9 +1151,16 @@ mod tests {
         fs::write(&text_path, "hello").unwrap();
         fs::write(&mermaid_path, "graph TD\n  A --> B").unwrap();
 
-        let markdown = read_document_preview(markdown_path.to_string_lossy().to_string()).unwrap();
-        let text = read_document_preview(text_path.to_string_lossy().to_string()).unwrap();
-        let mermaid = read_document_preview(mermaid_path.to_string_lossy().to_string()).unwrap();
+        let markdown = read_document_preview(
+            project_root.clone(),
+            markdown_path.to_string_lossy().to_string(),
+        )
+        .unwrap();
+        let text =
+            read_document_preview(project_root.clone(), text_path.to_string_lossy().to_string())
+                .unwrap();
+        let mermaid = read_document_preview(project_root, mermaid_path.to_string_lossy().to_string())
+            .unwrap();
 
         assert_eq!(markdown.kind, "markdown");
         assert_eq!(markdown.text_content.as_deref(), Some("# Title"));
@@ -1026,13 +1168,11 @@ mod tests {
         assert_eq!(text.text_content.as_deref(), Some("hello"));
         assert_eq!(mermaid.kind, "text");
         assert_eq!(mermaid.text_content.as_deref(), Some("graph TD\n  A --> B"));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn read_document_preview_detects_svg_and_binary_documents() {
-        let root = create_temp_dir("preview-assets");
+        let (_harness, root, project_root) = workspace_test_root("preview-assets");
         let svg_path = root.join("icon.svg");
         let png_path = root.join("image.png");
         let pdf_path = root.join("book.pdf");
@@ -1049,11 +1189,20 @@ mod tests {
         fs::write(&docx_path, b"PK\x03\x04").unwrap();
         fs::write(&doc_path, [0xD0, 0xCF, 0x11, 0xE0]).unwrap();
 
-        let svg = read_document_preview(svg_path.to_string_lossy().to_string()).unwrap();
-        let png = read_document_preview(png_path.to_string_lossy().to_string()).unwrap();
-        let pdf = read_document_preview(pdf_path.to_string_lossy().to_string()).unwrap();
-        let docx = read_document_preview(docx_path.to_string_lossy().to_string()).unwrap();
-        let doc = read_document_preview(doc_path.to_string_lossy().to_string()).unwrap();
+        let svg =
+            read_document_preview(project_root.clone(), svg_path.to_string_lossy().to_string())
+                .unwrap();
+        let png =
+            read_document_preview(project_root.clone(), png_path.to_string_lossy().to_string())
+                .unwrap();
+        let pdf =
+            read_document_preview(project_root.clone(), pdf_path.to_string_lossy().to_string())
+                .unwrap();
+        let docx =
+            read_document_preview(project_root.clone(), docx_path.to_string_lossy().to_string())
+                .unwrap();
+        let doc = read_document_preview(project_root, doc_path.to_string_lossy().to_string())
+            .unwrap();
 
         assert_eq!(svg.kind, "svg");
         assert!(svg.text_content.is_some());
@@ -1062,26 +1211,23 @@ mod tests {
         assert_eq!(docx.kind, "docx");
         assert_eq!(doc.kind, "doc");
         assert!(doc.open_externally_recommended);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn read_document_preview_flags_unsupported_binary() {
-        let root = create_temp_dir("preview-unsupported");
+        let (_harness, root, project_root) = workspace_test_root("preview-unsupported");
         let path = root.join("archive.bin");
         fs::write(&path, [0, 159, 146, 150]).unwrap();
 
-        let preview = read_document_preview(path.to_string_lossy().to_string()).unwrap();
+        let preview =
+            read_document_preview(project_root, path.to_string_lossy().to_string()).unwrap();
         assert_eq!(preview.kind, "unsupported");
         assert!(preview.open_externally_recommended);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn read_document_preview_applies_size_limits() {
-        let root = create_temp_dir("preview-size");
+        let (_harness, root, project_root) = workspace_test_root("preview-size");
         let text_path = root.join("large.txt");
         let image_path = root.join("large.png");
 
@@ -1092,41 +1238,103 @@ mod tests {
         )
         .unwrap();
 
-        let text_preview = read_document_preview(text_path.to_string_lossy().to_string()).unwrap();
+        let text_preview =
+            read_document_preview(project_root.clone(), text_path.to_string_lossy().to_string())
+                .unwrap();
         let image_preview =
-            read_document_preview(image_path.to_string_lossy().to_string()).unwrap();
+            read_document_preview(project_root, image_path.to_string_lossy().to_string()).unwrap();
 
         assert_eq!(text_preview.kind, "text");
         assert!(text_preview.too_large);
         assert_eq!(image_preview.kind, "image");
         assert!(image_preview.too_large);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn read_image_data_url_returns_inline_payload_for_supported_images() {
-        let root = create_temp_dir("preview-image-data-url");
+        let (_harness, root, project_root) = workspace_test_root("preview-image-data-url");
         let ico_path = root.join("icon.ico");
         fs::write(&ico_path, [0, 0, 1, 0, 1, 0]).unwrap();
 
-        let data_url = read_image_data_url(ico_path.to_string_lossy().to_string()).unwrap();
+        let data_url =
+            read_image_data_url(project_root, ico_path.to_string_lossy().to_string()).unwrap();
 
         assert!(data_url.starts_with("data:image/x-icon;base64,"));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn read_binary_preview_base64_returns_payload_for_docx() {
-        let root = create_temp_dir("preview-binary-base64");
+        let (_harness, root, project_root) = workspace_test_root("preview-binary-base64");
         let docx_path = root.join("spec.docx");
         fs::write(&docx_path, b"PK\x03\x04").unwrap();
 
-        let payload = read_binary_preview_base64(docx_path.to_string_lossy().to_string()).unwrap();
+        let payload =
+            read_binary_preview_base64(project_root, docx_path.to_string_lossy().to_string())
+                .unwrap();
 
         assert_eq!(payload, "UEsDBA==");
-
-        let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn list_directory_rejects_paths_outside_workspace_root() {
+        let (_harness, root, project_root) = workspace_test_root("list-directory-boundary");
+        let outside = create_temp_dir("list-directory-outside");
+        fs::write(root.join("inside.txt"), "ok").unwrap();
+
+        let error = list_directory(project_root, outside.to_string_lossy().to_string()).unwrap_err();
+
+        assert_eq!(error, "path is outside workspace root");
+
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn read_file_content_rejects_paths_outside_workspace_root() {
+        let (_harness, _root, project_root) = workspace_test_root("read-file-boundary");
+        let outside = create_temp_dir("read-file-outside");
+        let outside_file = outside.join("secret.txt");
+        fs::write(&outside_file, "secret").unwrap();
+
+        let error = read_file_content(project_root, outside_file.to_string_lossy().to_string())
+            .unwrap_err();
+
+        assert_eq!(error, "path is outside workspace root");
+
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn create_file_rejects_targets_outside_workspace_root() {
+        let (_harness, _root, project_root) = workspace_test_root("create-file-boundary");
+        let outside = create_temp_dir("create-file-outside");
+        let outside_file = outside.join("new.txt");
+
+        let error = create_file(project_root, outside_file.to_string_lossy().to_string())
+            .unwrap_err();
+
+        assert_eq!(error, "path is outside workspace root");
+
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn create_and_rename_stay_within_workspace_root() {
+        let (_harness, root, project_root) = workspace_test_root("rename-boundary");
+        let original = root.join("draft.txt");
+        let escaped = root.parent().unwrap().join("escaped.txt");
+
+        create_file(project_root.clone(), original.to_string_lossy().to_string()).unwrap();
+        assert!(original.exists());
+
+        let error = rename_entry(
+            project_root,
+            original.to_string_lossy().to_string(),
+            "../escaped.txt".to_string(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "path is outside workspace root");
+        assert!(!escaped.exists());
+    }
+
 }

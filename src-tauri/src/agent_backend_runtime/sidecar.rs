@@ -520,9 +520,8 @@ fn start_process_sidecar_session(
     };
 
     let mut writer = BufWriter::new(stdin);
-    write_json_line(&mut writer, &start_envelope).map_err(|err| {
+    write_json_line(&mut writer, &start_envelope).inspect_err(|_err| {
         let _ = kill_child(&child);
-        err
     })?;
 
     spawn_sidecar_stdin_loop(
@@ -539,24 +538,24 @@ fn start_process_sidecar_session(
         stderr_buffer.clone(),
     );
     spawn_sidecar_stdout_loop(
-        request.task_id.to_string(),
         stdout,
-        child.clone(),
-        events_tx,
-        control_tx.clone(),
-        handshake_tx,
-        handshake_ready,
-        stderr_buffer,
+        SidecarStdoutLoopContext {
+            task_id: request.task_id.to_string(),
+            child: child.clone(),
+            events_tx,
+            control_tx: control_tx.clone(),
+            handshake_tx,
+            handshake_ready,
+            stderr_buffer,
+        },
     );
 
     let handshake =
-        wait_for_handshake(handshake_rx, launch.config.connection_timeout_ms).map_err(|err| {
+        wait_for_handshake(handshake_rx, launch.config.connection_timeout_ms).inspect_err(|_err| {
             let _ = kill_child(&child);
-            err
         })?;
-    validate_handshake(request.backend, &handshake).map_err(|err| {
+    validate_handshake(request.backend, &handshake).inspect_err(|_err| {
         let _ = kill_child(&child);
-        err
     })?;
 
     Ok(StartedSidecarSession {
@@ -614,17 +613,30 @@ fn spawn_sidecar_stdin_loop(
     });
 }
 
-fn spawn_sidecar_stdout_loop(
+struct SidecarStdoutLoopContext {
     task_id: String,
-    stdout: ChildStdout,
     child: Arc<Mutex<Child>>,
     events_tx: Sender<SidecarEvent>,
     control_tx: Sender<SidecarControlMessage>,
     handshake_tx: Sender<HandshakeSignal>,
     handshake_ready: Arc<AtomicBool>,
     stderr_buffer: Arc<Mutex<String>>,
+}
+
+fn spawn_sidecar_stdout_loop(
+    stdout: ChildStdout,
+    context: SidecarStdoutLoopContext,
 ) {
     thread::spawn(move || {
+        let SidecarStdoutLoopContext {
+            task_id,
+            child,
+            events_tx,
+            control_tx,
+            handshake_tx,
+            handshake_ready,
+            stderr_buffer,
+        } = context;
         let mut reader = BufReader::new(stdout);
         let mut buffer = String::new();
         let mut handshake_sent = false;

@@ -24,12 +24,22 @@ function clamp(value: number, min: number, max: number) {
 }
 
 export function showContextMenu(x: number, y: number, items: ContextMenuEntry[]) {
+  if (items.length === 0) {
+    closeContextMenus();
+    return;
+  }
+
   closeContextMenus();
 
   const openedMenus: HTMLDivElement[] = [];
   const menuStack = new Map<number, HTMLDivElement>();
   const menuLayer = document.createElement('div');
   menuLayer.className = 'ctx-menu-layer';
+  menuLayer.style.position = 'fixed';
+  menuLayer.style.inset = '0';
+  menuLayer.style.pointerEvents = 'none';
+  menuLayer.style.zIndex = '90';
+  menuLayer.setAttribute('data-context-menu-layer', 'true');
 
   const cleanup = () => {
     menuLayer.remove();
@@ -74,20 +84,35 @@ export function showContextMenu(x: number, y: number, items: ContextMenuEntry[])
 
     const menu = document.createElement('div');
     menu.className = 'ctx-menu ctx-menu-panel text-xs';
+    menu.style.position = 'fixed';
+    menu.style.pointerEvents = 'auto';
+    menu.style.minWidth = '196px';
+    menu.style.maxWidth = '320px';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('data-menu-level', String(level));
 
     entries.forEach((entry) => {
       if (isSeparator(entry)) {
         const separator = document.createElement('div');
         separator.className = 'ctx-menu-sep';
+        separator.setAttribute('role', 'separator');
         menu.appendChild(separator);
         return;
       }
 
       const item = document.createElement('div');
       item.className = 'ctx-menu-item';
+      item.setAttribute('role', 'menuitem');
+      item.setAttribute('tabindex', '-1');
       if (entry.danger) item.classList.add('danger');
       if (entry.disabled) item.classList.add('disabled');
       if (entry.children?.length) item.classList.add('has-children');
+      if (entry.disabled) {
+        item.setAttribute('aria-disabled', 'true');
+      }
+      if (entry.children?.length) {
+        item.setAttribute('aria-haspopup', 'menu');
+      }
 
       const indicator = document.createElement('span');
       indicator.className = 'ctx-menu-indicator';

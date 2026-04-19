@@ -43,6 +43,23 @@ const inputStates = new Map<string, TerminalInputState>();
 const inputListeners = new Map<string, Set<InputListener>>();
 const inputStateListeners = new Map<string, Set<InputStateListener>>();
 const keyHandlers = new Map<string, KeyHandler>();
+const isWindowsPlatform = typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows');
+
+function shouldEnableTerminalWebgl() {
+  if (typeof window !== 'undefined' && typeof window.localStorage !== 'undefined') {
+    const override = window.localStorage.getItem('mini-term.webgl');
+    if (override === 'force') {
+      return true;
+    }
+    if (override === 'off') {
+      return false;
+    }
+  }
+
+  // Windows is the primary platform for this app and is also the place where
+  // WebGL-backed xterm rendering most often causes glyph corruption or blank frames.
+  return !isWindowsPlatform;
+}
 
 function resolveSessionKey(identity: TerminalIdentity) {
   if (typeof identity === 'string') {
@@ -209,7 +226,8 @@ function createCachedEntry(ptyId: number, sessionId: string): CachedEntry {
 
   const term = new Terminal({
     fontSize: config.terminalFontSize ?? 14,
-    fontFamily: "'JetBrains Mono', 'Cascadia Code', Consolas, monospace",
+    fontFamily:
+      "'JetBrains Mono', 'Cascadia Mono', 'Cascadia Code', Consolas, 'Microsoft YaHei UI', 'Microsoft YaHei', 'SimSun', monospace",
     fontWeight: '400',
     fontWeightBold: '600',
     cursorBlink: true,
@@ -226,15 +244,17 @@ function createCachedEntry(ptyId: number, sessionId: string): CachedEntry {
   term.open(wrapper);
   term.reset();
 
-  try {
-    const webgl = new WebglAddon();
-    webgl.onContextLoss(() => {
-      webgl.dispose();
-      term.refresh(0, term.rows - 1);
-    });
-    term.loadAddon(webgl);
-  } catch {
-    // Fall back to canvas when WebGL is unavailable.
+  if (shouldEnableTerminalWebgl()) {
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+        term.refresh(0, term.rows - 1);
+      });
+      term.loadAddon(webgl);
+    } catch {
+      // Fall back to canvas when WebGL is unavailable.
+    }
   }
 
   let currentPtyId = ptyId;

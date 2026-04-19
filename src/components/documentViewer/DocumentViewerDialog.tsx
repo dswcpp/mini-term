@@ -49,7 +49,7 @@ export function DocumentViewerDialog({
   const fullscreenHostRef = useRef<HTMLDivElement | null>(null);
 
   const projectPath = activeWorkspace ? getWorkspaceMatch(activeWorkspace, filePath)?.root.path : undefined;
-  const { result, loading, error, reload, version } = useDocumentContent(filePath, open);
+  const { result, loading, error, reload, version } = useDocumentContent(filePath, projectPath, open);
   const { feedback, clearFeedback, showRefreshing, showSuccess, showError } = useAutoRefreshFeedback();
   const fileName = useMemo(
     () => filePath.replace(/\\/g, '/').split('/').pop() ?? filePath,
@@ -161,6 +161,7 @@ export function DocumentViewerDialog({
 
     const context = {
       filePath,
+      projectPath,
       fileName,
       mode: resolvedMode,
       layoutMode,

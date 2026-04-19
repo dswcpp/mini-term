@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8765;
+const HTTP_AUTH_ENV_KEY: &str = "MINI_TERM_MCP_HTTP_TOKEN";
 
 #[derive(Debug)]
 struct HttpRequest {
@@ -58,6 +59,33 @@ fn parse_bind_addr() -> String {
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
     format!("{host}:{port}")
+}
+
+fn read_http_auth_token() -> Result<String, String> {
+    std::env::var(HTTP_AUTH_ENV_KEY)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{HTTP_AUTH_ENV_KEY} must be set before starting mini-term-mcp-http"
+            )
+        })
+}
+
+fn requires_authorization(request: &HttpRequest) -> bool {
+    !(request.method == "GET" && request.path == "/health")
+}
+
+fn require_authorization(headers: &BTreeMap<String, String>, token: &str) -> Result<(), String> {
+    let authorization = headers
+        .get("authorization")
+        .ok_or("missing authorization header")?;
+    if authorization == &format!("Bearer {token}") {
+        Ok(())
+    } else {
+        Err("invalid authorization token".to_string())
+    }
 }
 
 fn find_header_end(buffer: &[u8]) -> Option<(usize, usize)> {
@@ -312,11 +340,26 @@ fn handle_http_request(request: HttpRequest) -> Result<HttpResponse, String> {
     }
 }
 
-fn handle_connection(mut stream: TcpStream) -> Result<(), String> {
+fn handle_connection(token: &str, mut stream: TcpStream) -> Result<(), String> {
     let request = match read_http_request(&mut stream)? {
         Some(request) => request,
         None => return Ok(()),
     };
+
+    if requires_authorization(&request)
+        && require_authorization(&request.headers, token).is_err() {
+            return write_http_response(
+                &mut stream,
+                response_json(
+                    "401 Unauthorized",
+                    json!({
+                        "ok": false,
+                        "error": "unauthorized",
+                    }),
+                    Vec::new(),
+                )?,
+            );
+        }
 
     if request.method == "GET"
         && request.path == "/mcp"
@@ -335,6 +378,7 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), String> {
 }
 
 pub fn run_http_server() -> Result<(), String> {
+    let token = read_http_auth_token()?;
     let bind_addr = parse_bind_addr();
     let listener = TcpListener::bind(&bind_addr).map_err(|err| err.to_string())?;
     eprintln!("mini-term-mcp-http listening on http://{bind_addr}/mcp");
@@ -342,8 +386,9 @@ pub fn run_http_server() -> Result<(), String> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                thread::spawn(|| {
-                    if let Err(error) = handle_connection(stream) {
+                let token = token.clone();
+                thread::spawn(move || {
+                    if let Err(error) = handle_connection(&token, stream) {
                         eprintln!("{error}");
                     }
                 });
@@ -361,6 +406,36 @@ mod tests {
 
     fn header(name: &str, value: &str) -> (String, String) {
         (name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn authorization_is_not_required_for_health() {
+        let request = HttpRequest {
+            method: "GET".to_string(),
+            path: "/health".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        assert!(!requires_authorization(&request));
+    }
+
+    #[test]
+    fn authorization_is_required_for_mcp_endpoints() {
+        let request = HttpRequest {
+            method: "POST".to_string(),
+            path: "/mcp".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        assert!(requires_authorization(&request));
+        assert!(require_authorization(&request.headers, "token").is_err());
+        assert!(require_authorization(
+            &BTreeMap::from([header("authorization", "Bearer token")]),
+            "token"
+        )
+        .is_ok());
     }
 
     #[test]

@@ -84,9 +84,7 @@ fn normalize_path(path: &str) -> String {
 
 fn encode_project_path(project_path: &str) -> String {
     normalize_project_path_input(project_path)
-        .replace(':', "-")
-        .replace('\\', "-")
-        .replace('/', "-")
+        .replace([':', '\\', '/'], "-")
 }
 
 fn dedupe_project_paths(project_paths: &[String]) -> Vec<String> {
@@ -170,7 +168,7 @@ fn read_head_tail_lines(
     let mut head = Vec::new();
     let mut tail = VecDeque::with_capacity(tail_limit);
 
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if head.len() < head_limit {
             head.push(line.clone());
         }
@@ -194,7 +192,7 @@ fn load_codex_thread_names(codex_dir: &Path) -> HashMap<String, String> {
 
     let reader = BufReader::new(file);
     let mut map = HashMap::new();
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         if let Ok(obj) = serde_json::from_str::<Value>(&line) {
             if let (Some(id), Some(name)) = (
                 obj.get("id").and_then(Value::as_str),
@@ -457,9 +455,7 @@ fn try_read_codex_session_summary(
         matched_project_path = project_paths_by_normalized
             .get(&normalize_path(cwd))
             .cloned();
-        if matched_project_path.is_none() {
-            return None;
-        }
+        matched_project_path.as_ref()?;
         matched_id = obj
             .pointer("/payload/id")
             .and_then(Value::as_str)
@@ -696,7 +692,7 @@ fn delete_codex_session(path: &Path, session_id: &str) -> Result<bool, String> {
         .map_err(|err| format!("failed to open Codex session {}: {err}", path.display()))?;
     let reader = BufReader::new(file);
     let mut found_id = None;
-    for line in reader.lines().flatten().take(5) {
+    for line in reader.lines().map_while(Result::ok).take(5) {
         let value: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(_) => continue,
@@ -894,7 +890,7 @@ mod tests {
             ],
         );
 
-        let sessions = collect_external_sessions(&home.path, &[project_path.clone()]);
+        let sessions = collect_external_sessions(&home.path, std::slice::from_ref(&project_path));
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].provider_id, "codex");
         assert_eq!(sessions[0].title, "Codex Thread");
