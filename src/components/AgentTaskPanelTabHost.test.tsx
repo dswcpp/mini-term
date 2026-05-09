@@ -32,6 +32,38 @@ vi.mock('../runtime/agentPolicyApi', () => ({
   getTaskEffectivePolicy: (...args: unknown[]) => getTaskEffectivePolicy(...args),
 }));
 
+function findFileViewerPane(workspaceId: string, filePath: string) {
+  const workspaceState = useAppStore.getState().workspaceStates.get(workspaceId);
+  for (const tab of workspaceState?.tabs ?? []) {
+    if (tab.kind === 'file-viewer' && tab.filePath === filePath) {
+      return tab;
+    }
+
+    if (tab.kind !== 'terminal') {
+      continue;
+    }
+
+    const stack = [tab.splitLayout];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node) {
+        continue;
+      }
+
+      if (node.type === 'leaf') {
+        if (node.pane.kind === 'file-viewer' && node.pane.filePath === filePath) {
+          return node.pane;
+        }
+        continue;
+      }
+
+      stack.push(...node.children);
+    }
+  }
+
+  return undefined;
+}
+
 function TaskPanelHarness() {
   const workspaceState = useAppStore(selectWorkspaceState('workspace-1'));
   const tab = workspaceState?.tabs.find((item) => item.kind === 'agent-tasks');
@@ -528,15 +560,14 @@ describe('AgentTaskPanelTabHost', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open Plan Document' }));
 
     await waitFor(() => {
-      const workspaceState = useAppStore.getState().workspaceStates.get('workspace-1');
       expect(
-        workspaceState?.tabs.some(
-          (tab) =>
-            tab.kind === 'file-viewer'
-            && tab.filePath
-              === 'D:/Users/test/AppData/Roaming/mini-term/agent_state/tasks/task-1/artifacts/plan.md',
+        findFileViewerPane(
+          'workspace-1',
+          'D:/Users/test/AppData/Roaming/mini-term/agent_state/tasks/task-1/artifacts/plan.md',
         ),
-      ).toBe(true);
+      ).toMatchObject({
+        kind: 'file-viewer',
+      });
     });
   });
 

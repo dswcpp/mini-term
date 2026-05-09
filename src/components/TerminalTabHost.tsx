@@ -4,11 +4,15 @@ import { useAppStore, selectSessionById } from '../store';
 import { SplitLayout } from './SplitLayout';
 import { SessionInspector } from './terminal/SessionInspector';
 import { findPane } from './terminal/splitTree';
-import type { PaneState, SplitNode, TerminalTab } from '../types';
+import type { LayoutDragPayload, PaneState, SplitNode, TerminalTab, WorkspacePane } from '../types';
 
-function getFirstPane(node: SplitNode): PaneState {
+function getFirstPane(node: SplitNode): WorkspacePane {
   if (node.type === 'leaf') return node.pane;
   return getFirstPane(node.children[0]);
+}
+
+function isTerminalPane(pane: WorkspacePane | null | undefined): pane is PaneState {
+  return pane?.kind === 'terminal';
 }
 
 interface TerminalTabHostProps {
@@ -24,8 +28,8 @@ interface TerminalTabHostProps {
   onRenameTab: () => void;
   onCloseTab: () => void;
   onOpenSettings?: () => void;
-  onTabDrop: (
-    sourceTabId: string,
+  onLayoutDrop: (
+    payload: LayoutDragPayload,
     targetPaneId: string,
     direction: 'horizontal' | 'vertical',
     position: 'before' | 'after',
@@ -46,13 +50,14 @@ export function TerminalTabHost({
   onRenameTab,
   onCloseTab,
   onOpenSettings,
-  onTabDrop,
+  onLayoutDrop,
   onLayoutChange,
 }: TerminalTabHostProps) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const activePaneId = useAppStore((state) => state.activePaneByTab.get(tab.id));
   const activePane = (activePaneId ? findPane(tab.splitLayout, activePaneId) : null) ?? getFirstPane(tab.splitLayout);
-  const session = useAppStore(selectSessionById(activePane?.sessionId, isActive));
+  const activeTerminalPane = isTerminalPane(activePane) ? activePane : null;
+  const session = useAppStore(selectSessionById(activeTerminalPane?.sessionId, isActive));
 
   return (
     <div className="relative h-full">
@@ -73,13 +78,13 @@ export function TerminalTabHost({
             onRenameTab={onRenameTab}
             onCloseTab={onCloseTab}
             onOpenSettings={onOpenSettings}
-            onTabDrop={onTabDrop}
+            onLayoutDrop={onLayoutDrop}
             onLayoutChange={onLayoutChange}
           />
         </Allotment.Pane>
         <Allotment.Pane visible={inspectorOpen} minSize={260} preferredSize={320} maxSize={420}>
           <SessionInspector
-            pane={activePane}
+            pane={activeTerminalPane}
             session={session}
             onClose={() => setInspectorOpen(false)}
           />

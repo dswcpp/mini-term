@@ -10,6 +10,7 @@ function createTerminalTab(id: string, ptyId: number): TerminalTab {
     splitLayout: {
       type: 'leaf',
       pane: {
+        kind: 'terminal',
         id: `${id}-pane`,
         sessionId: `${id}-session`,
         shellName: 'bash',

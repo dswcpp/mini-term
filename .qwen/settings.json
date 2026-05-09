@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git commit *)",
+      "Bash(git fetch *)",
+      "Bash(git merge *)",
+      "Bash(findstr *)",
+      "Bash(git checkout *)",
+      "Bash(npx *)"
+    ]
+  },
+  "$version": 3
+}

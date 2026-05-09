@@ -15,7 +15,7 @@ import { showContextMenu } from '../utils/contextMenu';
 import { buildDirectoryStatusIndex } from '../utils/gitStatusDirectoryIndex';
 import { collectAffectedLoadedDirectories } from '../utils/fileTreeRefresh';
 import { isMarkdownFilePath } from '../utils/markdownPreview';
-import { showPrompt } from '../utils/prompt';
+import { showConfirm, showPrompt } from '../utils/prompt';
 
 const ROW_HEIGHT = 26;
 const OVERSCAN_ROWS = 10;
@@ -33,7 +33,11 @@ interface VisibleTreeNode {
 }
 
 function normalizePath(value: string) {
-  return value.replace(/[\\/]+/g, '/').replace(/\/$/, '');
+  const slashNormalized = value.replace(/[\\/]+/g, '/');
+  const withoutVerbatimPrefix = slashNormalized
+    .replace(/^\/\/\?\/UNC\//i, '//')
+    .replace(/^\/\/\?\//i, '');
+  return withoutVerbatimPrefix.replace(/\/$/, '');
 }
 
 function getRelativePath(targetPath: string, rootPath: string) {
@@ -585,6 +589,27 @@ export function FileTree({ workspaceId, isVisible = true }: FileTreeProps) {
                 projectRoot: root.path,
                 oldPath: entry.path,
                 newName: nextName.trim(),
+              });
+              await loadDirectory(root.path, getParentPath(entry.path, root.path));
+              await loadGitStatus(root);
+            },
+          },
+          {
+            label: `Delete ${entry.isDir ? 'Folder' : 'File'}`,
+            danger: true,
+            onClick: async () => {
+              const confirmed = await showConfirm(
+                'Delete',
+                `Are you sure you want to delete "${entry.name}"?`,
+                { tone: 'danger', confirmLabel: 'Delete', cancelLabel: 'Cancel' },
+              );
+              if (!confirmed) {
+                return;
+              }
+
+              await invoke('delete_entry', {
+                projectRoot: root.path,
+                path: entry.path,
               });
               await loadDirectory(root.path, getParentPath(entry.path, root.path));
               await loadGitStatus(root);

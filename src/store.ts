@@ -21,13 +21,19 @@ import {
 } from './utils/workspace';
 import type {
   AgentTaskPanelFilter,
+  AgentTaskPanelPaneState,
   AgentTaskPanelTab,
   AppConfig,
   CommandBlock,
+  CommitDiffPaneState,
   CommitFileInfo,
+  FileNavigationTarget,
   FileViewerOpenOptions,
+  FileViewerPaneState,
+  FileHistoryPaneState,
   GitFileStatus,
   LegacyProjectConfig,
+  PaneState,
   PaneRuntimeState,
   PaneStatus,
   PreviewMode,
@@ -44,6 +50,8 @@ import type {
   TerminalTab,
   TerminalUiState,
   TerminalViewState,
+  WorktreeDiffPaneState,
+  WorkspacePane,
   UiDialog,
   UiNoticeTone,
   WorkspaceConfig,
@@ -55,6 +63,7 @@ import { createEmptyCompletionUsage, recordCompletionUsage } from './utils/termi
 import { normalizePreviewModeForFile } from './utils/documentPreview';
 import { areSplitNodesEquivalent } from './utils/splitLayout';
 import { disposeTerminalBySession } from './utils/terminalCache';
+import { extractPane, findPane, insertNodeAtPane, insertSplit } from './components/terminal/splitTree';
 import {
   createDefaultAgentBackendsConfig,
   createDefaultExternalMcpInteropConfig,
@@ -142,12 +151,88 @@ function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
   return tab.kind === 'terminal';
 }
 
+function isTerminalPane(pane: WorkspacePane): pane is PaneState {
+  return pane.kind === 'terminal';
+}
+
 function isAgentTaskPanelTab(tab: WorkspaceTab): tab is AgentTaskPanelTab {
   return tab.kind === 'agent-tasks';
 }
 
+function createFileViewerPane(filePath: string, options?: FileViewerOpenOptions): FileViewerPaneState {
+  return {
+    kind: 'file-viewer',
+    id: genId(),
+    filePath,
+    mode: normalizeFileViewerMode(filePath, options?.initialMode),
+    ...(options?.navigationTarget ? { navigationTarget: options.navigationTarget } : {}),
+    status: 'idle',
+  };
+}
+
+function createWorktreeDiffPane(projectPath: string, gitStatus: GitFileStatus): WorktreeDiffPaneState {
+  return {
+    kind: 'worktree-diff',
+    id: genId(),
+    projectPath,
+    gitStatus,
+    status: 'idle',
+  };
+}
+
+function createCommitDiffPane(
+  repoPath: string,
+  commitHash: string,
+  commitMessage: string,
+  files: CommitFileInfo[],
+): CommitDiffPaneState {
+  return {
+    kind: 'commit-diff',
+    id: genId(),
+    repoPath,
+    commitHash,
+    commitMessage,
+    files,
+    status: 'idle',
+  };
+}
+
+function createFileHistoryPane(projectPath: string, filePath: string): FileHistoryPaneState {
+  return {
+    kind: 'file-history',
+    id: genId(),
+    projectPath,
+    filePath,
+    status: 'idle',
+  };
+}
+
+function createAgentTaskPanelPane(options?: {
+  selectedTaskId?: string;
+  scope?: AgentTaskPanelFilter['scope'];
+}): AgentTaskPanelPaneState {
+  return {
+    kind: 'agent-tasks',
+    id: genId(),
+    selectedTaskId: options?.selectedTaskId,
+    filter: {
+      scope: options?.scope ?? 'workspace',
+      attention: 'all',
+      target: 'all',
+    },
+    status: 'idle',
+  };
+}
+
 function normalizeFileViewerMode(filePath: string, mode?: PreviewMode): PreviewMode {
   return normalizePreviewModeForFile(filePath, mode);
+}
+
+function normalizePathIdentity(path: string): string {
+  const normalized = normalizeWorkspacePath(path);
+  return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//')
+    ? normalized.toLowerCase()
+    : normalized;
 }
 
 function getHighestStatusFromEntries(entries: Iterable<PaneRuntimeState>): PaneStatus {
@@ -162,21 +247,22 @@ function getHighestStatusFromEntries(entries: Iterable<PaneRuntimeState>): PaneS
 
 function updatePaneRunProfile(node: SplitNode, paneId: string, runProfile?: RunProfile): SplitNode {
   if (node.type === 'leaf') {
-    if (node.pane.id !== paneId) {
+    const pane = node.pane;
+    if (pane.id !== paneId || !isTerminalPane(pane)) {
       return node;
     }
-    const nextRunProfile = normalizeRunProfile(runProfile, node.pane.runCommand);
+    const nextRunProfile = normalizeRunProfile(runProfile, pane.runCommand);
     const nextRunCommand = nextRunProfile?.savedCommand;
     if (
-      node.pane.runCommand === nextRunCommand
-      && JSON.stringify(node.pane.runProfile ?? null) === JSON.stringify(nextRunProfile ?? null)
+      pane.runCommand === nextRunCommand
+      && JSON.stringify(pane.runProfile ?? null) === JSON.stringify(nextRunProfile ?? null)
     ) {
       return node;
     }
     return {
       ...node,
       pane: {
-        ...node.pane,
+        ...pane,
         runCommand: nextRunCommand,
         runProfile: nextRunProfile,
       },
@@ -201,14 +287,15 @@ function updatePaneSessionBinding(
   binding: Pick<TerminalSessionMeta, 'sessionId' | 'ptyId'> & Partial<Pick<TerminalSessionMeta, 'phase'>>,
 ): SplitNode {
   if (node.type === 'leaf') {
-    if (node.pane.id !== paneId) {
+    const pane = node.pane;
+    if (pane.id !== paneId || !isTerminalPane(pane)) {
       return node;
     }
 
     if (
-      node.pane.sessionId === binding.sessionId
-      && node.pane.ptyId === binding.ptyId
-      && (!binding.phase || node.pane.phase === binding.phase)
+      pane.sessionId === binding.sessionId
+      && pane.ptyId === binding.ptyId
+      && (!binding.phase || pane.phase === binding.phase)
     ) {
       return node;
     }
@@ -216,10 +303,10 @@ function updatePaneSessionBinding(
     return {
       ...node,
       pane: {
-        ...node.pane,
+        ...pane,
         sessionId: binding.sessionId,
         ptyId: binding.ptyId,
-        phase: binding.phase ?? node.pane.phase,
+        phase: binding.phase ?? pane.phase,
       },
     };
   }
@@ -227,6 +314,31 @@ function updatePaneSessionBinding(
   let changed = false;
   const children = node.children.map((child) => {
     const nextChild = updatePaneSessionBinding(child, paneId, binding);
+    if (nextChild !== child) {
+      changed = true;
+    }
+    return nextChild;
+  });
+
+  return changed ? { ...node, children } : node;
+}
+
+function updateWorkspacePane(
+  node: SplitNode,
+  paneId: string,
+  updater: (pane: WorkspacePane) => WorkspacePane,
+): SplitNode {
+  if (node.type === 'leaf') {
+    if (node.pane.id !== paneId) {
+      return node;
+    }
+    const nextPane = updater(node.pane);
+    return nextPane === node.pane ? node : { ...node, pane: nextPane };
+  }
+
+  let changed = false;
+  const children = node.children.map((child) => {
+    const nextChild = updateWorkspacePane(child, paneId, updater);
     if (nextChild !== child) {
       changed = true;
     }
@@ -246,6 +358,9 @@ function indexSplitNode(
   existingPaneRuntime?: Map<number, PaneRuntimeState>,
 ) {
   if (node.type === 'leaf') {
+    if (!isTerminalPane(node.pane)) {
+      return;
+    }
     ptyToPaneIndex.set(node.pane.ptyId, {
       projectId: workspaceId,
       tabId,
@@ -345,16 +460,290 @@ function buildExplorerRuntimePatch(workspaceExplorerRuntime: Map<string, Workspa
 
 export function collectPtyIds(node: SplitNode): number[] {
   if (node.type === 'leaf') {
-    return [node.pane.ptyId];
+    return isTerminalPane(node.pane) ? [node.pane.ptyId] : [];
   }
   return node.children.flatMap(collectPtyIds);
 }
 
 export function collectPaneBindings(node: SplitNode): Array<{ ptyId: number; sessionId: string }> {
   if (node.type === 'leaf') {
-    return [{ ptyId: node.pane.ptyId, sessionId: node.pane.sessionId }];
+    return isTerminalPane(node.pane) ? [{ ptyId: node.pane.ptyId, sessionId: node.pane.sessionId }] : [];
   }
   return node.children.flatMap(collectPaneBindings);
+}
+
+function collectWorkspacePanes(node: SplitNode): WorkspacePane[] {
+  if (node.type === 'leaf') {
+    return [node.pane];
+  }
+  return node.children.flatMap(collectWorkspacePanes);
+}
+
+function createCanvasTabFromPane(pane: WorkspacePane, id: string = genId()): TerminalTab {
+  return {
+    kind: 'terminal',
+    id,
+    status: pane.status,
+    splitLayout: {
+      type: 'leaf',
+      pane,
+    },
+  };
+}
+
+function getFirstPane(node: SplitNode): WorkspacePane {
+  return node.type === 'leaf' ? node.pane : getFirstPane(node.children[0]);
+}
+
+function getFirstPaneId(node: SplitNode): string {
+  return getFirstPane(node).id;
+}
+
+function resolvePreferredPaneId(node: SplitNode, preferredPaneId?: string): string {
+  return preferredPaneId && findPane(node, preferredPaneId) ? preferredPaneId : getFirstPaneId(node);
+}
+
+function paneFromLegacyTab(tab: Exclude<WorkspaceTab, TerminalTab>): WorkspacePane {
+  switch (tab.kind) {
+    case 'file-viewer':
+      return {
+        kind: 'file-viewer',
+        id: genId(),
+        filePath: tab.filePath,
+        mode: tab.mode,
+        navigationTarget: tab.navigationTarget,
+        status: tab.status,
+      };
+    case 'worktree-diff':
+      return createWorktreeDiffPane(tab.projectPath, tab.status);
+    case 'commit-diff':
+      return createCommitDiffPane(tab.repoPath, tab.commitHash, tab.commitMessage, tab.files);
+    case 'file-history':
+      return createFileHistoryPane(tab.projectPath, tab.filePath);
+    case 'agent-tasks':
+      return {
+        kind: 'agent-tasks',
+        id: genId(),
+        filter: tab.filter,
+        selectedTaskId: tab.selectedTaskId,
+        status: tab.status,
+      };
+  }
+}
+
+function nodeFromWorkspaceTab(tab: WorkspaceTab): SplitNode {
+  return isTerminalTab(tab)
+    ? tab.splitLayout
+    : {
+        type: 'leaf',
+        pane: paneFromLegacyTab(tab),
+      };
+}
+
+function findPaneLocation(
+  workspaceState: WorkspaceState,
+  predicate: (pane: WorkspacePane) => boolean,
+): { tabId: string; paneId: string } | null {
+  for (const tab of workspaceState.tabs) {
+    if (!isTerminalTab(tab)) {
+      continue;
+    }
+
+    const pane = collectWorkspacePanes(tab.splitLayout).find(predicate);
+    if (pane) {
+      return { tabId: tab.id, paneId: pane.id };
+    }
+  }
+
+  return null;
+}
+
+function insertPaneIntoTabLayout(layout: SplitNode, targetPaneId: string, pane: WorkspacePane): SplitNode {
+  return insertSplit(layout, targetPaneId, 'vertical', pane);
+}
+
+function insertPaneIntoWorkspaceState(
+  workspaceState: WorkspaceState,
+  activePaneByTab: Map<string, string>,
+  pane: WorkspacePane,
+): { nextWorkspaceState: WorkspaceState; nextActivePaneByTab: Map<string, string>; tabId: string } {
+  const activeTab = workspaceState.tabs.find((tab) => tab.id === workspaceState.activeTabId);
+  const nextActivePaneByTab = new Map(activePaneByTab);
+
+  if (!activeTab) {
+    const tab = createCanvasTabFromPane(pane);
+    nextActivePaneByTab.set(tab.id, pane.id);
+    return {
+      nextWorkspaceState: {
+        ...workspaceState,
+        tabs: [...workspaceState.tabs, tab],
+        activeTabId: tab.id,
+      },
+      nextActivePaneByTab,
+      tabId: tab.id,
+    };
+  }
+
+  if (isTerminalTab(activeTab)) {
+    const targetPaneId = nextActivePaneByTab.get(activeTab.id) ?? getFirstPaneId(activeTab.splitLayout);
+    const nextLayout = insertPaneIntoTabLayout(activeTab.splitLayout, targetPaneId, pane);
+    nextActivePaneByTab.set(activeTab.id, pane.id);
+    return {
+      nextWorkspaceState: {
+        ...workspaceState,
+        activeTabId: activeTab.id,
+        tabs: workspaceState.tabs.map((tab) =>
+          tab.id === activeTab.id && isTerminalTab(tab)
+            ? { ...tab, splitLayout: nextLayout }
+            : tab,
+        ),
+      },
+      nextActivePaneByTab,
+      tabId: activeTab.id,
+    };
+  }
+
+  const sourcePane = paneFromLegacyTab(activeTab);
+  const canvasTab = createCanvasTabFromPane(sourcePane, activeTab.id);
+  const nextLayout = insertPaneIntoTabLayout(canvasTab.splitLayout, sourcePane.id, pane);
+  nextActivePaneByTab.set(activeTab.id, pane.id);
+  return {
+    nextWorkspaceState: {
+      ...workspaceState,
+      activeTabId: activeTab.id,
+      tabs: workspaceState.tabs.map((tab) =>
+        tab.id === activeTab.id
+          ? { ...canvasTab, splitLayout: nextLayout }
+          : tab,
+      ),
+    },
+    nextActivePaneByTab,
+    tabId: activeTab.id,
+  };
+}
+
+function updatePaneLocationInWorkspaceState(
+  workspaceState: WorkspaceState,
+  location: { tabId: string; paneId: string },
+  updater: (pane: WorkspacePane) => WorkspacePane,
+): WorkspaceState {
+  const tabs = workspaceState.tabs.map((tab) => {
+    if (tab.id !== location.tabId || !isTerminalTab(tab)) {
+      return tab;
+    }
+
+    const nextLayout = updateWorkspacePane(tab.splitLayout, location.paneId, updater);
+    return nextLayout === tab.splitLayout ? tab : { ...tab, splitLayout: nextLayout };
+  });
+
+  return {
+    ...workspaceState,
+    activeTabId: location.tabId,
+    tabs,
+  };
+}
+
+function insertNodeIntoWorkspaceTab(
+  tab: WorkspaceTab,
+  targetPaneId: string | undefined,
+  node: SplitNode,
+  direction: 'horizontal' | 'vertical',
+  position: 'before' | 'after',
+): WorkspaceTab | null {
+  if (isTerminalTab(tab)) {
+    if (!targetPaneId || !findPane(tab.splitLayout, targetPaneId)) {
+      return null;
+    }
+
+    const nextLayout = insertNodeAtPane(tab.splitLayout, targetPaneId, direction, node, position);
+    return nextLayout === tab.splitLayout ? null : { ...tab, splitLayout: nextLayout };
+  }
+
+  const targetPane = paneFromLegacyTab(tab);
+  const nextLayout = insertNodeAtPane(
+    { type: 'leaf', pane: targetPane },
+    targetPane.id,
+    direction,
+    node,
+    position,
+  );
+  return {
+    kind: 'terminal',
+    id: tab.id,
+    status: 'idle',
+    splitLayout: nextLayout,
+  };
+}
+
+function buildWorkspaceMutationPatch(
+  state: AppStore,
+  workspaceStates: Map<string, WorkspaceState>,
+  activePaneByTab: Map<string, string>,
+  removedPtyIds: number[],
+) {
+  const referencedPtyIds = collectReferencedPtyIds(workspaceStates);
+  let sessionStatePatch: SessionMapState = {
+    sessions: state.sessions,
+    terminalSessions: state.terminalSessions,
+    sessionIdByPty: state.sessionIdByPty,
+    ptyBySessionId: state.ptyBySessionId,
+  };
+
+  removedPtyIds.forEach((ptyId) => {
+    if (referencedPtyIds.has(ptyId)) {
+      return;
+    }
+    sessionStatePatch = removeSessionStatePatch(sessionStatePatch, { ptyId });
+  });
+
+  return {
+    ...sessionStatePatch,
+    activePaneByTab,
+    ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
+  };
+}
+
+function moveWorkspaceTabList(
+  tabs: WorkspaceTab[],
+  sourceTabId: string,
+  targetTabId: string,
+  position: 'before' | 'after',
+) {
+  const sourceIndex = tabs.findIndex((tab) => tab.id === sourceTabId);
+  const targetIndex = tabs.findIndex((tab) => tab.id === targetTabId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+    return null;
+  }
+
+  const nextTabs = [...tabs];
+  const [movedTab] = nextTabs.splice(sourceIndex, 1);
+  const nextTargetIndex = nextTabs.findIndex((tab) => tab.id === targetTabId);
+  if (nextTargetIndex < 0) {
+    return null;
+  }
+
+  const insertIndex = position === 'before' ? nextTargetIndex : nextTargetIndex + 1;
+  nextTabs.splice(insertIndex, 0, movedTab);
+
+  const unchanged = nextTabs.every((tab, index) => tab.id === tabs[index]?.id);
+  return unchanged ? null : nextTabs;
+}
+
+function insertWorkspaceTabRelative(
+  tabs: WorkspaceTab[],
+  targetTabId: string,
+  tab: WorkspaceTab,
+  position: 'before' | 'after',
+) {
+  const targetIndex = tabs.findIndex((item) => item.id === targetTabId);
+  if (targetIndex < 0) {
+    return null;
+  }
+
+  const nextTabs = [...tabs];
+  const insertIndex = position === 'before' ? targetIndex : targetIndex + 1;
+  nextTabs.splice(insertIndex, 0, tab);
+  return nextTabs;
 }
 
 function collectReferencedPtyIds(workspaceStates: Map<string, WorkspaceState>) {
@@ -412,14 +801,69 @@ async function openTerminalPane(
 
 function serializeSplitNode(node: SplitNode): SavedSplitNode {
   if (node.type === 'leaf') {
-    return {
-      type: 'leaf',
-      pane: {
-        shellName: node.pane.shellName,
-        runCommand: node.pane.runCommand,
-        runProfile: node.pane.runProfile,
-      },
-    };
+    const pane = node.pane;
+    if (isTerminalPane(pane)) {
+      return {
+        type: 'leaf',
+        pane: {
+          kind: 'terminal',
+          shellName: pane.shellName,
+          runCommand: pane.runCommand,
+          runProfile: pane.runProfile,
+        },
+      };
+    }
+
+    switch (pane.kind) {
+      case 'file-viewer':
+        return {
+          type: 'leaf',
+          pane: {
+            kind: 'file-viewer',
+            filePath: pane.filePath,
+            mode: pane.mode,
+            ...(pane.navigationTarget ? { navigationTarget: pane.navigationTarget } : {}),
+          },
+        };
+      case 'worktree-diff':
+        return {
+          type: 'leaf',
+          pane: {
+            kind: 'worktree-diff',
+            projectPath: pane.projectPath,
+            gitStatus: pane.gitStatus,
+          },
+        };
+      case 'commit-diff':
+        return {
+          type: 'leaf',
+          pane: {
+            kind: 'commit-diff',
+            repoPath: pane.repoPath,
+            commitHash: pane.commitHash,
+            commitMessage: pane.commitMessage,
+            files: pane.files,
+          },
+        };
+      case 'file-history':
+        return {
+          type: 'leaf',
+          pane: {
+            kind: 'file-history',
+            projectPath: pane.projectPath,
+            filePath: pane.filePath,
+          },
+        };
+      case 'agent-tasks':
+        return {
+          type: 'leaf',
+          pane: {
+            kind: 'agent-tasks',
+            filter: pane.filter,
+            ...(pane.selectedTaskId ? { selectedTaskId: pane.selectedTaskId } : {}),
+          },
+        };
+    }
   }
 
   return {
@@ -445,18 +889,98 @@ export function serializeLayout(workspaceState: WorkspaceState): SavedProjectLay
 
 async function restoreSplitNode(saved: SavedSplitNode, cwd: string, config: AppConfig): Promise<SplitNode | null> {
   if (saved.type === 'leaf') {
-    const shell =
-      config.availableShells.find((item) => item.name === saved.pane.shellName)
-      ?? config.availableShells.find((item) => item.name === config.defaultShell)
-      ?? config.availableShells[0];
-    if (!shell) {
-      return null;
-    }
+    const savedPane = saved.pane;
+    const paneKind = savedPane.kind ?? 'terminal';
+    switch (paneKind) {
+      case 'terminal': {
+        const terminalPane = savedPane as Extract<SavedSplitNode, { type: 'leaf' }>['pane'] & {
+          shellName: string;
+          runCommand?: string;
+          runProfile?: RunProfile;
+        };
+        const shell =
+          config.availableShells.find((item) => item.name === terminalPane.shellName)
+          ?? config.availableShells.find((item) => item.name === config.defaultShell)
+          ?? config.availableShells[0];
+        if (!shell) {
+          return null;
+        }
 
-    return openTerminalPane(shell, cwd, {
-      runCommand: getSavedRunCommand(saved.pane.runProfile, saved.pane.runCommand),
-      runProfile: normalizeRunProfile(saved.pane.runProfile, saved.pane.runCommand),
-    });
+        return openTerminalPane(shell, cwd, {
+          runCommand: getSavedRunCommand(terminalPane.runProfile, terminalPane.runCommand),
+          runProfile: normalizeRunProfile(terminalPane.runProfile, terminalPane.runCommand),
+        });
+      }
+      case 'file-viewer': {
+        const fileViewerPane = savedPane as {
+          filePath: string;
+          mode?: PreviewMode;
+          navigationTarget?: FileNavigationTarget;
+        };
+        return {
+          type: 'leaf',
+          pane: {
+            kind: 'file-viewer',
+            id: genId(),
+            filePath: fileViewerPane.filePath,
+            mode: normalizeFileViewerMode(fileViewerPane.filePath, fileViewerPane.mode),
+            ...(fileViewerPane.navigationTarget ? { navigationTarget: fileViewerPane.navigationTarget } : {}),
+            status: 'idle',
+          },
+        };
+      }
+      case 'worktree-diff': {
+        const worktreeDiffPane = savedPane as {
+          projectPath: string;
+          gitStatus: GitFileStatus;
+        };
+        return {
+          type: 'leaf',
+          pane: createWorktreeDiffPane(worktreeDiffPane.projectPath, worktreeDiffPane.gitStatus),
+        };
+      }
+      case 'commit-diff': {
+        const commitDiffPane = savedPane as {
+          repoPath: string;
+          commitHash: string;
+          commitMessage: string;
+          files: CommitFileInfo[];
+        };
+        return {
+          type: 'leaf',
+          pane: createCommitDiffPane(
+            commitDiffPane.repoPath,
+            commitDiffPane.commitHash,
+            commitDiffPane.commitMessage,
+            commitDiffPane.files,
+          ),
+        };
+      }
+      case 'file-history': {
+        const fileHistoryPane = savedPane as {
+          projectPath: string;
+          filePath: string;
+        };
+        return {
+          type: 'leaf',
+          pane: createFileHistoryPane(fileHistoryPane.projectPath, fileHistoryPane.filePath),
+        };
+      }
+      case 'agent-tasks': {
+        const tasksPane = savedPane as {
+          filter: AgentTaskPanelFilter;
+          selectedTaskId?: string;
+        };
+        return {
+          type: 'leaf',
+          pane: {
+            ...createAgentTaskPanelPane({ scope: tasksPane.filter.scope }),
+            filter: tasksPane.filter,
+            selectedTaskId: tasksPane.selectedTaskId,
+          },
+        };
+      }
+    }
   }
 
   const children: SplitNode[] = [];
@@ -969,6 +1493,36 @@ interface AppStore {
   setActiveTab: (workspaceId: string, tabId: string) => void;
   setTabCustomTitle: (workspaceId: string, tabId: string, customTitle?: string) => void;
   updateTabLayout: (workspaceId: string, tabId: string, layout: SplitNode) => void;
+  reorderWorkspaceTab: (
+    workspaceId: string,
+    sourceTabId: string,
+    targetTabId: string,
+    position: 'before' | 'after',
+  ) => void;
+  moveWorkspaceTabToPane: (
+    workspaceId: string,
+    sourceTabId: string,
+    targetTabId: string,
+    targetPaneId: string | undefined,
+    direction: 'horizontal' | 'vertical',
+    position: 'before' | 'after',
+  ) => void;
+  moveWorkspacePaneToPane: (
+    workspaceId: string,
+    sourceTabId: string,
+    sourcePaneId: string,
+    targetTabId: string,
+    targetPaneId: string | undefined,
+    direction: 'horizontal' | 'vertical',
+    position: 'before' | 'after',
+  ) => void;
+  moveWorkspacePaneToTab: (
+    workspaceId: string,
+    sourceTabId: string,
+    sourcePaneId: string,
+    targetTabId: string,
+    position: 'before' | 'after',
+  ) => void;
 
   updatePaneStatusByPty: (ptyId: number, status: PaneStatus) => void;
   updatePaneStatusesByPty: (updates: Array<{ ptyId: number; status: PaneStatus }>) => void;
@@ -2341,6 +2895,226 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
     }),
 
+  reorderWorkspaceTab: (workspaceId, sourceTabId, targetTabId, position) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState) {
+        return state;
+      }
+
+      const nextTabs = moveWorkspaceTabList(workspaceState.tabs, sourceTabId, targetTabId, position);
+      if (!nextTabs) {
+        return state;
+      }
+
+      const workspaceStates = new Map(sourceWorkspaceStates);
+      workspaceStates.set(workspaceId, {
+        ...workspaceState,
+        tabs: nextTabs,
+      });
+      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+    }),
+
+  moveWorkspaceTabToPane: (workspaceId, sourceTabId, targetTabId, targetPaneId, direction, position) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState || sourceTabId === targetTabId) {
+        return state;
+      }
+
+      const sourceTab = workspaceState.tabs.find((tab) => tab.id === sourceTabId);
+      const targetTab = workspaceState.tabs.find((tab) => tab.id === targetTabId);
+      if (!sourceTab || !targetTab) {
+        return state;
+      }
+
+      const sourceNode = nodeFromWorkspaceTab(sourceTab);
+      const sourceActivePaneId = resolvePreferredPaneId(
+        sourceNode,
+        isTerminalTab(sourceTab) ? state.activePaneByTab.get(sourceTabId) : undefined,
+      );
+      const nextTargetTab = insertNodeIntoWorkspaceTab(targetTab, targetPaneId, sourceNode, direction, position);
+      if (!nextTargetTab) {
+        return state;
+      }
+
+      const workspaceStates = new Map(sourceWorkspaceStates);
+      workspaceStates.set(workspaceId, {
+        ...workspaceState,
+        activeTabId: targetTabId,
+        tabs: workspaceState.tabs
+          .map((tab) => (tab.id === targetTabId ? nextTargetTab : tab))
+          .filter((tab) => tab.id !== sourceTabId),
+      });
+
+      const activePaneByTab = new Map(state.activePaneByTab);
+      activePaneByTab.delete(sourceTabId);
+      activePaneByTab.set(targetTabId, sourceActivePaneId);
+
+      const removedPtyIds = isTerminalTab(sourceTab) ? collectPtyIds(sourceTab.splitLayout) : [];
+      return buildWorkspaceMutationPatch(state, workspaceStates, activePaneByTab, removedPtyIds);
+    }),
+
+  moveWorkspacePaneToPane: (
+    workspaceId,
+    sourceTabId,
+    sourcePaneId,
+    targetTabId,
+    targetPaneId,
+    direction,
+    position,
+  ) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState) {
+        return state;
+      }
+
+      const sourceTab = workspaceState.tabs.find((tab) => tab.id === sourceTabId);
+      const targetTab = workspaceState.tabs.find((tab) => tab.id === targetTabId);
+      if (!sourceTab || !targetTab || !isTerminalTab(sourceTab)) {
+        return state;
+      }
+
+      const extraction = extractPane(sourceTab.splitLayout, sourcePaneId);
+      if (!extraction.extractedPane) {
+        return state;
+      }
+
+      const movedNode: SplitNode = {
+        type: 'leaf',
+        pane: extraction.extractedPane,
+      };
+      const removedPtyIds = extraction.extractedPane.kind === 'terminal' ? [extraction.extractedPane.ptyId] : [];
+
+      if (sourceTabId === targetTabId) {
+        if (!extraction.nextNode || !targetPaneId || !findPane(extraction.nextNode, targetPaneId)) {
+          return state;
+        }
+
+        const nextLayout = insertNodeAtPane(extraction.nextNode, targetPaneId, direction, movedNode, position);
+        if (areSplitNodesEquivalent(sourceTab.splitLayout, nextLayout)) {
+          return state;
+        }
+
+        const workspaceStates = new Map(sourceWorkspaceStates);
+        workspaceStates.set(workspaceId, {
+          ...workspaceState,
+          activeTabId: sourceTabId,
+          tabs: workspaceState.tabs.map((tab) =>
+            tab.id === sourceTabId && isTerminalTab(tab) ? { ...tab, splitLayout: nextLayout } : tab,
+          ),
+        });
+
+        const activePaneByTab = new Map(state.activePaneByTab);
+        activePaneByTab.set(sourceTabId, sourcePaneId);
+        return buildWorkspaceMutationPatch(state, workspaceStates, activePaneByTab, removedPtyIds);
+      }
+
+      const nextTargetTab = insertNodeIntoWorkspaceTab(targetTab, targetPaneId, movedNode, direction, position);
+      if (!nextTargetTab) {
+        return state;
+      }
+
+      const currentSourceActivePaneId = state.activePaneByTab.get(sourceTabId);
+      const nextSourceTab = extraction.nextNode ? { ...sourceTab, splitLayout: extraction.nextNode } : null;
+      const nextSourceActivePaneId = nextSourceTab
+        ? currentSourceActivePaneId && findPane(nextSourceTab.splitLayout, currentSourceActivePaneId)
+          ? currentSourceActivePaneId
+          : getFirstPaneId(nextSourceTab.splitLayout)
+        : null;
+
+      const workspaceStates = new Map(sourceWorkspaceStates);
+      workspaceStates.set(workspaceId, {
+        ...workspaceState,
+        activeTabId: targetTabId,
+        tabs: workspaceState.tabs.flatMap((tab) => {
+          if (tab.id === sourceTabId) {
+            return nextSourceTab ? [nextSourceTab] : [];
+          }
+          if (tab.id === targetTabId) {
+            return [nextTargetTab];
+          }
+          return [tab];
+        }),
+      });
+
+      const activePaneByTab = new Map(state.activePaneByTab);
+      if (nextSourceActivePaneId) {
+        activePaneByTab.set(sourceTabId, nextSourceActivePaneId);
+      } else {
+        activePaneByTab.delete(sourceTabId);
+      }
+      activePaneByTab.set(targetTabId, sourcePaneId);
+
+      return buildWorkspaceMutationPatch(state, workspaceStates, activePaneByTab, removedPtyIds);
+    }),
+
+  moveWorkspacePaneToTab: (workspaceId, sourceTabId, sourcePaneId, targetTabId, position) =>
+    set((state) => {
+      const sourceWorkspaceStates = getWorkspaceStateMap(state, workspaceId);
+      const workspaceState = sourceWorkspaceStates.get(workspaceId);
+      if (!workspaceState) {
+        return state;
+      }
+
+      const sourceTab = workspaceState.tabs.find((tab) => tab.id === sourceTabId);
+      const targetTab = workspaceState.tabs.find((tab) => tab.id === targetTabId);
+      if (!sourceTab || !targetTab || !isTerminalTab(sourceTab)) {
+        return state;
+      }
+
+      const extraction = extractPane(sourceTab.splitLayout, sourcePaneId);
+      if (!extraction.extractedPane) {
+        return state;
+      }
+
+      if (sourceTabId === targetTabId && !extraction.nextNode) {
+        return state;
+      }
+
+      const liftedTab = createCanvasTabFromPane(extraction.extractedPane);
+      const removedPtyIds = extraction.extractedPane.kind === 'terminal' ? [extraction.extractedPane.ptyId] : [];
+      const currentSourceActivePaneId = state.activePaneByTab.get(sourceTabId);
+      const nextSourceTab = extraction.nextNode ? { ...sourceTab, splitLayout: extraction.nextNode } : null;
+      const nextSourceActivePaneId = nextSourceTab
+        ? currentSourceActivePaneId && findPane(nextSourceTab.splitLayout, currentSourceActivePaneId)
+          ? currentSourceActivePaneId
+          : getFirstPaneId(nextSourceTab.splitLayout)
+        : null;
+
+      const tabsWithoutSource = workspaceState.tabs.flatMap((tab) => {
+        if (tab.id !== sourceTabId) {
+          return [tab];
+        }
+        return nextSourceTab ? [nextSourceTab] : [];
+      });
+      const nextTabs = insertWorkspaceTabRelative(tabsWithoutSource, targetTabId, liftedTab, position);
+      if (!nextTabs) {
+        return state;
+      }
+
+      const workspaceStates = new Map(sourceWorkspaceStates);
+      workspaceStates.set(workspaceId, {
+        ...workspaceState,
+        activeTabId: liftedTab.id,
+        tabs: nextTabs,
+      });
+
+      const activePaneByTab = new Map(state.activePaneByTab);
+      if (nextSourceActivePaneId) {
+        activePaneByTab.set(sourceTabId, nextSourceActivePaneId);
+      } else {
+        activePaneByTab.delete(sourceTabId);
+      }
+      activePaneByTab.set(liftedTab.id, sourcePaneId);
+
+      return buildWorkspaceMutationPatch(state, workspaceStates, activePaneByTab, removedPtyIds);
+    }),
+
   updatePaneStatusByPty: (ptyId, status) =>
     set((state) => {
       const existingRuntime = state.paneRuntimeByPty.get(ptyId);
@@ -2508,15 +3282,60 @@ export const useAppStore = create<AppStore>((set, get) => ({
         return state;
       }
       const nextMode = normalizeFileViewerMode(filePath, options?.initialMode);
-      const existing = workspaceState.tabs.find((tab) => tab.kind === 'file-viewer' && tab.filePath === filePath);
+      const normalizedFilePath = normalizePathIdentity(filePath);
       const workspaceStates = new Map(sourceWorkspaceStates);
+      const activePaneByTab = new Map(state.activePaneByTab);
+      const existingPane = findPaneLocation(
+        workspaceState,
+        (pane) => pane.kind === 'file-viewer' && normalizePathIdentity(pane.filePath) === normalizedFilePath,
+      );
+      const existingLegacyTab = workspaceState.tabs.find(
+        (tab) => tab.kind === 'file-viewer' && normalizePathIdentity(tab.filePath) === normalizedFilePath,
+      );
 
-      if (existing) {
+      if (existingPane) {
+        const nextWorkspaceState = updatePaneLocationInWorkspaceState(workspaceState, existingPane, (pane) => {
+          if (pane.kind !== 'file-viewer') {
+            return pane;
+          }
+
+          if (options?.navigationTarget) {
+            return (
+              pane.mode === nextMode
+              && JSON.stringify(pane.navigationTarget ?? null) === JSON.stringify(options.navigationTarget)
+            )
+              ? pane
+              : {
+                  ...pane,
+                  mode: nextMode,
+                  navigationTarget: options.navigationTarget,
+                };
+          }
+
+          if (pane.mode === nextMode && !pane.navigationTarget) {
+            return pane;
+          }
+
+          const { navigationTarget: _navigationTarget, ...rest } = pane;
+          return {
+            ...rest,
+            mode: nextMode,
+          };
+        });
+        activePaneByTab.set(existingPane.tabId, existingPane.paneId);
+        workspaceStates.set(workspaceId, nextWorkspaceState);
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
+        };
+      }
+
+      if (existingLegacyTab) {
         workspaceStates.set(workspaceId, {
           ...workspaceState,
-          activeTabId: existing.id,
+          activeTabId: existingLegacyTab.id,
           tabs: workspaceState.tabs.map((tab) =>
-            tab.id === existing.id && tab.kind === 'file-viewer'
+            tab.id === existingLegacyTab.id && tab.kind === 'file-viewer'
               ? (() => {
                   const { navigationTarget: _navigationTarget, ...rest } = tab;
                   return options?.navigationTarget
@@ -2533,23 +3352,24 @@ export const useAppStore = create<AppStore>((set, get) => ({
               : tab,
           ),
         });
-      } else {
-        const tab: WorkspaceTab = {
-          kind: 'file-viewer',
-          id: genId(),
-          filePath,
-          mode: nextMode,
-          ...(options?.navigationTarget ? { navigationTarget: options.navigationTarget } : {}),
-          status: 'idle',
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
         };
-        workspaceStates.set(workspaceId, {
-          ...workspaceState,
-          tabs: [...workspaceState.tabs, tab],
-          activeTabId: tab.id,
-        });
       }
 
-      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+      const pane = createFileViewerPane(filePath, options);
+      const { nextWorkspaceState, nextActivePaneByTab } = insertPaneIntoWorkspaceState(
+        workspaceState,
+        activePaneByTab,
+        { ...pane, mode: nextMode },
+      );
+      workspaceStates.set(workspaceId, nextWorkspaceState);
+
+      return {
+        activePaneByTab: nextActivePaneByTab,
+        ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, nextActivePaneByTab),
+      };
     }),
 
   setFileViewerTabMode: (workspaceId, tabId, mode) =>
@@ -2562,15 +3382,30 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
       let changed = false;
       const tabs = workspaceState.tabs.map((tab) => {
-        if (tab.id !== tabId || tab.kind !== 'file-viewer') {
+        if (tab.id === tabId && tab.kind === 'file-viewer') {
+          const nextMode = normalizeFileViewerMode(tab.filePath, mode);
+          if (tab.mode === nextMode) {
+            return tab;
+          }
+          changed = true;
+          return { ...tab, mode: nextMode };
+        }
+
+        if (!isTerminalTab(tab)) {
           return tab;
         }
-        const nextMode = normalizeFileViewerMode(tab.filePath, mode);
-        if (tab.mode === nextMode) {
+        const nextLayout = updateWorkspacePane(tab.splitLayout, tabId, (pane) => {
+          if (pane.kind !== 'file-viewer') {
+            return pane;
+          }
+          const nextMode = normalizeFileViewerMode(pane.filePath, mode);
+          return pane.mode === nextMode ? pane : { ...pane, mode: nextMode };
+        });
+        if (nextLayout === tab.splitLayout) {
           return tab;
         }
         changed = true;
-        return { ...tab, mode: nextMode };
+        return { ...tab, splitLayout: nextLayout };
       });
 
       if (!changed) {
@@ -2593,6 +3428,38 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const workspaceStates = new Map(sourceWorkspaceStates);
       const existing = workspaceState.tabs.find((tab) => isAgentTaskPanelTab(tab));
       const nextScope = options?.scope ?? 'workspace';
+      const activePaneByTab = new Map(state.activePaneByTab);
+      const existingPane = findPaneLocation(workspaceState, (pane) => pane.kind === 'agent-tasks');
+
+      if (existingPane) {
+        const nextWorkspaceState = updatePaneLocationInWorkspaceState(workspaceState, existingPane, (pane) => {
+          if (pane.kind !== 'agent-tasks') {
+            return pane;
+          }
+
+          const nextSelectedTaskId = options?.selectedTaskId ?? pane.selectedTaskId;
+          const nextFilter = {
+            ...pane.filter,
+            scope: nextScope,
+          };
+          return (
+            nextSelectedTaskId === pane.selectedTaskId
+            && JSON.stringify(nextFilter) === JSON.stringify(pane.filter)
+          )
+            ? pane
+            : {
+                ...pane,
+                selectedTaskId: nextSelectedTaskId,
+                filter: nextFilter,
+              };
+        });
+        activePaneByTab.set(existingPane.tabId, existingPane.paneId);
+        workspaceStates.set(workspaceId, nextWorkspaceState);
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
+        };
+      }
 
       if (existing && isAgentTaskPanelTab(existing)) {
         workspaceStates.set(workspaceId, {
@@ -2611,26 +3478,30 @@ export const useAppStore = create<AppStore>((set, get) => ({
               : tab,
           ),
         });
-      } else {
-        const tab: AgentTaskPanelTab = {
-          kind: 'agent-tasks',
-          id: genId(),
-          selectedTaskId: options?.selectedTaskId,
-          filter: {
-            scope: nextScope,
-            attention: 'all',
-            target: 'all',
-          },
-          status: 'idle',
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
         };
-        workspaceStates.set(workspaceId, {
-          ...workspaceState,
-          tabs: [...workspaceState.tabs, tab],
-          activeTabId: tab.id,
-        });
       }
 
-      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+      const pane = createAgentTaskPanelPane(options);
+      const { nextWorkspaceState, nextActivePaneByTab } = insertPaneIntoWorkspaceState(
+        workspaceState,
+        activePaneByTab,
+        {
+          ...pane,
+          filter: {
+            ...pane.filter,
+            scope: nextScope,
+          },
+        },
+      );
+      workspaceStates.set(workspaceId, nextWorkspaceState);
+
+      return {
+        activePaneByTab: nextActivePaneByTab,
+        ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, nextActivePaneByTab),
+      };
     }),
 
   setAgentTaskPanelSelection: (workspaceId, tabId, taskId) =>
@@ -2643,14 +3514,35 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
       let changed = false;
       const tabs = workspaceState.tabs.map((tab) => {
-        if (tab.id !== tabId || !isAgentTaskPanelTab(tab) || tab.selectedTaskId === taskId) {
+        if (tab.id === tabId && isAgentTaskPanelTab(tab)) {
+          if (tab.selectedTaskId === taskId) {
+            return tab;
+          }
+          changed = true;
+          return {
+            ...tab,
+            selectedTaskId: taskId,
+          };
+        }
+
+        if (!isTerminalTab(tab)) {
+          return tab;
+        }
+
+        const nextLayout = updateWorkspacePane(tab.splitLayout, tabId, (pane) => {
+          if (pane.kind !== 'agent-tasks' || pane.selectedTaskId === taskId) {
+            return pane;
+          }
+          return {
+            ...pane,
+            selectedTaskId: taskId,
+          };
+        });
+        if (nextLayout === tab.splitLayout) {
           return tab;
         }
         changed = true;
-        return {
-          ...tab,
-          selectedTaskId: taskId,
-        };
+        return { ...tab, splitLayout: nextLayout };
       });
 
       if (!changed) {
@@ -2675,21 +3567,46 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
       let changed = false;
       const tabs = workspaceState.tabs.map((tab) => {
-        if (tab.id !== tabId || !isAgentTaskPanelTab(tab)) {
+        if (tab.id === tabId && isAgentTaskPanelTab(tab)) {
+          const nextFilter = {
+            ...tab.filter,
+            ...filterPatch,
+          };
+          if (JSON.stringify(nextFilter) === JSON.stringify(tab.filter)) {
+            return tab;
+          }
+          changed = true;
+          return {
+            ...tab,
+            filter: nextFilter,
+          };
+        }
+
+        if (!isTerminalTab(tab)) {
           return tab;
         }
-        const nextFilter = {
-          ...tab.filter,
-          ...filterPatch,
-        };
-        if (JSON.stringify(nextFilter) === JSON.stringify(tab.filter)) {
+
+        const nextLayout = updateWorkspacePane(tab.splitLayout, tabId, (pane) => {
+          if (pane.kind !== 'agent-tasks') {
+            return pane;
+          }
+          const nextFilter = {
+            ...pane.filter,
+            ...filterPatch,
+          };
+          if (JSON.stringify(nextFilter) === JSON.stringify(pane.filter)) {
+            return pane;
+          }
+          return {
+            ...pane,
+            filter: nextFilter,
+          };
+        });
+        if (nextLayout === tab.splitLayout) {
           return tab;
         }
         changed = true;
-        return {
-          ...tab,
-          filter: nextFilter,
-        };
+        return { ...tab, splitLayout: nextLayout };
       });
 
       if (!changed) {
@@ -2722,10 +3639,37 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (!workspaceState) {
         return state;
       }
+      const normalizedProjectPath = normalizePathIdentity(projectPath);
+      const normalizedStatusPath = normalizePathIdentity(status.path);
+      const activePaneByTab = new Map(state.activePaneByTab);
+      const existingPane = findPaneLocation(
+        workspaceState,
+        (pane) =>
+          pane.kind === 'worktree-diff'
+          && normalizePathIdentity(pane.projectPath) === normalizedProjectPath
+          && normalizePathIdentity(pane.gitStatus.path) === normalizedStatusPath,
+      );
       const existing = workspaceState.tabs.find(
-        (tab) => tab.kind === 'worktree-diff' && tab.projectPath === projectPath && tab.status.path === status.path,
+        (tab) =>
+          tab.kind === 'worktree-diff'
+          && normalizePathIdentity(tab.projectPath) === normalizedProjectPath
+          && normalizePathIdentity(tab.status.path) === normalizedStatusPath,
       );
       const workspaceStates = new Map(sourceWorkspaceStates);
+
+      if (existingPane) {
+        const nextWorkspaceState = updatePaneLocationInWorkspaceState(workspaceState, existingPane, (pane) =>
+          pane.kind === 'worktree-diff' && JSON.stringify(pane.gitStatus) !== JSON.stringify(status)
+            ? { ...pane, gitStatus: status }
+            : pane,
+        );
+        activePaneByTab.set(existingPane.tabId, existingPane.paneId);
+        workspaceStates.set(workspaceId, nextWorkspaceState);
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
+        };
+      }
 
       if (existing) {
         workspaceStates.set(workspaceId, {
@@ -2735,21 +3679,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
             tab.id === existing.id && tab.kind === 'worktree-diff' ? { ...tab, status } : tab,
           ),
         });
-      } else {
-        const tab: WorkspaceTab = {
-          kind: 'worktree-diff',
-          id: genId(),
-          projectPath,
-          status,
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
         };
-        workspaceStates.set(workspaceId, {
-          ...workspaceState,
-          tabs: [...workspaceState.tabs, tab],
-          activeTabId: tab.id,
-        });
       }
 
-      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+      const pane = createWorktreeDiffPane(projectPath, status);
+      const { nextWorkspaceState, nextActivePaneByTab } = insertPaneIntoWorkspaceState(
+        workspaceState,
+        activePaneByTab,
+        pane,
+      );
+      workspaceStates.set(workspaceId, nextWorkspaceState);
+      return {
+        activePaneByTab: nextActivePaneByTab,
+        ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, nextActivePaneByTab),
+      };
     }),
 
   openFileHistory: (workspaceId, projectPath, filePath) =>
@@ -2759,32 +3705,58 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (!workspaceState) {
         return state;
       }
-
+      const normalizedProjectPath = normalizePathIdentity(projectPath);
+      const normalizedFilePath = normalizePathIdentity(filePath);
+      const activePaneByTab = new Map(state.activePaneByTab);
+      const existingPane = findPaneLocation(
+        workspaceState,
+        (pane) =>
+          pane.kind === 'file-history'
+          && normalizePathIdentity(pane.projectPath) === normalizedProjectPath
+          && normalizePathIdentity(pane.filePath) === normalizedFilePath,
+      );
       const existing = workspaceState.tabs.find(
-        (tab) => tab.kind === 'file-history' && tab.projectPath === projectPath && tab.filePath === filePath,
+        (tab) =>
+          tab.kind === 'file-history'
+          && normalizePathIdentity(tab.projectPath) === normalizedProjectPath
+          && normalizePathIdentity(tab.filePath) === normalizedFilePath,
       );
       const workspaceStates = new Map(sourceWorkspaceStates);
+
+      if (existingPane) {
+        activePaneByTab.set(existingPane.tabId, existingPane.paneId);
+        workspaceStates.set(workspaceId, {
+          ...workspaceState,
+          activeTabId: existingPane.tabId,
+        });
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
+        };
+      }
 
       if (existing) {
         workspaceStates.set(workspaceId, {
           ...workspaceState,
           activeTabId: existing.id,
         });
-      } else {
-        const tab: WorkspaceTab = {
-          kind: 'file-history',
-          id: genId(),
-          projectPath,
-          filePath,
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
         };
-        workspaceStates.set(workspaceId, {
-          ...workspaceState,
-          tabs: [...workspaceState.tabs, tab],
-          activeTabId: tab.id,
-        });
       }
 
-      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+      const pane = createFileHistoryPane(projectPath, filePath);
+      const { nextWorkspaceState, nextActivePaneByTab } = insertPaneIntoWorkspaceState(
+        workspaceState,
+        activePaneByTab,
+        pane,
+      );
+      workspaceStates.set(workspaceId, nextWorkspaceState);
+      return {
+        activePaneByTab: nextActivePaneByTab,
+        ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, nextActivePaneByTab),
+      };
     }),
 
   openCommitDiff: ({ workspaceId, projectId, repoPath, commitHash, commitMessage, files }) =>
@@ -2798,10 +3770,40 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (!workspaceState) {
         return state;
       }
+      const normalizedRepoPath = normalizePathIdentity(repoPath);
+      const activePaneByTab = new Map(state.activePaneByTab);
+      const existingPane = findPaneLocation(
+        workspaceState,
+        (pane) =>
+          pane.kind === 'commit-diff'
+          && normalizePathIdentity(pane.repoPath) === normalizedRepoPath
+          && pane.commitHash === commitHash,
+      );
       const existing = workspaceState.tabs.find(
-        (tab) => tab.kind === 'commit-diff' && tab.repoPath === repoPath && tab.commitHash === commitHash,
+        (tab) =>
+          tab.kind === 'commit-diff'
+          && normalizePathIdentity(tab.repoPath) === normalizedRepoPath
+          && tab.commitHash === commitHash,
       );
       const workspaceStates = new Map(sourceWorkspaceStates);
+
+      if (existingPane) {
+        const nextWorkspaceState = updatePaneLocationInWorkspaceState(workspaceState, existingPane, (pane) =>
+          pane.kind === 'commit-diff'
+          && pane.commitMessage === commitMessage
+          && JSON.stringify(pane.files) === JSON.stringify(files)
+            ? pane
+            : pane.kind === 'commit-diff'
+              ? { ...pane, commitMessage, files }
+              : pane,
+        );
+        activePaneByTab.set(existingPane.tabId, existingPane.paneId);
+        workspaceStates.set(resolvedWorkspaceId, nextWorkspaceState);
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
+        };
+      }
 
       if (existing) {
         workspaceStates.set(resolvedWorkspaceId, {
@@ -2813,23 +3815,23 @@ export const useAppStore = create<AppStore>((set, get) => ({
               : tab,
           ),
         });
-      } else {
-        const tab: WorkspaceTab = {
-          kind: 'commit-diff',
-          id: genId(),
-          repoPath,
-          commitHash,
-          commitMessage,
-          files,
+        return {
+          activePaneByTab,
+          ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, activePaneByTab),
         };
-        workspaceStates.set(resolvedWorkspaceId, {
-          ...workspaceState,
-          tabs: [...workspaceState.tabs, tab],
-          activeTabId: tab.id,
-        });
       }
 
-      return buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, state.activePaneByTab);
+      const pane = createCommitDiffPane(repoPath, commitHash, commitMessage, files);
+      const { nextWorkspaceState, nextActivePaneByTab } = insertPaneIntoWorkspaceState(
+        workspaceState,
+        activePaneByTab,
+        pane,
+      );
+      workspaceStates.set(resolvedWorkspaceId, nextWorkspaceState);
+      return {
+        activePaneByTab: nextActivePaneByTab,
+        ...buildWorkspaceStatePatch(workspaceStates, state.paneRuntimeByPty, nextActivePaneByTab),
+      };
     }),
 
   closeDialog: () =>

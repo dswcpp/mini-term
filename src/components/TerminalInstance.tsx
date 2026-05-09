@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import type { PaneStatus, RunProfile } from '../types';
+import type { LayoutDragPayload, PaneStatus, RunProfile } from '../types';
 import { TerminalController } from './terminal/TerminalController';
 
 interface Props {
@@ -23,8 +23,8 @@ interface Props {
   onRenameTab?: () => void;
   onCloseTab?: () => void;
   onOpenSettings?: () => void;
-  onTabDrop?: (
-    sourceTabId: string,
+  onLayoutDrop?: (
+    payload: LayoutDragPayload,
     targetPaneId: string,
     direction: 'horizontal' | 'vertical',
     position: 'before' | 'after',

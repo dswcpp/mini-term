@@ -1,11 +1,34 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../store';
 import type { ProjectState } from '../types';
+
+const dragState = vi.hoisted(() => ({
+  beginLayoutDrag: vi.fn(),
+  getLayoutDragPayload: vi.fn<() => unknown>(() => null),
+  getLayoutDropTarget: vi.fn(() => null),
+  isLayoutDragging: vi.fn(() => false),
+  onLayoutDragEnd: vi.fn(() => () => {}),
+  setLayoutDropTarget: vi.fn(),
+}));
+
+vi.mock('../utils/dragState', () => dragState);
+
 import { TabBar } from './TabBar';
 
 describe('TabBar', () => {
   beforeEach(() => {
+    dragState.beginLayoutDrag.mockReset();
+    dragState.getLayoutDragPayload.mockReset();
+    dragState.getLayoutDragPayload.mockReturnValue(null);
+    dragState.getLayoutDropTarget.mockReset();
+    dragState.getLayoutDropTarget.mockReturnValue(null);
+    dragState.isLayoutDragging.mockReset();
+    dragState.isLayoutDragging.mockReturnValue(false);
+    dragState.onLayoutDragEnd.mockReset();
+    dragState.onLayoutDragEnd.mockImplementation(() => () => {});
+    dragState.setLayoutDropTarget.mockReset();
+
     useAppStore.setState((state) => ({
       ...state,
       config: {
@@ -191,5 +214,45 @@ describe('TabBar', () => {
     const taskTab = screen.getByTestId('workspace-tab-agent-tasks');
     expect(taskTab.textContent).toContain('Tasks');
     expect(screen.getByTestId('workspace-tab-detail-agent-tasks').textContent).toBe('mini-term');
+  });
+
+  it('shows sibling-page hint when a pane hovers over a tab drop target', () => {
+    dragState.isLayoutDragging.mockReturnValue(true);
+    dragState.getLayoutDragPayload.mockReturnValue({
+      kind: 'pane',
+      workspaceId: 'project-1',
+      tabId: 'terminal-tab',
+      paneId: 'pane-1',
+    });
+
+    render(<TabBar projectId="project-1" onNewTab={vi.fn()} onCloseTab={vi.fn()} />);
+
+    const targetTab = screen.getByTestId('workspace-tab-file-source');
+    Object.defineProperty(targetTab, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 100,
+        right: 240,
+        top: 0,
+        bottom: 32,
+        width: 140,
+        height: 32,
+        x: 100,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+
+    fireEvent.mouseEnter(targetTab, { clientX: 120, clientY: 10 });
+
+    expect(screen.getByTestId('workspace-tab-bar-pane-lift-hint').textContent).toContain('???????');
+    expect(targetTab.getAttribute('data-lift-target')).toBe('true');
+    expect(screen.getByTestId('workspace-tab-pane-lift-file-source').textContent).toContain('同级页面');
+    expect(dragState.setLayoutDropTarget).toHaveBeenCalledWith({
+      workspaceId: 'project-1',
+      tabId: 'file-source',
+      kind: 'tab-bar',
+      position: 'before',
+    });
   });
 });

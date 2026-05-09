@@ -20,7 +20,8 @@ let latestAutoRefreshOptions: Record<string, unknown> | undefined;
 let reloadMock = vi.fn();
 
 vi.mock('./useDocumentContent', () => ({
-  useDocumentContent: (filePath: string, enabled: boolean) => useDocumentContentMock(filePath, enabled),
+  useDocumentContent: (filePath: string, projectPath: string | undefined, enabled: boolean) =>
+    useDocumentContentMock(filePath, projectPath, enabled),
 }));
 
 vi.mock('../../hooks/useWorkspaceAutoRefresh', () => ({
@@ -53,7 +54,7 @@ describe('DocumentViewerPanel', () => {
     useWorkspaceAutoRefreshMock.mockClear();
     latestAutoRefreshOptions = undefined;
     reloadMock = vi.fn().mockResolvedValue(true);
-    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+    useDocumentContentMock.mockImplementation((_filePath: string, _projectPath: string | undefined, _enabled: boolean) => ({
       result: previewResult('markdown', { textContent: '# Title' }),
       loading: false,
       refreshing: false,
@@ -125,12 +126,13 @@ describe('DocumentViewerPanel', () => {
 
     expect(useDocumentContentMock).toHaveBeenCalledWith(
       'D:/code/JavaScript/mini-term/README.md',
+      'D:/code/JavaScript/mini-term',
       false,
     );
   });
 
   it('scrolls to and highlights the requested source line', async () => {
-    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+    useDocumentContentMock.mockImplementation((_filePath: string, _projectPath: string | undefined, _enabled: boolean) => ({
       result: previewResult('text', { textContent: 'line-1\nline-2\nline-3' }),
       loading: false,
       refreshing: false,
@@ -160,7 +162,7 @@ describe('DocumentViewerPanel', () => {
   });
 
   it('reapplies navigation when the same line is requested with a new request id', async () => {
-    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+    useDocumentContentMock.mockImplementation((_filePath: string, _projectPath: string | undefined, _enabled: boolean) => ({
       result: previewResult('text', { textContent: 'line-1\nline-2\nline-3' }),
       loading: false,
       refreshing: false,
@@ -207,7 +209,7 @@ describe('DocumentViewerPanel', () => {
   });
 
   it('defaults svg files to preview mode', () => {
-    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+    useDocumentContentMock.mockImplementation((_filePath: string, _projectPath: string | undefined, _enabled: boolean) => ({
       result: previewResult('svg', { textContent: '<svg />' }),
       loading: false,
       refreshing: false,
@@ -229,7 +231,7 @@ describe('DocumentViewerPanel', () => {
   });
 
   it('defaults mermaid files to preview mode and keeps the preview toggle available', () => {
-    useDocumentContentMock.mockImplementation((_filePath: string, _enabled: boolean) => ({
+    useDocumentContentMock.mockImplementation((_filePath: string, _projectPath: string | undefined, _enabled: boolean) => ({
       result: previewResult('text', { textContent: 'graph TD\n  A --> B' }),
       loading: false,
       refreshing: false,

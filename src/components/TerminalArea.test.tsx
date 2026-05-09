@@ -91,6 +91,7 @@ const terminalTab: TerminalTab = {
   splitLayout: {
     type: 'leaf',
     pane: {
+      kind: 'terminal',
       id: 'pane-1',
       sessionId: 'session-1',
       shellName: 'PowerShell',

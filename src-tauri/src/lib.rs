@@ -7,7 +7,7 @@ mod agent_policy;
 mod agent_tool_broker;
 mod ai_sessions;
 mod clipboard;
-mod config;
+pub mod config;
 mod editor;
 mod fs;
 mod git;
@@ -91,6 +91,7 @@ pub fn run() {
             fs::create_directory,
             fs::read_file_content,
             fs::rename_entry,
+            fs::delete_entry,
             fs::filter_directories,
             fs::read_document_preview,
             fs::read_image_data_url,

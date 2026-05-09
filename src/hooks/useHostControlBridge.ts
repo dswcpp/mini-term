@@ -13,7 +13,7 @@ import {
 import { createTerminalPane } from '../utils/session';
 import { getWorkspacePrimaryRootPath } from '../utils/workspace';
 import { collectPaneIds, findPane, insertSplit } from '../components/terminal/splitTree';
-import type { PaneState, ShellConfig, TerminalTab, UiNoticeTone, WorkspaceTab } from '../types';
+import type { PaneState, ShellConfig, TerminalTab, UiNoticeTone, WorkspacePane, WorkspaceTab } from '../types';
 
 interface HostControlRequest {
   requestId: string;
@@ -31,11 +31,15 @@ function getTerminalTab(workspaceId: string, tabId: string): TerminalTab | null 
   return tab && isTerminalTab(tab) ? tab : null;
 }
 
-function getFirstPane(node: TerminalTab['splitLayout']): PaneState {
+function getFirstPane(node: TerminalTab['splitLayout']): WorkspacePane {
   if (node.type === 'leaf') {
     return node.pane;
   }
   return getFirstPane(node.children[0]);
+}
+
+function isTerminalPane(pane: WorkspacePane | null | undefined): pane is PaneState {
+  return pane?.kind === 'terminal';
 }
 
 async function persistConfig() {
@@ -74,6 +78,9 @@ async function handleCreateTab(payload: Record<string, unknown>) {
     throw new Error('tab not found');
   }
   const pane = getFirstPane(tab.splitLayout);
+  if (!isTerminalPane(pane)) {
+    throw new Error('terminal pane not found');
+  }
 
   if (activate) {
     useAppStore.getState().setActiveWorkspace(workspaceId);
@@ -112,7 +119,7 @@ async function handleCloseTab(payload: Record<string, unknown>) {
   if (isTerminalTab(tab)) {
     const panes = collectPaneIds(tab.splitLayout)
       .map((paneId) => findPane(tab.splitLayout, paneId))
-      .filter((pane): pane is PaneState => Boolean(pane));
+      .filter((pane): pane is PaneState => isTerminalPane(pane));
     for (const pane of panes) {
       await closeManagedTerminalSession(pane.sessionId).catch(() => undefined);
     }

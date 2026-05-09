@@ -1,7 +1,8 @@
 import { memo, useRef } from 'react';
 import { Allotment } from 'allotment';
 import { TerminalInstance } from './TerminalInstance';
-import type { SplitNode } from '../types';
+import { WorkspacePaneHost } from './WorkspacePaneHost';
+import type { LayoutDragPayload, SplitNode, WorkspacePane } from '../types';
 import {
   areSplitNodesEquivalent,
   areSplitSizesEquivalent,
@@ -23,8 +24,8 @@ interface Props {
   onRenameTab?: () => void;
   onCloseTab?: () => void;
   onOpenSettings?: () => void;
-  onTabDrop?: (
-    sourceTabId: string,
+  onLayoutDrop?: (
+    payload: LayoutDragPayload,
     targetPaneId: string,
     direction: 'horizontal' | 'vertical',
     position: 'before' | 'after',
@@ -35,6 +36,10 @@ interface Props {
 function getNodeKey(node: SplitNode): string {
   if (node.type === 'leaf') return node.pane.id;
   return node.children.map(getNodeKey).join('-');
+}
+
+function isTerminalPane(pane: WorkspacePane) {
+  return pane.kind === 'terminal';
 }
 
 export const SplitLayout = memo(function SplitLayout({
@@ -52,7 +57,7 @@ export const SplitLayout = memo(function SplitLayout({
   onRenameTab,
   onCloseTab,
   onOpenSettings,
-  onTabDrop,
+  onLayoutDrop,
   onLayoutChange,
 }: Props) {
   const rafRef = useRef<number>(0);
@@ -63,6 +68,21 @@ export const SplitLayout = memo(function SplitLayout({
   nodeRef.current = node;
 
   if (node.type === 'leaf') {
+    if (!isTerminalPane(node.pane)) {
+      return (
+        <WorkspacePaneHost
+          workspaceId={workspaceId}
+          tabId={tabId}
+          pane={node.pane}
+          isActive={isTabActive && activePaneId === node.pane.id}
+          onActivatePane={onActivatePane}
+          onSplit={onSplit}
+          onClose={onClose}
+          onLayoutDrop={onLayoutDrop}
+        />
+      );
+    }
+
     return (
       <TerminalInstance
         workspaceId={workspaceId}
@@ -85,7 +105,7 @@ export const SplitLayout = memo(function SplitLayout({
         onRenameTab={onRenameTab}
         onCloseTab={onCloseTab}
         onOpenSettings={onOpenSettings}
-        onTabDrop={onTabDrop}
+        onLayoutDrop={onLayoutDrop}
       />
     );
   }
@@ -158,7 +178,7 @@ export const SplitLayout = memo(function SplitLayout({
             onRenameTab={onRenameTab}
             onCloseTab={onCloseTab}
             onOpenSettings={onOpenSettings}
-            onTabDrop={onTabDrop}
+            onLayoutDrop={onLayoutDrop}
             onLayoutChange={(updated) => handleChildLayoutChange(index, updated)}
           />
         </Allotment.Pane>

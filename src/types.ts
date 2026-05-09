@@ -155,11 +155,53 @@ export interface ShellConfig {
   args?: string[];
 }
 
-export interface SavedPane {
+export interface SavedTerminalPane {
+  kind?: "terminal";
   shellName: string;
   runCommand?: string;
   runProfile?: RunProfile;
 }
+
+export interface SavedFileViewerPane {
+  kind: "file-viewer";
+  filePath: string;
+  mode?: PreviewMode;
+  navigationTarget?: FileNavigationTarget;
+}
+
+export interface SavedWorktreeDiffPane {
+  kind: "worktree-diff";
+  projectPath: string;
+  gitStatus: GitFileStatus;
+}
+
+export interface SavedCommitDiffPane {
+  kind: "commit-diff";
+  repoPath: string;
+  commitHash: string;
+  commitMessage: string;
+  files: CommitFileInfo[];
+}
+
+export interface SavedFileHistoryPane {
+  kind: "file-history";
+  projectPath: string;
+  filePath: string;
+}
+
+export interface SavedAgentTaskPanelPane {
+  kind: "agent-tasks";
+  filter: AgentTaskPanelFilter;
+  selectedTaskId?: string;
+}
+
+export type SavedPane =
+  | SavedTerminalPane
+  | SavedFileViewerPane
+  | SavedWorktreeDiffPane
+  | SavedCommitDiffPane
+  | SavedFileHistoryPane
+  | SavedAgentTaskPanelPane;
 
 export type SavedSplitNode =
   | { type: "leaf"; pane: SavedPane }
@@ -280,6 +322,12 @@ export interface PaneLayoutState {
   ptyId: number;
 }
 
+export interface TerminalPaneState extends PaneLayoutState {
+  kind: "terminal";
+  status: PaneStatus;
+  phase: SessionPhase;
+}
+
 export interface PaneRuntimeState {
   ptyId: number;
   paneId: string;
@@ -357,6 +405,57 @@ export interface AgentTaskPanelTab {
   status: PaneStatus;
 }
 
+export interface FileViewerPaneState {
+  kind: "file-viewer";
+  id: string;
+  filePath: string;
+  mode: PreviewMode;
+  navigationTarget?: FileNavigationTarget;
+  status: PaneStatus;
+}
+
+export interface WorktreeDiffPaneState {
+  kind: "worktree-diff";
+  id: string;
+  projectPath: string;
+  gitStatus: GitFileStatus;
+  status: PaneStatus;
+}
+
+export interface CommitDiffPaneState {
+  kind: "commit-diff";
+  id: string;
+  repoPath: string;
+  commitHash: string;
+  commitMessage: string;
+  files: CommitFileInfo[];
+  status: PaneStatus;
+}
+
+export interface FileHistoryPaneState {
+  kind: "file-history";
+  id: string;
+  projectPath: string;
+  filePath: string;
+  status: PaneStatus;
+}
+
+export interface AgentTaskPanelPaneState {
+  kind: "agent-tasks";
+  id: string;
+  filter: AgentTaskPanelFilter;
+  selectedTaskId?: string;
+  status: PaneStatus;
+}
+
+export type WorkspacePane =
+  | TerminalPaneState
+  | FileViewerPaneState
+  | WorktreeDiffPaneState
+  | CommitDiffPaneState
+  | FileHistoryPaneState
+  | AgentTaskPanelPaneState;
+
 export type WorkspaceTab =
   | TerminalTab
   | FileViewerTab
@@ -365,8 +464,33 @@ export type WorkspaceTab =
   | FileHistoryTab
   | AgentTaskPanelTab;
 
+export type LayoutDropZone = "top" | "bottom" | "left" | "right";
+export type LayoutDropPosition = "before" | "after";
+
+export type LayoutDragPayload =
+  | {
+      kind: "tab";
+      workspaceId: string;
+      tabId: string;
+    }
+  | {
+      kind: "pane";
+      workspaceId: string;
+      tabId: string;
+      paneId: string;
+    };
+
+export interface LayoutDropTarget {
+  workspaceId: string;
+  tabId: string;
+  paneId?: string;
+  kind: "tab-bar" | "tab-surface" | "pane";
+  zone?: LayoutDropZone;
+  position?: LayoutDropPosition;
+}
+
 export type SplitNode =
-  | { type: "leaf"; pane: PaneState }
+  | { type: "leaf"; pane: WorkspacePane }
   | {
       type: "split";
       direction: "horizontal" | "vertical";
@@ -374,10 +498,7 @@ export type SplitNode =
       sizes: number[];
     };
 
-export interface PaneState extends PaneLayoutState {
-  status: PaneStatus;
-  phase: SessionPhase;
-}
+export type PaneState = TerminalPaneState;
 
 export interface AiSession {
   id: string;

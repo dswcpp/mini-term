@@ -18,8 +18,15 @@ import { isTauriRuntime } from '../../runtime/tauriRuntime';
 import { useAppStore, selectPaneRuntimeBySessionId, selectSessionById } from '../../store';
 import { useTerminalCompletions } from '../../hooks/useTerminalCompletions';
 import { resolveTheme } from '../../theme';
-import type { PaneStatus, RunProfile } from '../../types';
-import { getDraggingTabId } from '../../utils/dragState';
+import type { LayoutDragPayload, LayoutDropZone, PaneStatus, RunProfile } from '../../types';
+import {
+  beginLayoutDrag,
+  getLayoutDragPayload,
+  getLayoutDropTarget,
+  isLayoutDragging,
+  onLayoutDragEnd,
+  setLayoutDropTarget,
+} from '../../utils/dragState';
 import { showContextMenu } from '../../utils/contextMenu';
 import { showPrompt } from '../../utils/prompt';
 import {
@@ -29,13 +36,13 @@ import {
   registerTerminalKeyHandler,
 } from '../../utils/terminalCache';
 import { buildTerminalContextMenu } from './terminalContextMenu';
-import { TerminalChrome, type TerminalDragKind, type TerminalDropZone } from './TerminalChrome';
+import { TerminalChrome, type TerminalDragKind } from './TerminalChrome';
 import { RunProfileInspector } from './RunProfileInspector';
 import { TerminalViewport, type TerminalViewportContextLink } from './TerminalViewport';
 
 const appWindow = isTauriRuntime() ? getCurrentWindow() : null;
 
-function getDropZone(rect: DOMRect, clientX: number, clientY: number): TerminalDropZone {
+function getDropZone(rect: DOMRect, clientX: number, clientY: number): LayoutDropZone {
   const x = (clientX - rect.left) / rect.width;
   const y = (clientY - rect.top) / rect.height;
   const aboveMain = y < x;
@@ -67,8 +74,8 @@ interface TerminalControllerProps {
   onRenameTab?: () => void;
   onCloseTab?: () => void;
   onOpenSettings?: () => void;
-  onTabDrop?: (
-    sourceTabId: string,
+  onLayoutDrop?: (
+    payload: LayoutDragPayload,
     targetPaneId: string,
     direction: 'horizontal' | 'vertical',
     position: 'before' | 'after',
@@ -96,11 +103,11 @@ export const TerminalController = memo(function TerminalController({
   onRenameTab,
   onCloseTab,
   onOpenSettings,
-  onTabDrop,
+  onLayoutDrop,
 }: TerminalControllerProps) {
   const previousStatusRef = useRef<PaneStatus | undefined>(status);
   const [dragKind, setDragKind] = useState<TerminalDragKind | null>(null);
-  const [tabDropZone, setTabDropZone] = useState<TerminalDropZone | null>(null);
+  const [tabDropZone, setTabDropZone] = useState<LayoutDropZone | null>(null);
   const [notifyOnCompletion, setNotifyOnCompletion] = useState(false);
   const completionEnabled = isActive && isVisible;
   const setPaneRunCommand = useAppStore((state) => state.setPaneRunCommand);
@@ -164,46 +171,73 @@ export const TerminalController = memo(function TerminalController({
     setNotifyOnCompletion(false);
   }, [ptyId]);
 
-  const isTabDrag = (event: DragEvent<HTMLDivElement>) =>
-    event.dataTransfer.types.includes('application/tab-id');
-
   const clearDragState = useCallback(() => {
     setDragKind(null);
     setTabDropZone(null);
-  }, []);
+    const currentTarget = getLayoutDropTarget();
+    if (
+      currentTarget?.kind === 'pane'
+      && currentTarget.workspaceId === workspaceId
+      && currentTarget.tabId === tabId
+      && currentTarget.paneId === paneId
+    ) {
+      setLayoutDropTarget(null);
+    }
+  }, [paneId, tabId, workspaceId]);
 
-  const handleDragMove = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-
-    if (isTabDrag(event)) {
-      const rect = event.currentTarget.getBoundingClientRect();
-      setDragKind('tab');
-      setTabDropZone(getDropZone(rect, event.clientX, event.clientY));
+  useEffect(() => onLayoutDragEnd((result) => {
+    setTabDropZone(null);
+    if (
+      result.payload.workspaceId !== workspaceId
+      || result.dropTarget?.kind !== 'pane'
+      || result.dropTarget.tabId !== tabId
+      || result.dropTarget.paneId !== paneId
+      || !result.dropTarget.zone
+      || !paneId
+    ) {
       return;
     }
 
+    const direction = result.dropTarget.zone === 'left' || result.dropTarget.zone === 'right'
+      ? 'horizontal'
+      : 'vertical';
+    const position = result.dropTarget.zone === 'left' || result.dropTarget.zone === 'top'
+      ? 'before'
+      : 'after';
+    onLayoutDrop?.(result.payload, paneId, direction, position);
+  }), [onLayoutDrop, paneId, tabId, workspaceId]);
+
+  const handleLayoutPointerMove = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    const payload = getLayoutDragPayload();
+    if (!isLayoutDragging() || !payload || payload.workspaceId !== workspaceId || !paneId) {
+      if (tabDropZone) {
+        setTabDropZone(null);
+      }
+      return;
+    }
+
+    const zone = getDropZone(event.currentTarget.getBoundingClientRect(), event.clientX, event.clientY);
+    if (tabDropZone !== zone) {
+      setTabDropZone(zone);
+    }
+    setLayoutDropTarget({
+      workspaceId,
+      tabId,
+      paneId,
+      kind: 'pane',
+      zone,
+    });
+  }, [paneId, tabDropZone, tabId, workspaceId]);
+
+  const handleFileDragMove = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
     setDragKind('file');
-    setTabDropZone(null);
   }, []);
 
   const handleDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       event.preventDefault();
-
-      const currentDragKind = dragKind ?? (isTabDrag(event) ? 'tab' : 'file');
-      clearDragState();
-
-      if (currentDragKind === 'tab' && paneId && onTabDrop) {
-        const sourceTabId = getDraggingTabId();
-        if (sourceTabId) {
-          const rect = event.currentTarget.getBoundingClientRect();
-          const zone = getDropZone(rect, event.clientX, event.clientY);
-          const direction = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical';
-          const position = zone === 'left' || zone === 'top' ? 'before' : 'after';
-          onTabDrop(sourceTabId, paneId, direction, position);
-          return;
-        }
-      }
+      setDragKind(null);
 
       const filePath = event.dataTransfer.getData('text/plain').trim();
       if (filePath) {
@@ -212,8 +246,27 @@ export const TerminalController = memo(function TerminalController({
         focusTerminal();
       }
     },
-    [clearDragState, dragKind, focusTerminal, onTabDrop, paneId, sessionId],
+    [focusTerminal, sessionId],
   );
+
+  const handlePaneDragHandleMouseDown = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || !paneId) {
+      return;
+    }
+
+    onActivatePane?.(paneId);
+    beginLayoutDrag(
+      {
+        kind: 'pane',
+        workspaceId,
+        tabId,
+        paneId,
+      },
+      event.clientX,
+      event.clientY,
+      event.currentTarget.closest('[data-layout-drag-root="true"]') as HTMLElement | null,
+    );
+  }, [onActivatePane, paneId, tabId, workspaceId]);
 
   const handleCopy = useCallback(() => {
     const selection = getCachedTerminal(sessionId)?.term.getSelection();
@@ -491,21 +544,25 @@ export const TerminalController = memo(function TerminalController({
         void handleRunCommand();
       }}
       onRunCommandContextMenu={handleRunCommandContextMenu}
+      onPaneDragHandleMouseDown={handlePaneDragHandleMouseDown}
       onSplitRight={paneId && onSplit ? () => onSplit(paneId, 'horizontal') : undefined}
       onSplitDown={paneId && onSplit ? () => onSplit(paneId, 'vertical') : undefined}
       onRestart={paneId && onRestart ? () => onRestart(paneId) : undefined}
       onClosePane={paneId && onClose ? () => onClose(paneId) : undefined}
       onAcceptCompletion={acceptItem}
       onSetCompletionIndex={setSelectedIndex}
-      onDragEnterCapture={handleDragMove}
+      onLayoutMouseEnter={handleLayoutPointerMove}
+      onLayoutMouseMove={handleLayoutPointerMove}
+      onLayoutMouseLeave={clearDragState}
+      onDragEnterCapture={handleFileDragMove}
       onDragOverCapture={(event) => {
-        handleDragMove(event);
-        event.dataTransfer.dropEffect = isTabDrag(event) ? 'move' : 'copy';
+        handleFileDragMove(event);
+        event.dataTransfer.dropEffect = 'copy';
       }}
       onDragLeaveCapture={(event) => {
         const nextTarget = event.relatedTarget as Node | null;
         if (!nextTarget || !event.currentTarget.contains(nextTarget)) {
-          clearDragState();
+          setDragKind(null);
         }
       }}
       onDropCapture={handleDrop}

@@ -321,7 +321,7 @@ pub fn list_directory(project_root: String, path: String) -> Result<Vec<FileEntr
             };
             Some(FileEntry {
                 name,
-                path: full_path.to_string_lossy().to_string(),
+                path: display_path(&full_path),
                 is_dir,
                 ignored,
             })
@@ -347,7 +347,7 @@ pub fn complete_path_entries(path: String) -> Result<Vec<FileEntry>, String> {
             let full_path = entry.path();
             Some(FileEntry {
                 name,
-                path: full_path.to_string_lossy().to_string(),
+                path: display_path(&full_path),
                 is_dir,
                 ignored: false,
             })
@@ -967,6 +967,18 @@ pub fn rename_entry(project_root: String, old_path: String, new_name: String) ->
     fs::rename(&guarded_old.target_path, &guarded_new.target_path)
         .map_err(|e| map_fs_write_error(&e))?;
     Ok(display_path(&guarded_new.target_path))
+}
+
+#[tauri::command]
+pub fn delete_entry(project_root: String, path: String) -> Result<(), String> {
+    let guarded = resolve_workspace_path_in_root(&project_root, &path, false)?;
+    let metadata =
+        fs::metadata(&guarded.target_path).map_err(|e| map_fs_write_error(&e))?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(&guarded.target_path).map_err(|e| map_fs_write_error(&e))
+    } else {
+        fs::remove_file(&guarded.target_path).map_err(|e| map_fs_write_error(&e))
+    }
 }
 
 #[tauri::command]

@@ -236,6 +236,7 @@ describe('workspace root management', () => {
           splitLayout: {
             type: 'leaf',
             pane: {
+              kind: 'terminal',
               id: 'pane-1',
               sessionId: 'session-7',
               shellName: 'powershell',
@@ -274,6 +275,7 @@ describe('workspace root management', () => {
     expect(duplicatedWorkspace?.savedLayout?.tabs[0]?.splitLayout).toEqual({
       type: 'leaf',
       pane: {
+        kind: 'terminal',
         shellName: 'powershell',
         runCommand: 'npm run dev',
         runProfile: {

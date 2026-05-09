@@ -15,6 +15,38 @@ vi.mock('../runtime/agentApi', () => ({
   closeAgentTask: (...args: unknown[]) => closeAgentTask(...args),
 }));
 
+function findAgentTasksPane() {
+  const workspaceState = useAppStore.getState().workspaceStates.get('workspace-1');
+  for (const tab of workspaceState?.tabs ?? []) {
+    if (tab.kind === 'agent-tasks') {
+      return tab;
+    }
+
+    if (tab.kind !== 'terminal') {
+      continue;
+    }
+
+    const stack = [tab.splitLayout];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node) {
+        continue;
+      }
+
+      if (node.type === 'leaf') {
+        if (node.pane.kind === 'agent-tasks') {
+          return node.pane;
+        }
+        continue;
+      }
+
+      stack.push(...node.children);
+    }
+  }
+
+  return undefined;
+}
+
 describe('AgentInbox', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -183,8 +215,9 @@ describe('AgentInbox', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Open Tasks' }));
 
     await waitFor(() => {
-      const workspaceState = useAppStore.getState().workspaceStates.get('workspace-1');
-      expect(workspaceState?.tabs.some((tab) => tab.kind === 'agent-tasks')).toBe(true);
+      expect(findAgentTasksPane()).toMatchObject({
+        kind: 'agent-tasks',
+      });
     });
   });
 
@@ -222,9 +255,7 @@ describe('AgentInbox', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Open Task Panel' }));
 
     await waitFor(() => {
-      const workspaceState = useAppStore.getState().workspaceStates.get('workspace-1');
-      const taskTab = workspaceState?.tabs.find((tab) => tab.kind === 'agent-tasks');
-      expect(taskTab && 'selectedTaskId' in taskTab ? taskTab.selectedTaskId : undefined).toBe('task-1');
+      expect(findAgentTasksPane()?.selectedTaskId).toBe('task-1');
     });
   });
 

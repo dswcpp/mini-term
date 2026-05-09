@@ -1,0 +1,73 @@
+﻿{
+    "terminalFontSize":  14,
+    "uiFontSize":  13,
+    "workspaces":  [
+                       {
+                           "id":  "workspace-1",
+                           "savedLayout":  {
+                                               "tabs":  [
+                                                            {
+                                                                "splitLayout":  {
+                                                                                    "panes":  [
+
+                                                                                              ],
+                                                                                    "pane":  {
+                                                                                                 "kind":  "terminal",
+                                                                                                 "shellName":  "powershell"
+                                                                                             },
+                                                                                    "type":  "leaf"
+                                                                                },
+                                                                "customTitle":  "Alpha"
+                                                            },
+                                                            {
+                                                                "splitLayout":  {
+                                                                                    "panes":  [
+
+                                                                                              ],
+                                                                                    "pane":  {
+                                                                                                 "kind":  "terminal",
+                                                                                                 "shellName":  "cmd"
+                                                                                             },
+                                                                                    "type":  "leaf"
+                                                                                }
+                                                            }
+                                                        ],
+                                               "activeTabIndex":  0
+                                           },
+                           "name":  "desktop-smoke",
+                           "pinned":  true,
+                           "expandedDirsByRoot":  {
+
+                                                  },
+                           "createdAt":  1,
+                           "lastOpenedAt":  1,
+                           "roots":  [
+                                         {
+                                             "path":  "D:\\code\\JavaScript\\mini-term\\scripts\\..\\.tmp-tests\\desktop-ui-smoke-20260420-135934\\workspace",
+                                             "name":  "desktop-smoke",
+                                             "id":  "root-1",
+                                             "role":  "primary"
+                                         }
+                                     ]
+                       }
+                   ],
+    "theme":  {
+                  "preset":  "warm-carbon",
+                  "windowEffect":  "auto"
+              },
+    "defaultShell":  "powershell",
+    "lastWorkspaceId":  "workspace-1",
+    "availableShells":  [
+                            {
+                                "command":  "powershell.exe",
+                                "name":  "powershell"
+                            },
+                            {
+                                "command":  "cmd.exe",
+                                "name":  "cmd"
+                            }
+                        ],
+    "recentWorkspaces":  [
+
+                         ]
+}

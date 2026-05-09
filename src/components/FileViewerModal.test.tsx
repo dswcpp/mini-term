@@ -653,6 +653,7 @@ describe('FileViewerModal', () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenNthCalledWith(2, 'read_image_data_url', {
         path: 'D:\\\\code\\\\JavaScript\\\\mini-term\\\\mini-term.ico',
+        projectRoot: expect.any(String),
       });
       expect(image.getAttribute('src')).toBe('data:image/x-icon;base64,AAABAAEA');
     });
@@ -677,6 +678,7 @@ describe('FileViewerModal', () => {
 
     expect(invokeMock).toHaveBeenNthCalledWith(2, 'read_binary_preview_base64', {
       path: 'D:\\\\code\\\\JavaScript\\\\mini-term\\\\docs\\\\guide.pdf',
+      projectRoot: expect.any(String),
     });
 
     fireEvent.click(screen.getByTestId('pdf-preview-zoom-in'));
@@ -741,6 +743,7 @@ describe('FileViewerModal', () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenNthCalledWith(4, 'read_binary_preview_base64', {
         path: 'D:\\\\code\\\\JavaScript\\\\mini-term\\\\docs\\\\guide.pdf',
+        projectRoot: expect.any(String),
       });
     });
   });
@@ -846,6 +849,7 @@ describe('FileViewerModal', () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenNthCalledWith(2, 'read_binary_preview_base64', {
         path: 'D:\\\\code\\\\JavaScript\\\\mini-term\\\\docs\\\\broken.docx',
+        projectRoot: expect.any(String),
       });
       expect(renderDocxPreviewMock).toHaveBeenCalled();
       expect(screen.getByTestId('docx-rendered').textContent).toBe('DOCX CONTENT');

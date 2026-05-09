@@ -1,0 +1,1074 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": 1776668105144,
+  "host": {
+    "appVersion": "0.2.18",
+    "desktopPid": 9276,
+    "transportMode": "app-data-snapshot",
+    "lastHeartbeatAt": 1776668105144,
+    "hostControl": {
+      "transport": "named-pipe",
+      "endpoint": "\\\\.\\pipe\\mini-term-host-control-019da9aa-ef4a-7fa2-a43e-060ba4cc2939",
+      "capabilities": [
+        "pty-control",
+        "runtime-observation-detail",
+        "ui-control"
+      ]
+    }
+  },
+  "ptys": [
+    {
+      "ptyId": 1,
+      "sessionId": "session-1",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+      "rootPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776668050253,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 23812,
+      "createdAt": 1776668049787,
+      "updatedAt": 1776668052635,
+      "exitCode": null
+    },
+    {
+      "ptyId": 2,
+      "sessionId": "session-2",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+      "rootPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776668050313,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 39528,
+      "createdAt": 1776668049853,
+      "updatedAt": 1776668052636,
+      "exitCode": null
+    },
+    {
+      "ptyId": 3,
+      "sessionId": "session-3",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+      "rootPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776668050518,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 33472,
+      "createdAt": 1776668050074,
+      "updatedAt": 1776668052636,
+      "exitCode": null
+    }
+  ],
+  "watchers": [],
+  "recentEvents": [
+    {
+      "eventId": "019da9aa-ef4a-7fa2-a43e-05fa61132157",
+      "kind": "host-started",
+      "timestamp": 1776668045130,
+      "summary": "Mini-Term desktop host initialized runtime MCP state.",
+      "payloadPreview": {
+        "appVersion": "0.2.18",
+        "desktopPid": 9276
+      }
+    },
+    {
+      "eventId": "019da9ab-017b-7f52-b349-d9ef9574ce9e",
+      "kind": "pty-session-created",
+      "timestamp": 1776668049787,
+      "summary": "PTY 1 session session-1 created in D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "mode": "human",
+        "ptyId": 1,
+        "sessionId": "session-1",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da9ab-01a3-7191-8fc0-4a40262a4e38",
+      "kind": "pty-output",
+      "timestamp": 1776668049827,
+      "summary": "PTY 1 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 1,
+        "sessionId": "session-1"
+      }
+    },
+    {
+      "eventId": "019da9ab-01bd-7370-b04f-875b09602074",
+      "kind": "pty-session-created",
+      "timestamp": 1776668049853,
+      "summary": "PTY 2 session session-2 created in D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "mode": "human",
+        "ptyId": 2,
+        "sessionId": "session-2",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da9ab-01df-7f93-9046-a3d2efc888f3",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668049887,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-01e2-7e22-a814-0484c5012422",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668049890,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-01e8-7ea3-8a19-3ef3b363a59f",
+      "kind": "pty-output",
+      "timestamp": 1776668049896,
+      "summary": "PTY 2 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 2,
+        "sessionId": "session-2"
+      }
+    },
+    {
+      "eventId": "019da9ab-0202-77d1-aa3e-d4bc02d6dc99",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668049922,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-020a-70a1-95cf-9cb20aa910db",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668049930,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-022c-7ef3-8d41-29282f60123c",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668049964,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-022f-7292-bce2-cf1fac75fe27",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668049967,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-028c-7a30-8fcd-403f06a0f28a",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668050060,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-028d-7763-8f3c-7c301bef29f0",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668050061,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-029a-72b0-af71-a8281a849a83",
+      "kind": "pty-session-created",
+      "timestamp": 1776668050074,
+      "summary": "PTY 3 session session-3 created in D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "mode": "human",
+        "ptyId": 3,
+        "sessionId": "session-3",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da9ab-029f-71c0-95fb-84d9eb14ef82",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668050079,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-02a0-71c2-807a-98bf13927a7c",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668050080,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-02a3-7d80-9a63-ae07c8ece40a",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668050083,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-02a8-7c73-900e-696944d71596",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668050088,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-02be-72b0-a402-c66e1fb6d0be",
+      "kind": "pty-output",
+      "timestamp": 1776668050110,
+      "summary": "PTY 3 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 3,
+        "sessionId": "session-3"
+      }
+    },
+    {
+      "eventId": "019da9ab-02c9-73a1-b12c-62b7b1900531",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668050121,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-034d-7403-9206-29cc550353bb",
+      "kind": "pty-output",
+      "timestamp": 1776668050253,
+      "summary": "PTY 1 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>\u001b[1C\u001b]0;C:\\Windows...",
+        "ptyId": 1,
+        "sessionId": "session-1"
+      }
+    },
+    {
+      "eventId": "019da9ab-0389-7903-ada2-3b066a4f215e",
+      "kind": "pty-output",
+      "timestamp": 1776668050313,
+      "summary": "PTY 2 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>\u001b[1C\u001b]0;C:\\Windows...",
+        "ptyId": 2,
+        "sessionId": "session-2"
+      }
+    },
+    {
+      "eventId": "019da9ab-0456-7213-bede-6a904b098dd0",
+      "kind": "pty-output",
+      "timestamp": 1776668050518,
+      "summary": "PTY 3 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace>\u001b[1C\u001b]0;C:\\Windows...",
+        "ptyId": 3,
+        "sessionId": "session-3"
+      }
+    },
+    {
+      "eventId": "019da9ab-05ef-7b01-8496-21be439f3291",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668050927,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-05f0-73e0-b15d-6656ebf7a079",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668050928,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-060c-75d0-b249-d73bb47e3cc7",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668050956,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0616-78b3-965c-89292dd5efce",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668050966,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-062d-7c42-b4a5-c6176a8829d6",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668050989,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-062d-7c42-b4a5-c62b794ade6b",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668050989,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0644-7e40-b2f5-56826e29fc21",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051012,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0651-7fa0-b7c5-42215a1be2e6",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051025,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0654-7ba2-949c-2cc0ec2f5839",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051028,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0655-70f2-806d-31f489e2490e",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051029,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0673-73a0-8316-194b83e863ef",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051059,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-06b4-70e0-b5e5-f59e63f90b58",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051124,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-06bf-7662-a01f-93041de221d3",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051135,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-06c1-7da1-9108-08956b49b270",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051137,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0823-70d1-87f8-915cb40b9a70",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051491,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0824-7f02-85f5-d5dda4b4280b",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051492,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-083c-78a3-9220-85a09c0d4672",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051516,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0842-7c40-aa0d-19ca8fd9c360",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051522,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0858-7c92-bb8a-865f5aab80e9",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051544,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0861-7762-95f9-95de1db7784d",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051553,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0877-75c0-a9de-8f004b318cc3",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051575,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-08a2-7d90-89a4-2a1d1d46513a",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051618,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-08bf-7da2-96b4-58e1ab4c5e6a",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051647,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-08c0-7a23-829a-ff8e8fb7c27d",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051648,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-08c5-7350-837f-3e6bd2a54426",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051653,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-08c7-7652-a4f4-21d1eb231aa3",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051655,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-08c8-7260-8405-0ffa31187594",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051656,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-08e0-7bb1-b322-e8bb39c77fbf",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051680,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0990-7b32-befe-22123a0e4e70",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051856,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0991-7dd0-9ff7-f812b1f951ef",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051857,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09aa-7830-ac2d-6eb29afb5a0f",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051882,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09b2-7a32-a76a-3a50e24084ff",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051890,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09ca-7553-a239-d0d627c85c4a",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051914,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09ca-7553-a239-d0e5b9825306",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051914,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09df-7093-bdcd-1c9b0e66ce58",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051935,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09ee-77f1-9003-81c0f5ef7c31",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051950,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09f2-7691-b9c2-0d517a1a50b4",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668051954,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-09f4-7eb3-97c8-8d5df85887c7",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668051956,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0a27-7072-892f-7349d438654f",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052007,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0a51-76f3-8ec4-62c51093767f",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052049,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0a55-77e0-bd6b-a2d1c4244f3e",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052053,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0a58-77f0-bd37-78d76e076d69",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052056,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0af6-70f1-8e0d-3c01fe0d0cbd",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052214,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0af7-7d71-aa3e-9bf122b5ef34",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052215,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b13-7831-a967-d2230b4974ee",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052243,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b14-7ed2-a7d3-3006de468937",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052244,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b2d-7ce3-bdb9-9b25214edef6",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052269,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b3f-72e3-b95a-a50511e0f4c0",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052287,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b55-73d1-a83f-b80c4c652657",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052309,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b60-7b63-9ae2-bb1144c2803d",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052320,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b7f-7fb1-a05b-a0cf6eded58f",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052351,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b82-7ea0-a130-2fadd7db64e8",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052354,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0b9f-79e3-b7fd-b6d1089e161f",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052383,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0ba1-7690-98a0-766c724f75f5",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052385,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0c68-7ce0-9a9e-facad2cd6930",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052584,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0c69-7cd0-8de4-3def0e700b25",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052585,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0c82-72a1-b011-50c47563d9a6",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052610,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0c97-7132-a867-d3d94d806037",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052631,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0c9b-7553-aea5-315034bcea80",
+      "kind": "pty-status-change",
+      "timestamp": 1776668052635,
+      "summary": "PTY 1 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 1,
+        "sessionId": "session-1",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da9ab-0c9c-70f2-bc6e-cb0c1271264e",
+      "kind": "pty-status-change",
+      "timestamp": 1776668052636,
+      "summary": "PTY 3 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 3,
+        "sessionId": "session-3",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da9ab-0c9c-70f2-bc6e-cb186401863d",
+      "kind": "pty-status-change",
+      "timestamp": 1776668052636,
+      "summary": "PTY 2 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 2,
+        "sessionId": "session-2",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da9ab-0cac-7c12-9abc-1015e11ca456",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052652,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0cad-7580-9eb3-68c9925c032b",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052653,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0cc2-7981-b723-bf84f38ba8c0",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052674,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0ccc-7a80-ba1f-53df7cfd672b",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052684,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0ce8-7be1-a6fc-5f36835390d6",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052712,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0d01-7222-86d7-0059a28c6422",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052737,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0d08-73a0-9a0b-bb4776018a03",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052744,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0d21-73f2-8345-66f440d54737",
+      "kind": "fs-watch-started",
+      "timestamp": 1776668052769,
+      "summary": "Started watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "projectPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace",
+        "recursive": true,
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0d21-73f2-8345-67048691c5a3",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052769,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0d24-7d30-9f59-1bcb3e9c46a3",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668052772,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0e7b-7463-b002-ba353d872075",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668053115,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    },
+    {
+      "eventId": "019da9ab-0ed3-7da2-96cd-7125c16966f0",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776668053203,
+      "summary": "Stopped watching D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\JavaScript\\mini-term\\.tmp-tests\\desktop-ui-smoke-20260420-145357\\workspace"
+      }
+    }
+  ]
+}

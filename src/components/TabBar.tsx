@@ -1,5 +1,6 @@
-import { memo, useCallback } from 'react';
+import { memo, useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import {
+  saveLayoutToConfig,
   useAppStore,
   selectWorkspaceConfig,
   selectWorkspaceState,
@@ -7,7 +8,14 @@ import {
   selectTabRuntimeStatus,
 } from '../store';
 import { isMarkdownFilePath } from '../utils/markdownPreview';
-import { setDraggingTabId } from '../utils/dragState';
+import {
+  beginLayoutDrag,
+  getLayoutDragPayload,
+  getLayoutDropTarget,
+  isLayoutDragging,
+  onLayoutDragEnd,
+  setLayoutDropTarget,
+} from '../utils/dragState';
 import {
   resolveDocumentLanguage,
   summarizeDocumentLanguages,
@@ -16,7 +24,7 @@ import {
 import { EyeIcon } from './documentViewer/controls';
 import { resolveViewerSkin } from './documentViewer/viewerSkin';
 import { StatusDot } from './StatusDot';
-import type { ThemePresetId, WorkspaceTab } from '../types';
+import type { LayoutDragPayload, LayoutDropPosition, ThemePresetId, WorkspacePane, WorkspaceTab } from '../types';
 import { isMermaidPreviewFilePath, isSvgPreviewFilePath } from '../utils/documentPreview';
 
 type FileViewerTab = Extract<WorkspaceTab, { kind: 'file-viewer' }>;
@@ -71,10 +79,27 @@ function getPathDetail(path: string) {
   return detail && detail !== '.' ? detail : undefined;
 }
 
+function getPaneTitle(pane: WorkspacePane) {
+  switch (pane.kind) {
+    case 'terminal':
+      return pane.shellName;
+    case 'file-viewer':
+      return getFileName(pane.filePath);
+    case 'worktree-diff':
+      return getFileName(pane.gitStatus.path);
+    case 'commit-diff':
+      return pane.commitMessage || pane.commitHash.slice(0, 7);
+    case 'file-history':
+      return getFileName(pane.filePath);
+    case 'agent-tasks':
+      return 'Tasks';
+  }
+}
+
 function getTabText(tab: WorkspaceTab, rootPaths: string[], workspaceName?: string) {
   if (tab.kind === 'terminal') {
     return {
-      primary: tab.customTitle ?? (tab.splitLayout.type === 'leaf' ? tab.splitLayout.pane.shellName : 'split'),
+      primary: tab.customTitle ?? (tab.splitLayout.type === 'leaf' ? getPaneTitle(tab.splitLayout.pane) : 'Split View'),
       secondary: undefined,
     };
   }
@@ -320,56 +345,118 @@ function LanguageBadge({
 interface Props {
   workspaceId?: string;
   projectId?: string;
-  onNewTab: (e: React.MouseEvent) => void;
+  onNewTab: (e: ReactMouseEvent) => void;
   onCloseTab: (tabId: string) => void;
 }
 
 interface TabBarItemProps {
+  workspaceId: string;
   tab: WorkspaceTab;
   isActive: boolean;
   rootPaths: string[];
   workspaceName?: string;
   themePreset: ThemePresetId;
+  dropPosition?: LayoutDropPosition | null;
+  dropKind?: LayoutDragPayload['kind'] | null;
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
+  onTabDragOver: (tabId: string, position: LayoutDropPosition, dragKind: LayoutDragPayload['kind']) => void;
+  onTabDragLeave: (tabId: string) => void;
 }
 
 const TabBarItem = memo(function TabBarItem({
+  workspaceId,
   tab,
   isActive,
   rootPaths,
   workspaceName,
   themePreset,
+  dropPosition,
+  dropKind,
   onSelectTab,
   onCloseTab,
+  onTabDragOver,
+  onTabDragLeave,
 }: TabBarItemProps) {
-  const draggable = tab.kind === 'terminal';
   const terminalStatus = useAppStore(selectTabRuntimeStatus(tab.id));
   const text = getTabText(tab, rootPaths, workspaceName);
   const badgeMeta = tab.kind === 'terminal' || tab.kind === 'agent-tasks' ? null : getLanguageBadgeMeta(tab);
+  const isPaneLiftTarget = dropPosition != null && dropKind === 'pane';
+
+  const updateDropPosition = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    const payload = getLayoutDragPayload();
+    if (
+      !isLayoutDragging()
+      || !payload
+      || payload.workspaceId !== workspaceId
+      || (payload.kind === 'tab' && payload.tabId === tab.id)
+    ) {
+      if (dropPosition) {
+        onTabDragLeave(tab.id);
+      }
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position = event.clientX < rect.left + rect.width / 2 ? 'before' : 'after';
+    onTabDragOver(tab.id, position, payload.kind);
+  }, [dropPosition, onTabDragLeave, onTabDragOver, tab.id, workspaceId]);
+
+  const clearDropPosition = useCallback(() => {
+    onTabDragLeave(tab.id);
+  }, [onTabDragLeave, tab.id]);
+
+  const handleDragStart = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    beginLayoutDrag(
+      {
+        kind: 'tab',
+        workspaceId,
+        tabId: tab.id,
+      },
+      event.clientX,
+      event.clientY,
+      event.currentTarget,
+    );
+  }, [tab.id, workspaceId]);
 
   return (
     <div
       data-testid={`workspace-tab-${tab.id}`}
+      data-lift-target={isPaneLiftTarget ? 'true' : 'false'}
       className={`relative flex cursor-pointer items-center gap-2 whitespace-nowrap px-3 py-[7px] transition-all duration-100 ${
-        isActive
-          ? 'bg-[var(--bg-terminal)] text-[var(--text-primary)]'
-          : 'text-[var(--text-muted)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-secondary)]'
+        isPaneLiftTarget
+          ? 'animate-glow bg-[color-mix(in_srgb,var(--color-info)_14%,var(--bg-terminal))] text-[var(--text-primary)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--color-info)_40%,transparent),0_0_0_1px_color-mix(in_srgb,var(--color-info)_18%,transparent)]'
+          : isActive
+            ? 'bg-[var(--bg-terminal)] text-[var(--text-primary)]'
+            : 'text-[var(--text-muted)] hover:bg-[var(--border-subtle)] hover:text-[var(--text-secondary)]'
       }`}
-      draggable={draggable}
-      onDragStart={(event) => {
-        if (!draggable) return;
-        setDraggingTabId(tab.id);
-        event.dataTransfer.setData('application/tab-id', tab.id);
-        event.dataTransfer.effectAllowed = 'move';
-      }}
-      onDragEnd={() => {
-        if (draggable) {
-          setDraggingTabId(null);
-        }
-      }}
+      onMouseDown={handleDragStart}
+      onMouseEnter={updateDropPosition}
+      onMouseMove={updateDropPosition}
+      onMouseLeave={clearDropPosition}
       onClick={() => onSelectTab(tab.id)}
     >
+      {dropPosition && (
+        <span
+          className={`absolute top-1 bottom-1 z-10 w-[2px] rounded-full ${
+            dropKind === 'pane' ? 'bg-[var(--color-info)]' : 'bg-[var(--accent)]'
+          } ${
+            dropPosition === 'before' ? 'left-0' : 'right-0'
+          }`}
+        />
+      )}
+      {dropPosition && dropKind === 'pane' && (
+        <span
+          data-testid={`workspace-tab-pane-lift-${tab.id}`}
+          className="animate-slide-in absolute top-1 left-1/2 z-10 -translate-x-1/2 rounded-full border border-[color-mix(in_srgb,var(--color-info)_55%,transparent)] bg-[color-mix(in_srgb,var(--bg-terminal)_88%,var(--color-info)_12%)] px-1.5 py-px text-[8px] font-semibold tracking-[0.08em] text-[var(--color-info)]"
+        >
+          同级页面
+        </span>
+      )}
       {isActive && <span className="absolute right-2 bottom-0 left-2 h-[2px] rounded-full bg-[var(--accent)]" />}
       {tab.kind === 'terminal' && <StatusDot status={terminalStatus} />}
       {tab.kind === 'file-viewer' && <FileTabLeading tab={tab} />}
@@ -402,6 +489,9 @@ const TabBarItem = memo(function TabBarItem({
       ) : null}
       <span
         className="ml-0.5 text-[9px] text-[var(--text-muted)] transition-colors hover:text-[var(--color-error)]"
+        onMouseDown={(event) => {
+          event.stopPropagation();
+        }}
         onClick={(event) => {
           event.stopPropagation();
           onCloseTab(tab.id);
@@ -416,9 +506,16 @@ const TabBarItem = memo(function TabBarItem({
 export function TabBar({ workspaceId, projectId, onNewTab, onCloseTab }: Props) {
   const resolvedWorkspaceId = workspaceId ?? projectId;
   const setActiveTab = useAppStore((state) => state.setActiveTab);
+  const moveWorkspacePaneToTab = useAppStore((state) => state.moveWorkspacePaneToTab);
+  const reorderWorkspaceTab = useAppStore((state) => state.reorderWorkspaceTab);
   const workspaceState = useAppStore(selectWorkspaceState(resolvedWorkspaceId ?? ''));
   const workspace = useAppStore(selectWorkspaceConfig(resolvedWorkspaceId));
   const themePreset = useAppStore(selectThemePreset);
+  const [dropTarget, setDropTarget] = useState<{
+    tabId: string;
+    position: LayoutDropPosition;
+    dragKind: LayoutDragPayload['kind'];
+  } | null>(null);
   const rootPaths = workspace?.roots.map((root) => root.path) ?? [];
   const handleSelectTab = useCallback(
     (tabId: string) => {
@@ -429,21 +526,122 @@ export function TabBar({ workspaceId, projectId, onNewTab, onCloseTab }: Props) 
     },
     [resolvedWorkspaceId, setActiveTab],
   );
+  const handleTabDragOver = useCallback(
+    (tabId: string, position: LayoutDropPosition, dragKind: LayoutDragPayload['kind']) => {
+      if (!resolvedWorkspaceId) {
+        return;
+      }
+
+      setDropTarget((previous) =>
+        previous?.tabId === tabId && previous.position === position && previous.dragKind === dragKind
+          ? previous
+          : { tabId, position, dragKind },
+      );
+      setLayoutDropTarget({
+        workspaceId: resolvedWorkspaceId,
+        tabId,
+        kind: 'tab-bar',
+        position,
+      });
+    },
+    [resolvedWorkspaceId],
+  );
+  const handleTabDragLeave = useCallback(
+    (tabId: string) => {
+      setDropTarget((previous) => (previous?.tabId === tabId ? null : previous));
+      if (!resolvedWorkspaceId) {
+        return;
+      }
+
+      const currentTarget = getLayoutDropTarget();
+      if (
+        currentTarget?.kind === 'tab-bar'
+        && currentTarget.workspaceId === resolvedWorkspaceId
+        && currentTarget.tabId === tabId
+      ) {
+        setLayoutDropTarget(null);
+      }
+    },
+    [resolvedWorkspaceId],
+  );
+
+  useEffect(() => {
+    if (!resolvedWorkspaceId) {
+      return undefined;
+    }
+
+    return onLayoutDragEnd((result) => {
+      setDropTarget(null);
+      if (
+        result.payload.workspaceId !== resolvedWorkspaceId
+        || result.dropTarget?.kind !== 'tab-bar'
+        || result.dropTarget.workspaceId !== resolvedWorkspaceId
+        || !result.dropTarget.position
+      ) {
+        return;
+      }
+
+      if (result.payload.kind === 'tab') {
+        if (result.payload.tabId === result.dropTarget.tabId) {
+          return;
+        }
+        reorderWorkspaceTab(
+          resolvedWorkspaceId,
+          result.payload.tabId,
+          result.dropTarget.tabId,
+          result.dropTarget.position,
+        );
+      } else {
+        moveWorkspacePaneToTab(
+          resolvedWorkspaceId,
+          result.payload.tabId,
+          result.payload.paneId,
+          result.dropTarget.tabId,
+          result.dropTarget.position,
+        );
+      }
+      saveLayoutToConfig(resolvedWorkspaceId);
+    });
+  }, [moveWorkspacePaneToTab, reorderWorkspaceTab, resolvedWorkspaceId]);
 
   if (!resolvedWorkspaceId || !workspaceState) return null;
 
   return (
-    <div className="flex select-none overflow-x-auto border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[11px]">
+    <div
+      className={`relative flex select-none overflow-x-auto border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[11px] ${
+        dropTarget?.dragKind === 'pane' ? 'pt-5' : ''
+      }`}
+      onMouseLeave={() => {
+        setDropTarget(null);
+        const currentTarget = getLayoutDropTarget();
+        if (currentTarget?.kind === 'tab-bar' && currentTarget.workspaceId === resolvedWorkspaceId) {
+          setLayoutDropTarget(null);
+        }
+      }}
+    >
+      {dropTarget?.dragKind === 'pane' && (
+        <div
+          data-testid="workspace-tab-bar-pane-lift-hint"
+          className="pointer-events-none absolute top-1 left-1/2 z-10 -translate-x-1/2 rounded-full border border-[color-mix(in_srgb,var(--color-info)_35%,transparent)] bg-[color-mix(in_srgb,var(--bg-elevated)_88%,var(--color-info)_12%)] px-2.5 py-0.5 text-[9px] font-semibold tracking-[0.08em] text-[var(--color-info)] shadow-[0_2px_10px_color-mix(in_srgb,var(--color-info)_12%,transparent)]"
+        >
+          拖到标签左右侧，提升为同级页面
+        </div>
+      )}
       {workspaceState.tabs.map((tab) => (
         <TabBarItem
           key={tab.id}
+          workspaceId={resolvedWorkspaceId}
           tab={tab}
           isActive={tab.id === workspaceState.activeTabId}
           rootPaths={rootPaths}
           workspaceName={workspace?.name}
           themePreset={themePreset}
+          dropPosition={dropTarget?.tabId === tab.id ? dropTarget.position : null}
+          dropKind={dropTarget?.tabId === tab.id ? dropTarget.dragKind : null}
           onSelectTab={handleSelectTab}
           onCloseTab={onCloseTab}
+          onTabDragOver={handleTabDragOver}
+          onTabDragLeave={handleTabDragLeave}
         />
       ))}
       <div

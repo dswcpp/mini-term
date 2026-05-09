@@ -1,1 +1,1 @@
-export { showPrompt } from './interactionDialog';
+export { showConfirm, showPrompt } from './interactionDialog';

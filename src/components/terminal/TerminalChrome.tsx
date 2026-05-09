@@ -4,18 +4,17 @@ import type {
   MouseEvent,
   ReactNode,
 } from 'react';
-import type { PaneStatus, TerminalSessionMeta } from '../../types';
+import type { LayoutDropZone, PaneStatus, TerminalSessionMeta } from '../../types';
 import type { TerminalCompletionItem } from '../../hooks/useTerminalCompletions';
 import { StatusDot } from '../StatusDot';
 import { SessionCommandTimeline } from './SessionCommandTimeline';
 import { SessionMetaStrip } from './SessionMetaStrip';
 
-export type TerminalDropZone = 'top' | 'bottom' | 'left' | 'right';
 export type TerminalDragKind = 'file' | 'tab';
 
 const noDragStyle = { WebkitAppRegion: 'no-drag' } as unknown as CSSProperties;
 
-const dropZoneOverlay: Record<TerminalDropZone, CSSProperties> = {
+const dropZoneOverlay: Record<LayoutDropZone, CSSProperties> = {
   top: { top: 0, left: 0, right: 0, height: '50%' },
   bottom: { bottom: 0, left: 0, right: 0, height: '50%' },
   left: { top: 0, left: 0, bottom: 0, width: '50%' },
@@ -54,7 +53,7 @@ export interface TerminalChromeProps {
   status?: PaneStatus;
   session?: TerminalSessionMeta;
   dragKind: TerminalDragKind | null;
-  tabDropZone: TerminalDropZone | null;
+  tabDropZone: LayoutDropZone | null;
   completionItems: TerminalCompletionItem[];
   completionIndex: number;
   menuOpen: boolean;
@@ -64,12 +63,16 @@ export interface TerminalChromeProps {
   onActivatePane: () => void;
   onRunCommand: () => void;
   onRunCommandContextMenu: (event: MouseEvent<HTMLButtonElement>) => void;
+  onPaneDragHandleMouseDown?: (event: MouseEvent<HTMLButtonElement>) => void;
   onSplitRight?: () => void;
   onSplitDown?: () => void;
   onRestart?: () => void;
   onClosePane?: () => void;
   onAcceptCompletion: (item: TerminalCompletionItem) => Promise<boolean>;
   onSetCompletionIndex: (index: number) => void;
+  onLayoutMouseEnter: (event: MouseEvent<HTMLDivElement>) => void;
+  onLayoutMouseMove: (event: MouseEvent<HTMLDivElement>) => void;
+  onLayoutMouseLeave: () => void;
   onDragEnterCapture: (event: DragEvent<HTMLDivElement>) => void;
   onDragOverCapture: (event: DragEvent<HTMLDivElement>) => void;
   onDragLeaveCapture: (event: DragEvent<HTMLDivElement>) => void;
@@ -93,12 +96,16 @@ export function TerminalChrome({
   onActivatePane,
   onRunCommand,
   onRunCommandContextMenu,
+  onPaneDragHandleMouseDown,
   onSplitRight,
   onSplitDown,
   onRestart,
   onClosePane,
   onAcceptCompletion,
   onSetCompletionIndex,
+  onLayoutMouseEnter,
+  onLayoutMouseMove,
+  onLayoutMouseLeave,
   onDragEnterCapture,
   onDragOverCapture,
   onDragLeaveCapture,
@@ -106,6 +113,7 @@ export function TerminalChrome({
 }: TerminalChromeProps) {
   return (
     <div
+      data-layout-drag-root="true"
       className="flex h-full w-full flex-col"
       data-tab-id={tabId}
       onContextMenu={onContextMenu}
@@ -116,6 +124,23 @@ export function TerminalChrome({
         style={noDragStyle}
       >
         {status && <StatusDot status={status} />}
+        {paneId && onPaneDragHandleMouseDown && (
+          <PaneActionButton title="Move Pane" onClick={() => undefined} onContextMenu={(event) => event.preventDefault()}>
+            <span
+              className="inline-flex h-full w-full cursor-grab items-center justify-center active:cursor-grabbing"
+              onMouseDown={onPaneDragHandleMouseDown}
+            >
+              <svg viewBox="0 0 12 12" className="h-2.5 w-2.5 fill-current" aria-hidden="true">
+                <circle cx="4" cy="3" r="0.8" />
+                <circle cx="8" cy="3" r="0.8" />
+                <circle cx="4" cy="6" r="0.8" />
+                <circle cx="8" cy="6" r="0.8" />
+                <circle cx="4" cy="9" r="0.8" />
+                <circle cx="8" cy="9" r="0.8" />
+              </svg>
+            </span>
+          </PaneActionButton>
+        )}
         <SessionMetaStrip shellName={shellName} session={session} />
 
         <PaneActionButton title="运行命令（右键管理）" onClick={onRunCommand} onContextMenu={onRunCommandContextMenu}>
@@ -209,6 +234,9 @@ export function TerminalChrome({
 
       <div
         className="relative flex-1 bg-[var(--bg-terminal)]"
+        onMouseEnter={onLayoutMouseEnter}
+        onMouseMove={onLayoutMouseMove}
+        onMouseLeave={onLayoutMouseLeave}
         onDragEnterCapture={onDragEnterCapture}
         onDragOverCapture={onDragOverCapture}
         onDragLeaveCapture={onDragLeaveCapture}

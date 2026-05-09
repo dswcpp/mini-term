@@ -1,0 +1,1721 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": 1776665005159,
+  "host": {
+    "appVersion": "0.2.18",
+    "desktopPid": 44788,
+    "transportMode": "app-data-snapshot",
+    "lastHeartbeatAt": 1776665005159,
+    "hostControl": {
+      "transport": "named-pipe",
+      "endpoint": "\\\\.\\pipe\\mini-term-host-control-019da97b-441e-7e83-85c4-764dd926c675",
+      "capabilities": [
+        "pty-control",
+        "runtime-observation-detail",
+        "ui-control"
+      ]
+    }
+  },
+  "ptys": [
+    {
+      "ptyId": 1,
+      "sessionId": "session-1",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term",
+      "rootPath": "D:\\code\\JavaScript\\mini-term",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933034,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 48736,
+      "createdAt": 1776664932225,
+      "updatedAt": 1776664935156,
+      "exitCode": null
+    },
+    {
+      "ptyId": 2,
+      "sessionId": "session-2",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "rootPath": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933024,
+      "outputPreview": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "outputTail": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "startupOutput": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 50032,
+      "createdAt": 1776664932246,
+      "updatedAt": 1776664935156,
+      "exitCode": null
+    },
+    {
+      "ptyId": 3,
+      "sessionId": "session-3",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "rootPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933408,
+      "outputPreview": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>        \n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+      "outputTail": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>        \n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+      "startupOutput": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>        \n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+      "cols": 188,
+      "rows": 55,
+      "rootPid": 38672,
+      "createdAt": 1776664932274,
+      "updatedAt": 1776664935657,
+      "exitCode": null
+    },
+    {
+      "ptyId": 4,
+      "sessionId": "session-4",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term",
+      "rootPath": "D:\\code\\JavaScript\\mini-term",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933183,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 43844,
+      "createdAt": 1776664932394,
+      "updatedAt": 1776664935657,
+      "exitCode": null
+    },
+    {
+      "ptyId": 5,
+      "sessionId": "session-5",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "rootPath": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933518,
+      "outputPreview": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "outputTail": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "startupOutput": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 5452,
+      "createdAt": 1776664932676,
+      "updatedAt": 1776664935657,
+      "exitCode": null
+    },
+    {
+      "ptyId": 6,
+      "sessionId": "session-6",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "rootPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933490,
+      "outputPreview": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "outputTail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "startupOutput": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "cols": 184,
+      "rows": 49,
+      "rootPid": 47196,
+      "createdAt": 1776664932703,
+      "updatedAt": 1776664935657,
+      "exitCode": null
+    },
+    {
+      "ptyId": 7,
+      "sessionId": "session-7",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term",
+      "rootPath": "D:\\code\\JavaScript\\mini-term",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933670,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 52100,
+      "createdAt": 1776664932846,
+      "updatedAt": 1776664936158,
+      "exitCode": null
+    },
+    {
+      "ptyId": 8,
+      "sessionId": "session-8",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term",
+      "rootPath": "D:\\code\\JavaScript\\mini-term",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933736,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 11980,
+      "createdAt": 1776664933015,
+      "updatedAt": 1776664936162,
+      "exitCode": null
+    },
+    {
+      "ptyId": 9,
+      "sessionId": "session-9",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term",
+      "rootPath": "D:\\code\\JavaScript\\mini-term",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933905,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 20816,
+      "createdAt": 1776664933198,
+      "updatedAt": 1776664936159,
+      "exitCode": null
+    },
+    {
+      "ptyId": 10,
+      "sessionId": "session-10",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\JavaScript\\mini-term",
+      "rootPath": "D:\\code\\JavaScript\\mini-term",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664933936,
+      "outputPreview": "PS D:\\code\\JavaScript\\mini-term>",
+      "outputTail": "PS D:\\code\\JavaScript\\mini-term>",
+      "startupOutput": "PS D:\\code\\JavaScript\\mini-term>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 9720,
+      "createdAt": 1776664933263,
+      "updatedAt": 1776664936158,
+      "exitCode": null
+    },
+    {
+      "ptyId": 11,
+      "sessionId": "session-11",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "rootPath": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664935094,
+      "outputPreview": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "outputTail": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "startupOutput": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 53804,
+      "createdAt": 1776664934389,
+      "updatedAt": 1776664937164,
+      "exitCode": null
+    },
+    {
+      "ptyId": 12,
+      "sessionId": "session-12",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "rootPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664935108,
+      "outputPreview": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "outputTail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "startupOutput": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "cols": 27,
+      "rows": 49,
+      "rootPid": 53864,
+      "createdAt": 1776664934408,
+      "updatedAt": 1776664937164,
+      "exitCode": null
+    },
+    {
+      "ptyId": 13,
+      "sessionId": "session-13",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "rootPath": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664935159,
+      "outputPreview": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "outputTail": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "startupOutput": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 54012,
+      "createdAt": 1776664934559,
+      "updatedAt": 1776664937164,
+      "exitCode": null
+    },
+    {
+      "ptyId": 14,
+      "sessionId": "session-14",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "rootPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664935235,
+      "outputPreview": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "outputTail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "startupOutput": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "cols": 27,
+      "rows": 49,
+      "rootPid": 54092,
+      "createdAt": 1776664934598,
+      "updatedAt": 1776664937665,
+      "exitCode": null
+    },
+    {
+      "ptyId": 15,
+      "sessionId": "session-15",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "rootPath": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664936507,
+      "outputPreview": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "outputTail": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "startupOutput": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 53800,
+      "createdAt": 1776664935806,
+      "updatedAt": 1776664938668,
+      "exitCode": null
+    },
+    {
+      "ptyId": 16,
+      "sessionId": "session-16",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "rootPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664936621,
+      "outputPreview": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "outputTail": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "startupOutput": "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\nPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+      "cols": 27,
+      "rows": 49,
+      "rootPid": 47812,
+      "createdAt": 1776664935826,
+      "updatedAt": 1776664938667,
+      "exitCode": null
+    },
+    {
+      "ptyId": 17,
+      "sessionId": "session-17",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "rootPath": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664936640,
+      "outputPreview": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "outputTail": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "startupOutput": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 54376,
+      "createdAt": 1776664935951,
+      "updatedAt": 1776664938668,
+      "exitCode": null
+    },
+    {
+      "ptyId": 18,
+      "sessionId": "session-18",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "rootPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664936744,
+      "outputPreview": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>",
+      "outputTail": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>",
+      "startupOutput": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 54460,
+      "createdAt": 1776664935997,
+      "updatedAt": 1776664939169,
+      "exitCode": null
+    },
+    {
+      "ptyId": 19,
+      "sessionId": "session-19",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "rootPath": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664936817,
+      "outputPreview": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "outputTail": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "startupOutput": "PS D:\\code\\Python\\ros_it_mgt_client_pkg>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 54792,
+      "createdAt": 1776664936258,
+      "updatedAt": 1776664939169,
+      "exitCode": null
+    },
+    {
+      "ptyId": 20,
+      "sessionId": "session-20",
+      "shell": "powershell",
+      "shellKind": "powershell",
+      "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "rootPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+      "mode": "human",
+      "phase": "running",
+      "status": "idle",
+      "lastOutputAt": 1776664936885,
+      "outputPreview": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>",
+      "outputTail": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>",
+      "startupOutput": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>",
+      "cols": 80,
+      "rows": 24,
+      "rootPid": 54948,
+      "createdAt": 1776664936327,
+      "updatedAt": 1776664939169,
+      "exitCode": null
+    }
+  ],
+  "watchers": [],
+  "recentEvents": [
+    {
+      "eventId": "019da97b-441e-7e83-85c4-76315e39ee84",
+      "kind": "host-started",
+      "timestamp": 1776664921118,
+      "summary": "Mini-Term desktop host initialized runtime MCP state.",
+      "payloadPreview": {
+        "appVersion": "0.2.18",
+        "desktopPid": 44788
+      }
+    },
+    {
+      "eventId": "019da97b-6f81-7100-ab87-56c9b27ae71e",
+      "kind": "pty-session-created",
+      "timestamp": 1776664932225,
+      "summary": "PTY 1 session session-1 created in D:\\code\\JavaScript\\mini-term.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term",
+        "mode": "human",
+        "ptyId": 1,
+        "sessionId": "session-1",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-6f96-7a33-be75-8477b3aafe6e",
+      "kind": "pty-session-created",
+      "timestamp": 1776664932246,
+      "summary": "PTY 2 session session-2 created in D:\\code\\Python\\ros_it_mgt_client_pkg.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+        "mode": "human",
+        "ptyId": 2,
+        "sessionId": "session-2",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-6fb2-7613-a6e5-583f0aadbf63",
+      "kind": "pty-session-created",
+      "timestamp": 1776664932274,
+      "summary": "PTY 3 session session-3 created in D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+        "mode": "human",
+        "ptyId": 3,
+        "sessionId": "session-3",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-6fc1-7c62-a672-38be03a632d2",
+      "kind": "pty-output",
+      "timestamp": 1776664932289,
+      "summary": "PTY 1 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 1,
+        "sessionId": "session-1"
+      }
+    },
+    {
+      "eventId": "019da97b-7029-7af1-80bf-c1ccd4599d9b",
+      "kind": "pty-output",
+      "timestamp": 1776664932393,
+      "summary": "PTY 2 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 2,
+        "sessionId": "session-2"
+      }
+    },
+    {
+      "eventId": "019da97b-702a-7931-b6d2-554d1784ec6b",
+      "kind": "pty-session-created",
+      "timestamp": 1776664932394,
+      "summary": "PTY 4 session session-4 created in D:\\code\\JavaScript\\mini-term.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term",
+        "mode": "human",
+        "ptyId": 4,
+        "sessionId": "session-4",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-703b-76b3-8964-0bc62743bc8e",
+      "kind": "pty-output",
+      "timestamp": 1776664932411,
+      "summary": "PTY 3 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 3,
+        "sessionId": "session-3"
+      }
+    },
+    {
+      "eventId": "019da97b-7089-79f3-8ba3-726c323636fc",
+      "kind": "pty-output",
+      "timestamp": 1776664932489,
+      "summary": "PTY 4 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 4,
+        "sessionId": "session-4"
+      }
+    },
+    {
+      "eventId": "019da97b-7144-7341-825d-34a382d9257d",
+      "kind": "pty-session-created",
+      "timestamp": 1776664932676,
+      "summary": "PTY 5 session session-5 created in D:\\code\\Python\\ros_it_mgt_client_pkg.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+        "mode": "human",
+        "ptyId": 5,
+        "sessionId": "session-5",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-715f-7d60-8e3d-cf236ac5a007",
+      "kind": "pty-session-created",
+      "timestamp": 1776664932703,
+      "summary": "PTY 6 session session-6 created in D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+        "mode": "human",
+        "ptyId": 6,
+        "sessionId": "session-6",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-717d-7c33-846f-19f69c82a271",
+      "kind": "pty-output",
+      "timestamp": 1776664932733,
+      "summary": "PTY 5 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 5,
+        "sessionId": "session-5"
+      }
+    },
+    {
+      "eventId": "019da97b-71c6-7801-9828-c2e1dfd2bfad",
+      "kind": "pty-output",
+      "timestamp": 1776664932806,
+      "summary": "PTY 6 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 6,
+        "sessionId": "session-6"
+      }
+    },
+    {
+      "eventId": "019da97b-71ee-7341-8214-236781cd4769",
+      "kind": "pty-session-created",
+      "timestamp": 1776664932846,
+      "summary": "PTY 7 session session-7 created in D:\\code\\JavaScript\\mini-term.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term",
+        "mode": "human",
+        "ptyId": 7,
+        "sessionId": "session-7",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-724f-7ab1-915f-0bde633055d6",
+      "kind": "pty-output",
+      "timestamp": 1776664932943,
+      "summary": "PTY 7 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 7,
+        "sessionId": "session-7"
+      }
+    },
+    {
+      "eventId": "019da97b-7255-7712-b00e-84d39c637fbc",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664932949,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-726e-7c80-a152-83f44848d385",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664932974,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7297-7810-b7ee-d7a3d437b457",
+      "kind": "pty-session-created",
+      "timestamp": 1776664933015,
+      "summary": "PTY 8 session session-8 created in D:\\code\\JavaScript\\mini-term.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term",
+        "mode": "human",
+        "ptyId": 8,
+        "sessionId": "session-8",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7299-77f2-ad78-072ae2239347",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664933017,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-72a0-7f40-8479-0b177a0255ee",
+      "kind": "pty-output",
+      "timestamp": 1776664933024,
+      "summary": "PTY 2 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\ros_it_mgt_client_pkg>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EX...",
+        "ptyId": 2,
+        "sessionId": "session-2"
+      }
+    },
+    {
+      "eventId": "019da97b-72aa-7470-93c3-da81a32b428d",
+      "kind": "pty-output",
+      "timestamp": 1776664933034,
+      "summary": "PTY 1 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE\u0007\u001b[?25h",
+        "ptyId": 1,
+        "sessionId": "session-1"
+      }
+    },
+    {
+      "eventId": "019da97b-72f6-7030-9231-1b1009939e19",
+      "kind": "pty-output",
+      "timestamp": 1776664933110,
+      "summary": "PTY 8 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 8,
+        "sessionId": "session-8"
+      }
+    },
+    {
+      "eventId": "019da97b-72ff-7b13-9a6a-d548919f7563",
+      "kind": "pty-output",
+      "timestamp": 1776664933119,
+      "summary": "PTY 3 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\power...",
+        "ptyId": 3,
+        "sessionId": "session-3"
+      }
+    },
+    {
+      "eventId": "019da97b-7322-7411-8b67-550c354026a6",
+      "kind": "pty-output",
+      "timestamp": 1776664933154,
+      "summary": "PTY 6 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[H\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[H\u001b]0;C...",
+        "ptyId": 6,
+        "sessionId": "session-6"
+      }
+    },
+    {
+      "eventId": "019da97b-733f-7a12-91d5-f3d95dee7cc9",
+      "kind": "pty-output",
+      "timestamp": 1776664933183,
+      "summary": "PTY 4 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE\u0007\u001b[?25h",
+        "ptyId": 4,
+        "sessionId": "session-4"
+      }
+    },
+    {
+      "eventId": "019da97b-734e-74c2-bcfc-59863664bb77",
+      "kind": "pty-session-created",
+      "timestamp": 1776664933199,
+      "summary": "PTY 9 session session-9 created in D:\\code\\JavaScript\\mini-term.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term",
+        "mode": "human",
+        "ptyId": 9,
+        "sessionId": "session-9",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7350-7932-8827-3086b87660f2",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664933200,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7360-79c1-9d16-de3196352c4f",
+      "kind": "pty-output",
+      "timestamp": 1776664933216,
+      "summary": "PTY 3 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[8;55;28t\u001b[HPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>        \r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K...",
+        "ptyId": 3,
+        "sessionId": "session-3"
+      }
+    },
+    {
+      "eventId": "019da97b-738f-7e82-8267-6544932453ec",
+      "kind": "pty-session-created",
+      "timestamp": 1776664933263,
+      "summary": "PTY 10 session session-10 created in D:\\code\\JavaScript\\mini-term.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\JavaScript\\mini-term",
+        "mode": "human",
+        "ptyId": 10,
+        "sessionId": "session-10",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-73a5-7d31-b4fa-0b9fded1b436",
+      "kind": "pty-output",
+      "timestamp": 1776664933285,
+      "summary": "PTY 9 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 9,
+        "sessionId": "session-9"
+      }
+    },
+    {
+      "eventId": "019da97b-73dc-7c63-8053-030f868b0e98",
+      "kind": "pty-output",
+      "timestamp": 1776664933340,
+      "summary": "PTY 10 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 10,
+        "sessionId": "session-10"
+      }
+    },
+    {
+      "eventId": "019da97b-73ef-7631-8344-3a14bb45bce3",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664933359,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-73fe-7e03-8e47-aa20ff9fcacb",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664933374,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-740d-7913-b2a6-9d450d55bcf1",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664933389,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7410-7580-ae6d-be412170fb52",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664933392,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7417-7e53-81af-398caf967b3d",
+      "kind": "pty-output",
+      "timestamp": 1776664933399,
+      "summary": "PTY 6 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 6,
+        "sessionId": "session-6"
+      }
+    },
+    {
+      "eventId": "019da97b-741d-72d1-9588-e794244bae51",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664933405,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7421-7702-8a45-5bdf279846c0",
+      "kind": "pty-output",
+      "timestamp": 1776664933409,
+      "summary": "PTY 3 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[HPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K...",
+        "ptyId": 3,
+        "sessionId": "session-3"
+      }
+    },
+    {
+      "eventId": "019da97b-7472-7b53-9e95-08811809876e",
+      "kind": "pty-output",
+      "timestamp": 1776664933490,
+      "summary": "PTY 6 emitted output.",
+      "payloadPreview": {
+        "preview": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+        "ptyId": 6,
+        "sessionId": "session-6"
+      }
+    },
+    {
+      "eventId": "019da97b-748e-75b2-a542-4c27f0d8251d",
+      "kind": "pty-output",
+      "timestamp": 1776664933518,
+      "summary": "PTY 5 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\ros_it_mgt_client_pkg>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EX...",
+        "ptyId": 5,
+        "sessionId": "session-5"
+      }
+    },
+    {
+      "eventId": "019da97b-7526-7b33-a647-fd6ad55d0d7b",
+      "kind": "pty-output",
+      "timestamp": 1776664933670,
+      "summary": "PTY 7 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE\u0007\u001b[?25h",
+        "ptyId": 7,
+        "sessionId": "session-7"
+      }
+    },
+    {
+      "eventId": "019da97b-7568-7453-8113-6338b9b9af36",
+      "kind": "pty-output",
+      "timestamp": 1776664933736,
+      "summary": "PTY 8 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE\u0007\u001b[?25h",
+        "ptyId": 8,
+        "sessionId": "session-8"
+      }
+    },
+    {
+      "eventId": "019da97b-7611-7670-bc33-cec7ec8f2463",
+      "kind": "pty-output",
+      "timestamp": 1776664933905,
+      "summary": "PTY 9 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE\u0007\u001b[?25h",
+        "ptyId": 9,
+        "sessionId": "session-9"
+      }
+    },
+    {
+      "eventId": "019da97b-7630-7670-a415-6101b47fae40",
+      "kind": "pty-output",
+      "timestamp": 1776664933936,
+      "summary": "PTY 10 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\JavaScript\\mini-term>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EXE\u0007\u001b[?25h",
+        "ptyId": 10,
+        "sessionId": "session-10"
+      }
+    },
+    {
+      "eventId": "019da97b-77f5-7493-ae4b-0750286b0aa0",
+      "kind": "pty-session-created",
+      "timestamp": 1776664934389,
+      "summary": "PTY 11 session session-11 created in D:\\code\\Python\\ros_it_mgt_client_pkg.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+        "mode": "human",
+        "ptyId": 11,
+        "sessionId": "session-11",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7808-7f52-a0b4-2f41fcd3d20e",
+      "kind": "pty-session-created",
+      "timestamp": 1776664934408,
+      "summary": "PTY 12 session session-12 created in D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+        "mode": "human",
+        "ptyId": 12,
+        "sessionId": "session-12",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7837-78c1-b517-ce0ef3effe6b",
+      "kind": "pty-output",
+      "timestamp": 1776664934455,
+      "summary": "PTY 11 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 11,
+        "sessionId": "session-11"
+      }
+    },
+    {
+      "eventId": "019da97b-785c-7040-88a3-30b0163f9733",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664934492,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-786b-78a0-b9c3-3a77ea58e4e2",
+      "kind": "pty-output",
+      "timestamp": 1776664934507,
+      "summary": "PTY 12 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 12,
+        "sessionId": "session-12"
+      }
+    },
+    {
+      "eventId": "019da97b-789f-7620-881a-7749c3bd3fa0",
+      "kind": "pty-session-created",
+      "timestamp": 1776664934559,
+      "summary": "PTY 13 session session-13 created in D:\\code\\Python\\ros_it_mgt_client_pkg.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+        "mode": "human",
+        "ptyId": 13,
+        "sessionId": "session-13",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-78c6-75e0-ab20-0efbbfc53aa8",
+      "kind": "pty-session-created",
+      "timestamp": 1776664934598,
+      "summary": "PTY 14 session session-14 created in D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+        "mode": "human",
+        "ptyId": 14,
+        "sessionId": "session-14",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-78ca-76c2-be78-d0f972930f42",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664934602,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-78ef-74f3-b50c-e834fc6cf706",
+      "kind": "pty-output",
+      "timestamp": 1776664934639,
+      "summary": "PTY 13 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 13,
+        "sessionId": "session-13"
+      }
+    },
+    {
+      "eventId": "019da97b-7932-7613-be59-b37d1bb6a659",
+      "kind": "pty-output",
+      "timestamp": 1776664934706,
+      "summary": "PTY 14 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 14,
+        "sessionId": "session-14"
+      }
+    },
+    {
+      "eventId": "019da97b-7934-7153-a6fb-8c9cefda0a24",
+      "kind": "pty-output",
+      "timestamp": 1776664934708,
+      "summary": "PTY 12 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[H\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[H\u001b]0;C...",
+        "ptyId": 12,
+        "sessionId": "session-12"
+      }
+    },
+    {
+      "eventId": "019da97b-7950-73e1-b5ed-17639c6c10a8",
+      "kind": "pty-output",
+      "timestamp": 1776664934736,
+      "summary": "PTY 12 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 12,
+        "sessionId": "session-12"
+      }
+    },
+    {
+      "eventId": "019da97b-7989-7051-9213-fe5aebeb7b7c",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664934793,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-79a7-7a22-929b-6e1a77b47e8d",
+      "kind": "pty-output",
+      "timestamp": 1776664934823,
+      "summary": "PTY 14 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[H\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[H\u001b]0;C...",
+        "ptyId": 14,
+        "sessionId": "session-14"
+      }
+    },
+    {
+      "eventId": "019da97b-79c5-7643-8a69-edafbafddb4f",
+      "kind": "pty-output",
+      "timestamp": 1776664934853,
+      "summary": "PTY 14 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 14,
+        "sessionId": "session-14"
+      }
+    },
+    {
+      "eventId": "019da97b-79dd-7522-a7b7-036287fe3bcb",
+      "kind": "pty-output",
+      "timestamp": 1776664934877,
+      "summary": "PTY 14 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 14,
+        "sessionId": "session-14"
+      }
+    },
+    {
+      "eventId": "019da97b-79e4-7a80-bd65-c35aa32ecef2",
+      "kind": "pty-output",
+      "timestamp": 1776664934884,
+      "summary": "PTY 12 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 12,
+        "sessionId": "session-12"
+      }
+    },
+    {
+      "eventId": "019da97b-79f5-7f01-8728-e3fcb4d2f810",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664934901,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-79fd-7470-8e7b-9530bf52553e",
+      "kind": "pty-output",
+      "timestamp": 1776664934909,
+      "summary": "PTY 14 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 14,
+        "sessionId": "session-14"
+      }
+    },
+    {
+      "eventId": "019da97b-7a03-73a1-bf34-b69a21119303",
+      "kind": "pty-output",
+      "timestamp": 1776664934915,
+      "summary": "PTY 12 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 12,
+        "sessionId": "session-12"
+      }
+    },
+    {
+      "eventId": "019da97b-7ab6-76a3-b3c0-b96ef8c47bba",
+      "kind": "pty-output",
+      "timestamp": 1776664935094,
+      "summary": "PTY 11 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\ros_it_mgt_client_pkg>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EX...",
+        "ptyId": 11,
+        "sessionId": "session-11"
+      }
+    },
+    {
+      "eventId": "019da97b-7ac4-7e63-a0f6-0d913316ccf2",
+      "kind": "pty-output",
+      "timestamp": 1776664935108,
+      "summary": "PTY 12 emitted output.",
+      "payloadPreview": {
+        "preview": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+        "ptyId": 12,
+        "sessionId": "session-12"
+      }
+    },
+    {
+      "eventId": "019da97b-7af4-7180-95d4-aba1fa000142",
+      "kind": "pty-status-change",
+      "timestamp": 1776664935156,
+      "summary": "PTY 1 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 1,
+        "sessionId": "session-1",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7af4-7180-95d4-abbfcabef02e",
+      "kind": "pty-status-change",
+      "timestamp": 1776664935156,
+      "summary": "PTY 2 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 2,
+        "sessionId": "session-2",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7af7-7f42-ad58-6dae663791a8",
+      "kind": "pty-output",
+      "timestamp": 1776664935159,
+      "summary": "PTY 13 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\ros_it_mgt_client_pkg>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EX...",
+        "ptyId": 13,
+        "sessionId": "session-13"
+      }
+    },
+    {
+      "eventId": "019da97b-7b43-70f3-9824-d0377c74b8b3",
+      "kind": "pty-output",
+      "timestamp": 1776664935235,
+      "summary": "PTY 14 emitted output.",
+      "payloadPreview": {
+        "preview": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+        "ptyId": 14,
+        "sessionId": "session-14"
+      }
+    },
+    {
+      "eventId": "019da97b-7ce9-7470-add0-f906d1300d6f",
+      "kind": "pty-status-change",
+      "timestamp": 1776664935657,
+      "summary": "PTY 5 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 5,
+        "sessionId": "session-5",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7ce9-7470-add0-f91213e76c16",
+      "kind": "pty-status-change",
+      "timestamp": 1776664935657,
+      "summary": "PTY 3 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 3,
+        "sessionId": "session-3",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7ce9-7470-add0-f9248bbc568e",
+      "kind": "pty-status-change",
+      "timestamp": 1776664935657,
+      "summary": "PTY 6 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 6,
+        "sessionId": "session-6",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7ce9-7470-add0-f93f32eeb3c6",
+      "kind": "pty-status-change",
+      "timestamp": 1776664935657,
+      "summary": "PTY 4 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 4,
+        "sessionId": "session-4",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7d7e-7361-8945-e64fa2b234e5",
+      "kind": "pty-session-created",
+      "timestamp": 1776664935806,
+      "summary": "PTY 15 session session-15 created in D:\\code\\Python\\ros_it_mgt_client_pkg.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+        "mode": "human",
+        "ptyId": 15,
+        "sessionId": "session-15",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7d92-7ac0-9d9c-3a0b9ef5c916",
+      "kind": "pty-session-created",
+      "timestamp": 1776664935826,
+      "summary": "PTY 16 session session-16 created in D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+        "mode": "human",
+        "ptyId": 16,
+        "sessionId": "session-16",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7dbf-7b70-895a-1a339727328d",
+      "kind": "pty-output",
+      "timestamp": 1776664935871,
+      "summary": "PTY 15 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 15,
+        "sessionId": "session-15"
+      }
+    },
+    {
+      "eventId": "019da97b-7dca-7123-875e-f4a3793b7f39",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664935883,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7df5-77a0-ad33-f7e0d8e1e0be",
+      "kind": "pty-output",
+      "timestamp": 1776664935925,
+      "summary": "PTY 16 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 16,
+        "sessionId": "session-16"
+      }
+    },
+    {
+      "eventId": "019da97b-7e0f-7a01-a66f-152ba20f4e06",
+      "kind": "pty-session-created",
+      "timestamp": 1776664935951,
+      "summary": "PTY 17 session session-17 created in D:\\code\\Python\\ros_it_mgt_client_pkg.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+        "mode": "human",
+        "ptyId": 17,
+        "sessionId": "session-17",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7e3d-7ca0-bb2b-71ca3d20d88f",
+      "kind": "pty-session-created",
+      "timestamp": 1776664935997,
+      "summary": "PTY 18 session session-18 created in D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+        "mode": "human",
+        "ptyId": 18,
+        "sessionId": "session-18",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7e45-7572-bc17-076ba110c1a6",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664936005,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7e63-76f2-b90b-3c9dec8a09e7",
+      "kind": "pty-output",
+      "timestamp": 1776664936035,
+      "summary": "PTY 17 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 17,
+        "sessionId": "session-17"
+      }
+    },
+    {
+      "eventId": "019da97b-7e9f-7411-b729-00e4821a083d",
+      "kind": "pty-output",
+      "timestamp": 1776664936095,
+      "summary": "PTY 18 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 18,
+        "sessionId": "session-18"
+      }
+    },
+    {
+      "eventId": "019da97b-7eb0-7691-b91b-70e47e4226d7",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664936112,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7ede-7be1-89a9-de9a59d824c6",
+      "kind": "pty-status-change",
+      "timestamp": 1776664936158,
+      "summary": "PTY 10 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 10,
+        "sessionId": "session-10",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7ede-7be1-89a9-dea1788d7ff6",
+      "kind": "pty-status-change",
+      "timestamp": 1776664936158,
+      "summary": "PTY 7 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 7,
+        "sessionId": "session-7",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7edf-7c10-a161-516e739633c8",
+      "kind": "pty-status-change",
+      "timestamp": 1776664936159,
+      "summary": "PTY 9 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 9,
+        "sessionId": "session-9",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7ee2-73f2-987c-f55b476ddeaa",
+      "kind": "pty-status-change",
+      "timestamp": 1776664936163,
+      "summary": "PTY 8 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 8,
+        "sessionId": "session-8",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-7eea-7392-ae16-f7bd4ae53bc5",
+      "kind": "pty-output",
+      "timestamp": 1776664936170,
+      "summary": "PTY 16 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[H\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\u001b[H\u001b]0;C...",
+        "ptyId": 16,
+        "sessionId": "session-16"
+      }
+    },
+    {
+      "eventId": "019da97b-7f1a-7043-b640-b1dcfdea6ddc",
+      "kind": "pty-output",
+      "timestamp": 1776664936218,
+      "summary": "PTY 16 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 16,
+        "sessionId": "session-16"
+      }
+    },
+    {
+      "eventId": "019da97b-7f20-7f63-bae3-92a7116146d5",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664936224,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7f32-7640-b7f7-6b6a2a299ea2",
+      "kind": "pty-output",
+      "timestamp": 1776664936242,
+      "summary": "PTY 16 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 16,
+        "sessionId": "session-16"
+      }
+    },
+    {
+      "eventId": "019da97b-7f42-7d32-a1a8-bfc314fda0c1",
+      "kind": "pty-session-created",
+      "timestamp": 1776664936258,
+      "summary": "PTY 19 session session-19 created in D:\\code\\Python\\ros_it_mgt_client_pkg.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\ros_it_mgt_client_pkg",
+        "mode": "human",
+        "ptyId": 19,
+        "sessionId": "session-19",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7f52-7933-b625-d774dd7a0113",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664936274,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7f53-7321-b7fc-09ded5701998",
+      "kind": "pty-output",
+      "timestamp": 1776664936275,
+      "summary": "PTY 16 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r...",
+        "ptyId": 16,
+        "sessionId": "session-16"
+      }
+    },
+    {
+      "eventId": "019da97b-7f54-7972-bde0-1687ec17726f",
+      "kind": "fs-watch-stopped",
+      "timestamp": 1776664936276,
+      "summary": "Stopped watching D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "watchPath": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt"
+      }
+    },
+    {
+      "eventId": "019da97b-7f7f-7c90-9cb5-9278ee4b75bf",
+      "kind": "pty-output",
+      "timestamp": 1776664936319,
+      "summary": "PTY 19 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 19,
+        "sessionId": "session-19"
+      }
+    },
+    {
+      "eventId": "019da97b-7f87-74a0-be60-1c27afa85306",
+      "kind": "pty-session-created",
+      "timestamp": 1776664936327,
+      "summary": "PTY 20 session session-20 created in D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt.",
+      "payloadPreview": {
+        "cwd": "D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt",
+        "mode": "human",
+        "ptyId": 20,
+        "sessionId": "session-20",
+        "shell": "powershell"
+      }
+    },
+    {
+      "eventId": "019da97b-7fdf-78e0-901d-08b90f9a6709",
+      "kind": "pty-output",
+      "timestamp": 1776664936415,
+      "summary": "PTY 20 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?9001h\u001b[?1004h",
+        "ptyId": 20,
+        "sessionId": "session-20"
+      }
+    },
+    {
+      "eventId": "019da97b-803b-7943-938d-55794c7b8c41",
+      "kind": "pty-output",
+      "timestamp": 1776664936507,
+      "summary": "PTY 15 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\ros_it_mgt_client_pkg>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EX...",
+        "ptyId": 15,
+        "sessionId": "session-15"
+      }
+    },
+    {
+      "eventId": "019da97b-80ad-7f20-92f8-1197bf135b5e",
+      "kind": "pty-output",
+      "timestamp": 1776664936621,
+      "summary": "PTY 16 emitted output.",
+      "payloadPreview": {
+        "preview": "PS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt> ",
+        "ptyId": 16,
+        "sessionId": "session-16"
+      }
+    },
+    {
+      "eventId": "019da97b-80c0-7a30-8eea-f6a908dc758a",
+      "kind": "pty-output",
+      "timestamp": 1776664936640,
+      "summary": "PTY 17 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\ros_it_mgt_client_pkg>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EX...",
+        "ptyId": 17,
+        "sessionId": "session-17"
+      }
+    },
+    {
+      "eventId": "019da97b-8129-7821-9a45-edd082c777c9",
+      "kind": "pty-output",
+      "timestamp": 1776664936745,
+      "summary": "PTY 18 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\power...",
+        "ptyId": 18,
+        "sessionId": "session-18"
+      }
+    },
+    {
+      "eventId": "019da97b-8171-7a90-ba31-b50169129d97",
+      "kind": "pty-output",
+      "timestamp": 1776664936817,
+      "summary": "PTY 19 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\ros_it_mgt_client_pkg>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.EX...",
+        "ptyId": 19,
+        "sessionId": "session-19"
+      }
+    },
+    {
+      "eventId": "019da97b-81b5-7b61-ba66-c9e21b4abb91",
+      "kind": "pty-output",
+      "timestamp": 1776664936885,
+      "summary": "PTY 20 emitted output.",
+      "payloadPreview": {
+        "preview": "\u001b[?25l\u001b[2J\u001b[m\u001b[HPS D:\\code\\Python\\weld-edge-mqtt\\weld-edge-mqtt>\u001b[1C\u001b]0;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\power...",
+        "ptyId": 20,
+        "sessionId": "session-20"
+      }
+    },
+    {
+      "eventId": "019da97b-82cc-7c20-9b1a-d0fc5c8efcd0",
+      "kind": "pty-status-change",
+      "timestamp": 1776664937164,
+      "summary": "PTY 12 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 12,
+        "sessionId": "session-12",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-82cc-7c20-9b1a-d1093212da39",
+      "kind": "pty-status-change",
+      "timestamp": 1776664937164,
+      "summary": "PTY 13 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 13,
+        "sessionId": "session-13",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-82cc-7c20-9b1a-d11057de0c56",
+      "kind": "pty-status-change",
+      "timestamp": 1776664937164,
+      "summary": "PTY 11 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 11,
+        "sessionId": "session-11",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-84c1-78e3-9a7d-eebcd330fc8e",
+      "kind": "pty-status-change",
+      "timestamp": 1776664937665,
+      "summary": "PTY 14 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 14,
+        "sessionId": "session-14",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-88ab-7c72-9586-9d3f9b39c7ff",
+      "kind": "pty-status-change",
+      "timestamp": 1776664938667,
+      "summary": "PTY 16 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 16,
+        "sessionId": "session-16",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-88ac-7e20-a0b4-cc1de6e57698",
+      "kind": "pty-status-change",
+      "timestamp": 1776664938668,
+      "summary": "PTY 17 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 17,
+        "sessionId": "session-17",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-88ac-7e20-a0b4-cc2e8277a509",
+      "kind": "pty-status-change",
+      "timestamp": 1776664938668,
+      "summary": "PTY 15 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 15,
+        "sessionId": "session-15",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-8aa1-7530-a39f-53106cbf45c6",
+      "kind": "pty-status-change",
+      "timestamp": 1776664939169,
+      "summary": "PTY 20 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 20,
+        "sessionId": "session-20",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-8aa1-7530-a39f-532cab56da4e",
+      "kind": "pty-status-change",
+      "timestamp": 1776664939169,
+      "summary": "PTY 19 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 19,
+        "sessionId": "session-19",
+        "status": "idle"
+      }
+    },
+    {
+      "eventId": "019da97b-8aa1-7530-a39f-533648bcd345",
+      "kind": "pty-status-change",
+      "timestamp": 1776664939169,
+      "summary": "PTY 18 status changed to idle.",
+      "payloadPreview": {
+        "ptyId": 18,
+        "sessionId": "session-18",
+        "status": "idle"
+      }
+    }
+  ]
+}

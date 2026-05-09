@@ -39,6 +39,7 @@ export function createTerminalPane(
 ): PaneState {
   const nextRunProfile = normalizeRunProfile(runProfile, runCommand);
   return {
+    kind: 'terminal',
     id: paneId,
     sessionId,
     shellName,

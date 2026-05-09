@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": 1776666331761,
+  "host": {
+    "appVersion": "0.2.18",
+    "desktopPid": 50200,
+    "transportMode": "app-data-snapshot",
+    "lastHeartbeatAt": 1776666331761,
+    "hostControl": {
+      "transport": "named-pipe",
+      "endpoint": "\\\\.\\pipe\\mini-term-host-control-019da98c-269a-73f2-b9fa-7d518c4d989a",
+      "capabilities": [
+        "pty-control",
+        "runtime-observation-detail",
+        "ui-control"
+      ]
+    }
+  },
+  "ptys": [],
+  "watchers": [],
+  "recentEvents": [
+    {
+      "eventId": "019da98c-269a-73f2-b9fa-7d4d776f6348",
+      "kind": "host-started",
+      "timestamp": 1776666027674,
+      "summary": "Mini-Term desktop host initialized runtime MCP state.",
+      "payloadPreview": {
+        "appVersion": "0.2.18",
+        "desktopPid": 50200
+      }
+    }
+  ]
+}

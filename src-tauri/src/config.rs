@@ -459,7 +459,7 @@ impl<'de> Deserialize<'de> for ThemeConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,14 +472,82 @@ pub struct RunProfile {
     pub usage_scope: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SavedPane {
+pub struct SavedTerminalPane {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub shell_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_profile: Option<RunProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedFileViewerPane {
+    pub kind: String,
+    pub file_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigation_target: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedWorktreeDiffPane {
+    pub kind: String,
+    pub project_path: String,
+    pub git_status: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedCommitDiffPane {
+    pub kind: String,
+    pub repo_path: String,
+    pub commit_hash: String,
+    pub commit_message: String,
+    pub files: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedFileHistoryPane {
+    pub kind: String,
+    pub project_path: String,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedAgentTaskPanelPane {
+    pub kind: String,
+    pub filter: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedUnknownPane {
+    pub kind: String,
+    #[serde(flatten)]
+    pub data: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum SavedPane {
+    Terminal(SavedTerminalPane),
+    FileViewer(SavedFileViewerPane),
+    WorktreeDiff(SavedWorktreeDiffPane),
+    CommitDiff(SavedCommitDiffPane),
+    FileHistory(SavedFileHistoryPane),
+    AgentTasks(SavedAgentTaskPanelPane),
+    Unknown(SavedUnknownPane),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -744,11 +812,23 @@ pub fn config_path_for_data_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("config.json")
 }
 
+fn resolve_app_data_dir(default_dir: PathBuf) -> PathBuf {
+    if let Ok(explicit) = std::env::var("MINI_TERM_DATA_DIR") {
+        let path = PathBuf::from(explicit);
+        fs::create_dir_all(&path).ok();
+        return path;
+    }
+
+    fs::create_dir_all(&default_dir).ok();
+    default_dir
+}
+
 fn config_path(app: &AppHandle) -> PathBuf {
-    let dir = app
+    let default_dir = app
         .path()
         .app_data_dir()
         .expect("failed to get app data dir");
+    let dir = resolve_app_data_dir(default_dir);
     config_path_for_data_dir(&dir)
 }
 
@@ -843,6 +923,16 @@ fn workspace_to_project(workspace: &WorkspaceConfig) -> ProjectConfig {
 }
 
 fn normalize_workspace(mut workspace: WorkspaceConfig) -> WorkspaceConfig {
+    if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
+        for root in &workspace.roots {
+            eprintln!(
+                "[mini-term] normalize_workspace root={} exists={}",
+                root.path,
+                path_exists(&root.path)
+            );
+        }
+    }
+
     workspace
         .roots
         .retain(|root| !root.path.trim().is_empty() && path_exists(&root.path));
@@ -1301,6 +1391,13 @@ fn normalize_shell(mut shell: ShellConfig) -> ShellConfig {
 pub fn load_config(app: AppHandle) -> AppConfig {
     let path = config_path(&app);
     let config = load_config_from_path(&path);
+    if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
+        eprintln!(
+            "[mini-term] load_config path={} workspaces={}",
+            path.display(),
+            config.workspaces.len()
+        );
+    }
     let _ = save_config_to_path(&path, config.clone());
     config
 }
@@ -1308,14 +1405,43 @@ pub fn load_config(app: AppHandle) -> AppConfig {
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let path = config_path(&app);
+    if std::env::var("MINI_TERM_DISABLE_CONFIG_WRITES")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
+            eprintln!(
+                "[mini-term] save_config skipped path={} workspaces={}",
+                path.display(),
+                config.workspaces.len()
+            );
+        }
+        return Ok(());
+    }
+    if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
+        eprintln!(
+            "[mini-term] save_config path={} workspaces={}",
+            path.display(),
+            config.workspaces.len()
+        );
+    }
     save_config_to_path(&path, config)
 }
 
 pub fn load_config_from_path(path: &Path) -> AppConfig {
     match fs::read_to_string(path) {
-        Ok(content) => normalize_config(migrate_config(
-            serde_json::from_str(&content).unwrap_or_default(),
-        )),
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(config) => normalize_config(migrate_config(config)),
+            Err(err) => {
+                eprintln!(
+                    "[mini-term] failed to parse config at {}: {}",
+                    path.display(),
+                    err
+                );
+                normalize_config(migrate_config(AppConfig::default()))
+            }
+        },
         Err(_) => normalize_config(migrate_config(AppConfig::default())),
     }
 }
@@ -1371,6 +1497,23 @@ mod tests {
             Some("claude-cli")
         );
         assert!(routing.claude.allow_builtin_fallback);
+    }
+
+    #[test]
+    fn resolve_app_data_dir_prefers_mini_term_data_dir_env() {
+        let _guard = lock_env();
+        let override_dir = create_temp_dir("data-dir-override");
+        let fallback_dir = create_temp_dir("data-dir-fallback");
+        std::env::set_var("MINI_TERM_DATA_DIR", &override_dir);
+
+        let resolved = resolve_app_data_dir(fallback_dir.clone());
+        assert_eq!(resolved, override_dir);
+        assert!(resolved.exists());
+
+        std::env::remove_var("MINI_TERM_DATA_DIR");
+        let fallback_resolved = resolve_app_data_dir(fallback_dir.clone());
+        assert_eq!(fallback_resolved, fallback_dir);
+        assert!(fallback_resolved.exists());
     }
 
     #[test]
@@ -1500,19 +1643,21 @@ mod tests {
                     direction: "horizontal".into(),
                     children: vec![
                         SavedSplitNode::Leaf {
-                            pane: Some(SavedPane {
+                            pane: Some(SavedPane::Terminal(SavedTerminalPane {
+                                kind: None,
                                 shell_name: "cmd".into(),
                                 run_command: None,
                                 run_profile: None,
-                            }),
+                            })),
                             panes: Vec::new(),
                         },
                         SavedSplitNode::Leaf {
-                            pane: Some(SavedPane {
+                            pane: Some(SavedPane::Terminal(SavedTerminalPane {
+                                kind: None,
                                 shell_name: "powershell".into(),
                                 run_command: None,
                                 run_profile: None,
-                            }),
+                            })),
                             panes: Vec::new(),
                         },
                     ],
@@ -1525,6 +1670,41 @@ mod tests {
         let parsed: SavedProjectLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tabs.len(), 1);
         assert_eq!(parsed.active_tab_index, 0);
+    }
+
+    #[test]
+    fn layout_round_trip_supports_non_terminal_panes() {
+        let layout = SavedProjectLayout {
+            tabs: vec![SavedTab {
+                custom_title: Some("preview".into()),
+                split_layout: SavedSplitNode::Leaf {
+                    pane: Some(SavedPane::FileViewer(SavedFileViewerPane {
+                        kind: "file-viewer".into(),
+                        file_path: "D:/code/JavaScript/mini-term/README.md".into(),
+                        mode: Some("preview".into()),
+                        navigation_target: Some(serde_json::json!({
+                            "line": 12,
+                            "column": 4,
+                            "requestId": 1
+                        })),
+                    })),
+                    panes: Vec::new(),
+                },
+            }],
+            active_tab_index: 0,
+        };
+        let json = serde_json::to_string(&layout).unwrap();
+        let parsed: SavedProjectLayout = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tabs.len(), 1);
+        assert_eq!(parsed.active_tab_index, 0);
+        match &parsed.tabs[0].split_layout {
+            SavedSplitNode::Leaf { pane: Some(SavedPane::FileViewer(pane)), .. } => {
+                assert_eq!(pane.kind, "file-viewer");
+                assert_eq!(pane.file_path, "D:/code/JavaScript/mini-term/README.md");
+                assert_eq!(pane.mode.as_deref(), Some("preview"));
+            }
+            other => panic!("unexpected layout: {other:?}"),
+        }
     }
 
     #[test]
@@ -1661,6 +1841,85 @@ mod tests {
 
         let _ = fs::remove_dir_all(root_a);
         let _ = fs::remove_dir_all(root_b);
+    }
+
+    #[test]
+    fn workspace_config_with_saved_terminal_tabs_deserializes() {
+        let root = create_temp_dir("workspace-saved-layout");
+
+        let config = normalize_config(
+            serde_json::from_value(serde_json::json!({
+                "workspaces": [{
+                    "id": "workspace-1",
+                    "name": "desktop-smoke",
+                    "roots": [
+                        {
+                            "id": "root-1",
+                            "name": "desktop-smoke",
+                            "path": root.to_string_lossy(),
+                            "role": "primary"
+                        }
+                    ],
+                    "pinned": true,
+                    "savedLayout": {
+                        "tabs": [
+                            {
+                                "customTitle": "Alpha",
+                                "splitLayout": {
+                                    "type": "leaf",
+                                    "pane": {
+                                        "kind": "terminal",
+                                        "shellName": "powershell"
+                                    },
+                                    "panes": []
+                                }
+                            },
+                            {
+                                "splitLayout": {
+                                    "type": "leaf",
+                                    "pane": {
+                                        "kind": "terminal",
+                                        "shellName": "cmd"
+                                    },
+                                    "panes": []
+                                }
+                            }
+                        ],
+                        "activeTabIndex": 0
+                    },
+                    "createdAt": 1,
+                    "lastOpenedAt": 1
+                }],
+                "recentWorkspaces": [],
+                "lastWorkspaceId": "workspace-1",
+                "defaultShell": "powershell",
+                "availableShells": [
+                    { "name": "powershell", "command": "powershell" },
+                    { "name": "cmd", "command": "cmd" }
+                ],
+                "uiFontSize": 13,
+                "terminalFontSize": 14,
+                "theme": {
+                    "preset": "warm-carbon",
+                    "windowEffect": "auto"
+                }
+            }))
+            .unwrap(),
+        );
+
+        assert_eq!(config.workspaces.len(), 1);
+        let saved_layout = config.workspaces[0]
+            .saved_layout
+            .as_ref()
+            .expect("saved layout should deserialize");
+        assert_eq!(saved_layout.tabs.len(), 2);
+        assert_eq!(saved_layout.active_tab_index, 0);
+        assert_eq!(
+            saved_layout.tabs[0].custom_title.as_deref(),
+            Some("Alpha")
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

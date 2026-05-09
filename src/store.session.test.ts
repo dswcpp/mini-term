@@ -78,6 +78,7 @@ function createTerminalTab(id: string, session: TerminalSessionMeta): TerminalTa
     splitLayout: {
       type: 'leaf',
       pane: {
+        kind: 'terminal',
         id: `${id}-pane`,
         sessionId: session.sessionId,
         shellName: 'powershell',
