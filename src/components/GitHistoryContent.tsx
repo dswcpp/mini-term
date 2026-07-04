@@ -1,10 +1,12 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTauriEvent } from '../hooks/useTauriEvent';
 import { showContextMenu } from '../utils/contextMenu';
+import { isAiPty } from '../utils/terminalCache';
 import { formatRelativeTime } from '../utils/timeFormat';
 import { CommitDiffModal } from './CommitDiffModal';
+import { useT } from '../i18n';
 import type { GitRepoInfo, GitCommitInfo, CommitFileInfo, BranchInfo, PtyOutputPayload } from '../types';
 
 interface RepoState {
@@ -60,7 +62,9 @@ function buildRepoTree(repos: GitRepoInfo[], projectPath: string): RepoTreeNode[
   return root;
 }
 
-function GitActionButton({
+const EMPTY_BRANCHES: BranchInfo[] = [];
+
+const GitActionButton = memo(function GitActionButton({
   repoPath,
   action,
   state,
@@ -108,7 +112,67 @@ function GitActionButton({
       {display}
     </button>
   );
-}
+});
+
+const CommitItem = memo(function CommitItem({
+  commit,
+  allBranches,
+  depth,
+  repoPath,
+  onContextMenu,
+  onDoubleClick,
+}: {
+  commit: GitCommitInfo;
+  allBranches: BranchInfo[];
+  depth: number;
+  repoPath: string;
+  onContextMenu: (e: React.MouseEvent, repoPath: string, commit: GitCommitInfo) => void;
+  onDoubleClick: (repoPath: string, commit: GitCommitInfo) => void;
+}) {
+  const t = useT();
+  const commitBranches = allBranches.filter((b) => b.commitHash === commit.hash);
+  return (
+    <div
+      className="py-1.5 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] transition-colors duration-100"
+      style={{ paddingLeft: `${(depth + 1) * 16 + 8}px`, paddingRight: '8px' }}
+      title={commit.body ? `${commit.message}\n\n${commit.body}` : commit.message}
+      onContextMenu={(e) => onContextMenu(e, repoPath, commit)}
+      onDoubleClick={() => onDoubleClick(repoPath, commit)}
+    >
+      <div className="text-sm text-[var(--text-primary)] flex items-center gap-1 min-w-0">
+        {commitBranches.map((b) => (
+          <span
+            key={b.name}
+            className="inline-flex items-center shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-medium"
+            style={{
+              backgroundColor: b.isHead
+                ? 'var(--color-accent, #58a6ff)'
+                : b.isRemote
+                  ? 'var(--border-subtle, #3d3d3d)'
+                  : 'rgba(63, 185, 80, 0.2)',
+              color: b.isHead
+                ? '#fff'
+                : b.isRemote
+                  ? 'var(--text-muted)'
+                  : 'rgb(63, 185, 80)',
+            }}
+            title={b.isRemote ? t('gitHistoryContent.remoteBranch', { name: b.name }) : b.isHead ? t('gitHistoryContent.currentBranch', { name: b.name }) : t('gitHistoryContent.localBranch', { name: b.name })}
+          >
+            {b.name}
+          </span>
+        ))}
+        <span className="truncate">{commit.message}</span>
+      </div>
+      <div className="text-xs text-[var(--text-muted)] flex items-center gap-1.5 mt-0.5">
+        <span>{commit.author}</span>
+        <span>&middot;</span>
+        <span>{formatRelativeTime(commit.timestamp)}</span>
+        <span>&middot;</span>
+        <span className="font-mono">{commit.shortHash}</span>
+      </div>
+    </div>
+  );
+});
 
 const GIT_REFRESH_PATTERNS = [
   /create mode/,
@@ -125,6 +189,7 @@ interface GitHistoryContentProps {
 }
 
 export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHistoryContentProps) {
+  const t = useT();
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
   const [repoStates, setRepoStates] = useState<Map<string, RepoState>>(new Map());
   const [diffModal, setDiffModal] = useState<{
@@ -137,6 +202,15 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
 
   // branch name → commit hash 映射（每个 repo 独立）
   const [repoBranches, setRepoBranches] = useState<Map<string, BranchInfo[]>>(new Map());
+
+  // 每个 repo 当前"查看"的分支(用于只改 git log 显示,不 checkout)。未设则用 HEAD。
+  const [viewBranches, setViewBranches] = useState<Map<string, string>>(new Map());
+  const viewBranchesRef = useRef(viewBranches);
+  viewBranchesRef.current = viewBranches;
+
+  // 当前打开的分支下拉所属的 repoPath(同一时刻最多一个)
+  const [branchDropdownOpen, setBranchDropdownOpen] = useState<string | null>(null);
+  const branchDropdownRef = useRef<HTMLDivElement | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -162,9 +236,15 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
   }, []);
 
   const loadCommits = useCallback(
-    async (repoPath: string, beforeCommit?: string) => {
+    async (repoPath: string, beforeCommit?: string, branchOverride?: string) => {
       const existing = repoStatesRef.current.get(repoPath);
       if (existing?.loading) return;
+
+      // 分页时(beforeCommit 有值)继续当前链路,不需要 branch 参数;
+      // 否则优先使用 override,再回退到 viewBranchesRef 里记住的值
+      const branch = beforeCommit
+        ? undefined
+        : branchOverride ?? viewBranchesRef.current.get(repoPath);
 
       setRepoStates((prev) => {
         const next = new Map(prev);
@@ -178,6 +258,7 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
           repoPath,
           beforeCommit: beforeCommit ?? null,
           limit: 30,
+          branch: branch ?? null,
         });
         setRepoStates((prev) => {
           const next = new Map(prev);
@@ -256,22 +337,54 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
     }
   }, []);
 
+  const handleSwitchView = useCallback(
+    (repoPath: string, branchName: string) => {
+      setBranchDropdownOpen(null);
+      setViewBranches((prev) => {
+        const next = new Map(prev);
+        next.set(repoPath, branchName);
+        return next;
+      });
+      // 清空该 repo 的 commits,随后用 branchOverride 传入新分支重新加载
+      // (setState 异步,不能依赖 viewBranchesRef 立即拿到新值)
+      setRepoStates((prev) => {
+        const next = new Map(prev);
+        next.set(repoPath, { commits: [], loading: false, hasMore: true });
+        return next;
+      });
+      loadCommits(repoPath, undefined, branchName);
+    },
+    [loadCommits],
+  );
+
+  // 点击下拉外部关闭
+  useEffect(() => {
+    if (!branchDropdownOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target as Node)) {
+        setBranchDropdownOpen(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [branchDropdownOpen]);
+
   const handleCommitContextMenu = useCallback(
     (e: React.MouseEvent, repoPath: string, commit: GitCommitInfo) => {
       e.preventDefault();
       showContextMenu(e.clientX, e.clientY, [
         {
-          label: '复制 Commit Hash',
+          label: t('gitHistoryContent.copyCommitHash'),
           onClick: () => writeText(commit.hash),
         },
         { separator: true },
         {
-          label: '查看变更',
+          label: t('gitHistoryContent.viewChanges'),
           onClick: () => handleViewDiff(repoPath, commit),
         },
       ]);
     },
-    [handleViewDiff],
+    [handleViewDiff, t],
   );
 
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -322,6 +435,7 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
     'pty-output',
     useCallback(
       (payload: PtyOutputPayload) => {
+        if (isAiPty(payload.ptyId)) return;
         if (GIT_REFRESH_PATTERNS.some((p) => p.test(payload.data))) {
           debouncedRefresh();
         }
@@ -348,7 +462,7 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
     loadBranches(repoPath);
   }, [repos, projectPath, loadCommits, loadBranches]);
 
-  const repoTree = buildRepoTree(repos, projectPath);
+  const repoTree = useMemo(() => buildRepoTree(repos, projectPath), [repos, projectPath]);
 
   // 递归渲染树节点
   const renderTreeNode = (node: RepoTreeNode, depth: number) => {
@@ -357,11 +471,12 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
       const repo = node.repo;
       const isExpanded = expandedRepos.has(repo.path);
       const state = repoStates.get(repo.path);
+      const dropdownOpen = branchDropdownOpen === repo.path;
       return (
         <div key={repo.path}>
           <div
             className="sticky bg-[var(--bg-surface)] h-[30px] flex items-center"
-            style={{ top: `${depth * 30}px`, zIndex: 10 - depth }}
+            style={{ top: `${depth * 30}px`, zIndex: dropdownOpen ? 50 : 10 - depth }}
           >
             <div
               className="group flex items-center justify-between w-full py-[5px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 text-[var(--color-folder)]"
@@ -379,16 +494,87 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
                   &#9662;
                 </span>
                 <span className="truncate font-medium">{node.name}</span>
-                {repo.currentBranch && (
-                  <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
-                    {repo.currentBranch}
-                  </span>
-                )}
+                {repo.currentBranch && (() => {
+                  const viewing = viewBranches.get(repo.path);
+                  const displayBranch = viewing ?? repo.currentBranch;
+                  const isViewingOther = viewing !== undefined && viewing !== repo.currentBranch;
+                  const allBranches = repoBranches.get(repo.path) ?? [];
+                  return (
+                    <div
+                      className="relative shrink-0"
+                      ref={dropdownOpen ? branchDropdownRef : null}
+                    >
+                      <span
+                        className={`inline-flex items-center gap-0.5 text-[11px] leading-[18px] px-1.5 rounded font-mono cursor-pointer transition-colors ${
+                          isViewingOther
+                            ? 'text-[var(--color-accent,#58a6ff)] bg-[rgba(88,166,255,0.15)] hover:bg-[rgba(88,166,255,0.25)]'
+                            : 'text-[var(--text-muted)] bg-[var(--border-subtle)] hover:bg-[var(--color-accent,#58a6ff)] hover:text-white'
+                        }`}
+                        title={
+                          isViewingOther
+                            ? t('gitHistoryContent.viewingBranchHistory', { branch: displayBranch, head: repo.currentBranch })
+                            : t('gitHistoryContent.switchBranchHint')
+                        }
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (dropdownOpen) {
+                            setBranchDropdownOpen(null);
+                          } else {
+                            setBranchDropdownOpen(repo.path);
+                            if (!repoBranches.has(repo.path)) loadBranches(repo.path);
+                          }
+                        }}
+                      >
+                        <span className="truncate max-w-[200px]">{displayBranch}</span>
+                        <span className="text-[9px] opacity-70">▾</span>
+                      </span>
+                      {dropdownOpen && (
+                        <div
+                          className="absolute top-full left-0 mt-0.5 bg-[var(--bg-elevated)] border border-[var(--border-default)] rounded-[var(--radius-sm)] shadow-[var(--shadow-overlay)] overflow-hidden min-w-[180px] max-h-[320px] overflow-y-auto"
+                          style={{ zIndex: 100 }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {allBranches.length === 0 ? (
+                            <div className="px-3 py-1.5 text-xs text-[var(--text-muted)]">{t('gitHistoryContent.loading')}</div>
+                          ) : (
+                            allBranches.map((b) => {
+                              const active = displayBranch === b.name;
+                              return (
+                                <div
+                                  key={b.name}
+                                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer transition-colors duration-100 ${
+                                    active
+                                      ? 'bg-[var(--accent-subtle,rgba(88,166,255,0.15))] text-[var(--color-accent,#58a6ff)]'
+                                      : 'text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
+                                  }`}
+                                  onClick={() => handleSwitchView(repo.path, b.name)}
+                                >
+                                  <span
+                                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                                    style={{
+                                      backgroundColor: b.isRemote
+                                        ? 'var(--text-muted)'
+                                        : 'rgb(63, 185, 80)',
+                                    }}
+                                  />
+                                  <span className="truncate font-mono flex-1">{b.name}</span>
+                                  {b.name === repo.currentBranch && (
+                                    <span className="shrink-0 text-[9px] px-1 rounded bg-[var(--color-accent,#58a6ff)] text-white font-medium">HEAD</span>
+                                  )}
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
                 <button
                   className="w-5 h-5 flex items-center justify-center text-sm transition-colors rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                  title="刷新"
+                  title={t('gitHistoryContent.refresh')}
                   onClick={(e) => {
                     e.stopPropagation();
                     loadCommits(repo.path);
@@ -417,63 +603,27 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
 
           {isExpanded && (
             <div className="relative" style={{ zIndex: 0 }}>
-              {state?.commits.map((commit) => {
-                const commitBranches = (repoBranches.get(repo.path) ?? []).filter(
-                  (b) => b.commitHash === commit.hash,
-                );
-                return (
-                  <div
-                    key={commit.hash}
-                    className="py-1.5 cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] transition-colors duration-100"
-                    style={{ paddingLeft: `${(depth + 1) * 16 + 8}px`, paddingRight: '8px' }}
-                    title={commit.body ? `${commit.message}\n\n${commit.body}` : commit.message}
-                    onContextMenu={(e) => handleCommitContextMenu(e, repo.path, commit)}
-                    onDoubleClick={() => handleViewDiff(repo.path, commit)}
-                  >
-                    <div className="text-sm text-[var(--text-primary)] flex items-center gap-1 min-w-0">
-                      {commitBranches.map((b) => (
-                        <span
-                          key={b.name}
-                          className="inline-flex items-center shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-medium"
-                          style={{
-                            backgroundColor: b.isHead
-                              ? 'var(--color-accent, #58a6ff)'
-                              : b.isRemote
-                                ? 'var(--border-subtle, #3d3d3d)'
-                                : 'rgba(63, 185, 80, 0.2)',
-                            color: b.isHead
-                              ? '#fff'
-                              : b.isRemote
-                                ? 'var(--text-muted)'
-                                : 'rgb(63, 185, 80)',
-                          }}
-                          title={b.isRemote ? `远程分支: ${b.name}` : b.isHead ? `当前分支: ${b.name}` : `本地分支: ${b.name}`}
-                        >
-                          {b.name}
-                        </span>
-                      ))}
-                      <span className="truncate">{commit.message}</span>
-                    </div>
-                    <div className="text-xs text-[var(--text-muted)] flex items-center gap-1.5 mt-0.5">
-                      <span>{commit.author}</span>
-                      <span>&middot;</span>
-                      <span>{formatRelativeTime(commit.timestamp)}</span>
-                      <span>&middot;</span>
-                      <span className="font-mono">{commit.shortHash}</span>
-                    </div>
-                  </div>
-                );
-              })}
+              {state?.commits.map((commit) => (
+                <CommitItem
+                  key={commit.hash}
+                  commit={commit}
+                  allBranches={repoBranches.get(repo.path) ?? EMPTY_BRANCHES}
+                  depth={depth}
+                  repoPath={repo.path}
+                  onContextMenu={handleCommitContextMenu}
+                  onDoubleClick={handleViewDiff}
+                />
+              ))}
 
               {state?.loading && (
                 <div className="text-center text-[var(--text-muted)] text-xs py-2">
-                  加载中...
+                  {t('gitHistoryContent.loading')}
                 </div>
               )}
 
               {state && !state.loading && state.commits.length === 0 && (
                 <div className="text-center text-[var(--text-muted)] text-xs py-2">
-                  暂无提交
+                  {t('gitHistoryContent.noCommits')}
                 </div>
               )}
             </div>
@@ -521,7 +671,7 @@ export function GitHistoryContent({ projectPath, repos, refreshRepos }: GitHisto
       <div className="flex-1 overflow-y-auto px-1" ref={scrollRef} onScroll={handleScroll}>
         {repos.length === 0 && (
           <div className="text-center text-[var(--text-muted)] text-sm py-6">
-            未发现 Git 仓库
+            {t('gitHistoryContent.noRepos')}
           </div>
         )}
         {repoTree.map((node) => renderTreeNode(node, 0))}

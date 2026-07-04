@@ -1,18 +1,19 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { ask } from '@tauri-apps/plugin-dialog';
+import { useT } from '../i18n';
+import { useAppStore } from '../store';
 import { useTauriEvent } from '../hooks/useTauriEvent';
 import { showContextMenu } from '../utils/contextMenu';
+import { isAiPty } from '../utils/terminalCache';
 import { DiffModal } from './DiffModal';
-import type { ChangeFileStatus, GitFileStatus, GitStatusType, PtyOutputPayload } from '../types';
+import type { ChangeFileStatus, PtyOutputPayload } from '../types';
 
 interface GitChangesProps {
   projectPath: string;
   repoPath: string;
   onCommitSuccess: () => void;
 }
-
-type ViewMode = 'list' | 'tree';
-type ChangeArea = 'staged' | 'unstaged' | 'untracked';
 
 const GIT_REFRESH_PATTERNS = [
   /create mode/,
@@ -21,6 +22,8 @@ const GIT_REFRESH_PATTERNS = [
   /insertions?\(\+\)/,
   /deletions?\(-\)/,
 ];
+
+// --- Tree view helpers ---
 
 interface FileTreeNode {
   name: string;
@@ -35,13 +38,13 @@ function buildFileTree(files: ChangeFileStatus[]): FileTreeNode[] {
     const parts = file.path.split('/');
     let current = root;
     let pathSoFar = '';
-    for (let i = 0; i < parts.length; i += 1) {
-      pathSoFar += `${i > 0 ? '/' : ''}${parts[i]}`;
+    for (let i = 0; i < parts.length; i++) {
+      pathSoFar += (i > 0 ? '/' : '') + parts[i];
       const isLast = i === parts.length - 1;
       if (isLast) {
         current.push({ name: parts[i], fullPath: pathSoFar, file, children: [] });
       } else {
-        let dir = current.find((node) => node.name === parts[i] && !node.file);
+        let dir = current.find((n) => n.name === parts[i] && !n.file);
         if (!dir) {
           dir = { name: parts[i], fullPath: pathSoFar, children: [] };
           current.push(dir);
@@ -53,76 +56,61 @@ function buildFileTree(files: ChangeFileStatus[]): FileTreeNode[] {
   return root;
 }
 
-function statusLabelFor(status?: GitStatusType): string {
+function statusLabelFor(status?: string): string {
   switch (status) {
-    case 'modified':
-      return 'M';
-    case 'added':
-      return 'A';
-    case 'deleted':
-      return 'D';
-    case 'renamed':
-      return 'R';
-    case 'untracked':
-      return '?';
-    case 'conflicted':
-      return 'C';
-    default:
-      return ' ';
+    case 'modified': return 'M';
+    case 'added': return 'A';
+    case 'deleted': return 'D';
+    case 'renamed': return 'R';
+    case 'untracked': return '?';
+    case 'conflicted': return 'C';
+    default: return ' ';
   }
 }
 
-function statusColor(file: ChangeFileStatus, area: ChangeArea): string {
-  const status = area === 'staged' ? file.stagedStatus : file.unstagedStatus;
+function statusColor(_file: ChangeFileStatus, area: string): string {
+  const status = area === 'staged' ? _file.stagedStatus : _file.unstagedStatus;
   switch (status) {
-    case 'modified':
-      return 'text-[var(--color-warning,#e5c07b)]';
-    case 'added':
-      return 'text-[var(--color-success,#98c379)]';
-    case 'deleted':
-      return 'text-[var(--color-error,#e06c75)]';
-    case 'renamed':
-      return 'text-[var(--color-info,#61afef)]';
-    case 'untracked':
-      return 'text-[var(--color-success,#98c379)]';
-    default:
-      return 'text-[var(--text-muted)]';
+    case 'modified': return 'text-[var(--color-warning,#e5c07b)]';
+    case 'added': return 'text-[var(--color-success,#98c379)]';
+    case 'deleted': return 'text-[var(--color-error,#e06c75)]';
+    case 'renamed': return 'text-[var(--color-info,#61afef)]';
+    case 'untracked': return 'text-[var(--color-success,#98c379)]';
+    default: return 'text-[var(--text-muted)]';
   }
 }
 
-function getDiffStatus(file: ChangeFileStatus, area: ChangeArea): GitStatusType {
-  if (area === 'staged') {
-    return file.stagedStatus ?? file.unstagedStatus ?? 'modified';
-  }
-
-  if (area === 'untracked') {
-    return 'untracked';
-  }
-
-  return file.unstagedStatus ?? file.stagedStatus ?? 'modified';
-}
+// --- Main component ---
 
 export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSuccess }: GitChangesProps) {
+  const t = useT();
+  const config = useAppStore((s) => s.config);
+  const setConfig = useAppStore((s) => s.setConfig);
+
   const [changes, setChanges] = useState<ChangeFileStatus[]>([]);
   const [loading, setLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const viewMode = config.gitChangesViewMode ?? 'list';
+
   const [commitMsg, setCommitMsg] = useState('');
   const [committing, setCommitting] = useState(false);
-  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+
   const [diffModal, setDiffModal] = useState<{
     open: boolean;
-    file: ChangeFileStatus;
-    area: ChangeArea;
+    filePath: string;
+    staged: boolean;
+    statusLabel: string;
   } | null>(null);
 
-  const staged = changes.filter((change) => change.stagedStatus);
-  const unstaged = changes.filter((change) => change.unstagedStatus && change.unstagedStatus !== 'untracked');
-  const untracked = changes.filter((change) => change.unstagedStatus === 'untracked');
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
 
+  // Grouping
+  const staged = changes.filter((c) => c.stagedStatus);
+  const unstaged = changes.filter((c) => c.unstagedStatus && c.unstagedStatus !== 'untracked');
+  const untracked = changes.filter((c) => c.unstagedStatus === 'untracked');
+
+  // Load changes
   const loadChanges = useCallback(() => {
-    if (!repoPath) {
-      return;
-    }
+    if (!repoPath) return;
     setLoading(true);
     invoke<ChangeFileStatus[]>('get_changes_status', { repoPath })
       .then(setChanges)
@@ -134,11 +122,10 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     loadChanges();
   }, [loadChanges]);
 
+  // PTY output listener for auto-refresh
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const debouncedRefresh = useCallback(() => {
-    if (refreshTimerRef.current) {
-      clearTimeout(refreshTimerRef.current);
-    }
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = setTimeout(loadChanges, 500);
   }, [loadChanges]);
 
@@ -146,7 +133,8 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     'pty-output',
     useCallback(
       (payload: PtyOutputPayload) => {
-        if (GIT_REFRESH_PATTERNS.some((pattern) => pattern.test(payload.data))) {
+        if (isAiPty(payload.ptyId)) return;
+        if (GIT_REFRESH_PATTERNS.some((p) => p.test(payload.data))) {
           debouncedRefresh();
         }
       },
@@ -154,12 +142,14 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     ),
   );
 
+  // --- Action handlers ---
+
   const handleStage = useCallback(async (files: string[]) => {
     try {
       await invoke('git_stage', { repoPath, files });
       loadChanges();
-    } catch (error) {
-      console.error('stage failed:', error);
+    } catch (e) {
+      console.error('stage failed:', e);
     }
   }, [repoPath, loadChanges]);
 
@@ -167,8 +157,8 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     try {
       await invoke('git_unstage', { repoPath, files });
       loadChanges();
-    } catch (error) {
-      console.error('unstage failed:', error);
+    } catch (e) {
+      console.error('unstage failed:', e);
     }
   }, [repoPath, loadChanges]);
 
@@ -176,8 +166,8 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     try {
       await invoke('git_stage_all', { repoPath });
       loadChanges();
-    } catch (error) {
-      console.error('stage all failed:', error);
+    } catch (e) {
+      console.error('stage all failed:', e);
     }
   }, [repoPath, loadChanges]);
 
@@ -185,53 +175,56 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     try {
       await invoke('git_unstage_all', { repoPath });
       loadChanges();
-    } catch (error) {
-      console.error('unstage all failed:', error);
+    } catch (e) {
+      console.error('unstage all failed:', e);
     }
   }, [repoPath, loadChanges]);
 
   const handleCommit = useCallback(async () => {
-    if (!commitMsg.trim() || staged.length === 0) {
-      return;
-    }
+    if (!commitMsg.trim() || staged.length === 0) return;
     setCommitting(true);
     try {
       await invoke('git_commit', { repoPath, message: commitMsg.trim() });
       setCommitMsg('');
       loadChanges();
       onCommitSuccess();
-    } catch (error) {
-      console.error('commit failed:', error);
+    } catch (e) {
+      console.error('commit failed:', e);
     } finally {
       setCommitting(false);
     }
   }, [repoPath, commitMsg, staged.length, loadChanges, onCommitSuccess]);
 
   const handleDiscard = useCallback(async (files: string[]) => {
-    if (!confirm(`Discard changes for ${files.length} file(s)? This cannot be undone.`)) {
-      return;
-    }
+    const confirmed = await ask(
+      t('gitChanges.discardConfirm', { count: files.length }),
+      { title: t('gitChanges.discardTitle'), kind: 'warning', okLabel: t('gitChanges.discardOk'), cancelLabel: t('gitChanges.discardCancel') },
+    );
+    if (!confirmed) return;
     try {
       await invoke('git_discard_file', { repoPath, files });
       loadChanges();
-    } catch (error) {
-      console.error('discard failed:', error);
+    } catch (e) {
+      console.error('discard failed:', e);
     }
   }, [repoPath, loadChanges]);
 
-  const handleViewDiff = useCallback((file: ChangeFileStatus, area: ChangeArea) => {
-    setDiffModal({ open: true, file, area });
+  const handleViewDiff = useCallback((filePath: string, isStaged: boolean, statusLabel: string) => {
+    setDiffModal({ open: true, filePath, staged: isStaged, statusLabel });
   }, []);
 
   const toggleViewMode = useCallback(() => {
-    setViewMode((current) => (current === 'list' ? 'tree' : 'list'));
-  }, []);
+    const next = viewMode === 'list' ? 'tree' : 'list';
+    setConfig({ ...config, gitChangesViewMode: next });
+  }, [viewMode, config, setConfig]);
+
+  // --- Render helpers ---
 
   const renderFileRow = (
     file: ChangeFileStatus,
-    area: ChangeArea,
+    area: 'staged' | 'unstaged' | 'untracked',
     displayName: string,
-    depth = 0,
+    depth: number = 0,
   ) => {
     const isStaged = area === 'staged';
     const statusChar = isStaged
@@ -241,27 +234,27 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     return (
       <div
         key={`${area}-${file.path}`}
-        className="group flex cursor-pointer items-center justify-between rounded-[var(--radius-sm)] px-2 py-1 text-sm hover:bg-[var(--border-subtle)]"
+        className="group flex items-center justify-between py-1 px-2 hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] cursor-pointer text-sm"
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
-        onClick={() => handleViewDiff(file, area)}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          const separator = { separator: true as const };
+        onClick={() => handleViewDiff(file.path, isStaged, statusChar)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          const sep = { separator: true as const };
           const items: Parameters<typeof showContextMenu>[2] = [
-            { label: 'View Diff', onClick: () => handleViewDiff(file, area) },
-            separator,
+            { label: t('gitChanges.contextViewDiff'), onClick: () => handleViewDiff(file.path, isStaged, statusChar) },
+            sep,
             ...(isStaged
               ? [{ label: 'Unstage', onClick: () => handleUnstage([file.path]) }]
               : [{ label: 'Stage', onClick: () => handleStage([file.path]) }]),
             ...(area !== 'staged'
-              ? [separator, { label: 'Discard Changes', onClick: () => handleDiscard([file.path]) }]
+              ? [sep, { label: t('gitChanges.contextDiscard'), onClick: () => handleDiscard([file.path]) }]
               : []),
           ];
-          showContextMenu(event.clientX, event.clientY, items);
+          showContextMenu(e.clientX, e.clientY, items);
         }}
       >
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span className={`w-4 shrink-0 text-center font-mono text-xs ${statusColor(file, area)}`}>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className={`shrink-0 text-xs font-mono w-4 text-center ${statusColor(file, area)}`}>
             {statusChar}
           </span>
           <span className="truncate" title={file.path}>
@@ -269,58 +262,43 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
           </span>
         </div>
         <button
-          type="button"
-          className="h-5 w-5 shrink-0 text-sm text-[var(--text-muted)] opacity-0 transition-opacity group-hover:opacity-100 hover:text-[var(--text-primary)]"
+          className="shrink-0 w-5 h-5 flex items-center justify-center text-sm opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-opacity"
           title={isStaged ? 'Unstage' : 'Stage'}
-          onClick={(event) => {
-            event.stopPropagation();
-            if (isStaged) {
-              void handleUnstage([file.path]);
-            } else {
-              void handleStage([file.path]);
-            }
+          onClick={(e) => {
+            e.stopPropagation();
+            isStaged ? handleUnstage([file.path]) : handleStage([file.path]);
           }}
         >
-          {isStaged ? '-' : '+'}
+          {isStaged ? '−' : '+'}
         </button>
       </div>
     );
   };
 
-  const renderTreeNode = (node: FileTreeNode, area: ChangeArea, depth: number) => {
+  const renderTreeNode = (node: FileTreeNode, area: 'staged' | 'unstaged' | 'untracked', depth: number) => {
     if (node.file) {
       return renderFileRow(node.file, area, node.name, depth);
     }
-
-    const key = `${area}:${node.fullPath}`;
-    const isCollapsed = collapsedDirs.has(key);
-
+    const isCollapsed = collapsedDirs.has(`${area}:${node.fullPath}`);
     return (
       <div key={`dir-${area}-${node.fullPath}`}>
         <div
-          className="flex cursor-pointer items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-sm text-[var(--text-muted)] hover:bg-[var(--border-subtle)]"
+          className="flex items-center gap-1 py-0.5 px-2 text-sm text-[var(--text-muted)] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)]"
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
           onClick={() => {
-            setCollapsedDirs((previous) => {
-              const next = new Set(previous);
-              if (next.has(key)) {
-                next.delete(key);
-              } else {
-                next.add(key);
-              }
+            const key = `${area}:${node.fullPath}`;
+            setCollapsedDirs((prev) => {
+              const next = new Set(prev);
+              if (next.has(key)) next.delete(key); else next.add(key);
               return next;
             });
           }}
         >
-          <span
-            className="inline-block w-3 text-center text-[11px]"
-            style={{
-              transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
-              transition: 'transform 150ms',
-            }}
-          >
-            ▾
-          </span>
+          <span className="text-[11px] w-3 text-center" style={{
+            transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+            display: 'inline-block',
+            transition: 'transform 150ms',
+          }}>▾</span>
           <span>{node.name}</span>
         </div>
         {!isCollapsed && node.children.map((child) => renderTreeNode(child, area, depth + 1))}
@@ -328,140 +306,133 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     );
   };
 
-  const renderFiles = (files: ChangeFileStatus[], area: ChangeArea) => {
+  const renderFiles = (files: ChangeFileStatus[], area: 'staged' | 'unstaged' | 'untracked') => {
     if (viewMode === 'tree') {
-      return buildFileTree(files).map((node) => renderTreeNode(node, area, 0));
+      const tree = buildFileTree(files);
+      return tree.map((node) => renderTreeNode(node, area, 0));
     }
-    return files.map((file) => renderFileRow(file, area, file.path));
+    return files.map((f) => renderFileRow(f, area, f.path));
   };
 
   const renderGroup = (
     title: string,
     files: ChangeFileStatus[],
-    area: ChangeArea,
+    area: 'staged' | 'unstaged' | 'untracked',
     action?: { label: string; onClick: () => void },
   ) => {
-    if (files.length === 0) {
-      return null;
-    }
-
+    if (files.length === 0) return null;
     return (
       <div className="mb-2">
         <div className="flex items-center justify-between px-2 py-1">
-          <span className="text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">
+          <span className="text-xs text-[var(--text-muted)] uppercase tracking-wider font-medium">
             {title} ({files.length})
           </span>
-          {action ? (
+          {action && (
             <button
-              type="button"
-              className="text-xs text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+              className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
               onClick={action.onClick}
             >
               {action.label}
             </button>
-          ) : null}
+          )}
         </div>
         {renderFiles(files, area)}
       </div>
     );
   };
 
-  const diffModalStatus: GitFileStatus | null = diffModal
+  // Build a GitFileStatus-compatible object for DiffModal
+  const diffModalStatus = diffModal
     ? {
-        path: diffModal.file.path,
-        oldPath: diffModal.file.oldPath,
-        status: getDiffStatus(diffModal.file, diffModal.area),
-        statusLabel: statusLabelFor(getDiffStatus(diffModal.file, diffModal.area)),
+        path: diffModal.filePath,
+        status: 'modified' as const,
+        statusLabel: diffModal.statusLabel,
       }
     : null;
 
+  // --- JSX ---
+
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center justify-between px-3 py-1.5">
+    <div className="h-full flex flex-col">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between px-3 py-1.5 flex-shrink-0">
         <button
-          type="button"
-          className="text-sm text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-sm"
           onClick={loadChanges}
-          title="Refresh"
+          title={t('gitChanges.refresh')}
         >
           ↻
         </button>
         <button
-          type="button"
-          className="text-xs text-[var(--text-muted)] transition-colors hover:text-[var(--text-primary)]"
+          className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
           onClick={toggleViewMode}
-          title={viewMode === 'list' ? 'Switch to tree view' : 'Switch to list view'}
+          title={viewMode === 'list' ? t('gitChanges.switchToTree') : t('gitChanges.switchToList')}
         >
-          {viewMode === 'list' ? 'Tree' : 'List'}
+          {viewMode === 'list' ? '⊞' : '≡'}
         </button>
       </div>
 
+      {/* File list */}
       <div className="flex-1 overflow-y-auto px-1">
-        {loading && changes.length === 0 ? (
-          <div className="py-6 text-center text-sm text-[var(--text-muted)]">Loading changes...</div>
-        ) : null}
+        {loading && changes.length === 0 && (
+          <div className="text-center text-[var(--text-muted)] text-sm py-6">{t('gitChanges.loading')}</div>
+        )}
 
-        {!loading && changes.length === 0 ? (
-          <div className="py-6 text-center text-sm text-[var(--text-muted)]">No changes</div>
-        ) : null}
+        {!loading && changes.length === 0 && (
+          <div className="text-center text-[var(--text-muted)] text-sm py-6">{t('gitChanges.empty')}</div>
+        )}
 
         {renderGroup('Staged Changes', staged, 'staged', {
-          label: 'Unstage All',
-          onClick: () => {
-            void handleUnstageAll();
-          },
+          label: t('gitChanges.unstageAll'),
+          onClick: handleUnstageAll,
         })}
         {renderGroup('Changes', unstaged, 'unstaged', {
-          label: 'Stage All',
-          onClick: () => {
-            void handleStageAll();
-          },
+          label: t('gitChanges.stageAll'),
+          onClick: handleStageAll,
         })}
         {renderGroup('Untracked Files', untracked, 'untracked', {
-          label: 'Stage All',
-          onClick: () => {
-            void handleStageAll();
-          },
+          label: t('gitChanges.stageAll'),
+          onClick: handleStageAll,
         })}
       </div>
 
-      <div className="shrink-0 border-t border-[var(--border-subtle)] p-2">
+      {/* Commit area */}
+      <div className="flex-shrink-0 border-t border-[var(--border-subtle)] p-2">
         <textarea
-          className="w-full resize-none rounded border border-[var(--border-default)] bg-[var(--bg-base)] px-2 py-1.5 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)]"
+          className="w-full text-sm bg-[var(--bg-base)] text-[var(--text-primary)] border border-[var(--border-default)] rounded px-2 py-1.5 resize-none placeholder:text-[var(--text-muted)] select-text"
           rows={3}
           placeholder="Commit message..."
           value={commitMsg}
-          onChange={(event) => setCommitMsg(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-              void handleCommit();
+          onChange={(e) => setCommitMsg(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              handleCommit();
             }
           }}
         />
         <button
-          type="button"
-          className={`mt-1.5 w-full rounded py-1.5 text-sm font-medium transition-colors ${
+          className={`w-full mt-1.5 py-1.5 text-sm rounded font-medium transition-colors ${
             commitMsg.trim() && staged.length > 0 && !committing
-              ? 'cursor-pointer bg-[var(--accent)] text-white hover:opacity-90'
-              : 'cursor-not-allowed bg-[var(--bg-elevated)] text-[var(--text-muted)]'
+              ? 'bg-[var(--accent)] text-white hover:opacity-90 cursor-pointer'
+              : 'bg-[var(--bg-elevated)] text-[var(--text-muted)] cursor-not-allowed'
           }`}
           disabled={!commitMsg.trim() || staged.length === 0 || committing}
-          onClick={() => {
-            void handleCommit();
-          }}
+          onClick={handleCommit}
         >
-          {committing ? 'Committing...' : `Commit (${staged.length})`}
+          {committing ? t('gitChanges.committing') : `Commit (${staged.length})`}
         </button>
       </div>
 
-      {diffModal && diffModalStatus && repoPath ? (
+      {/* Diff Modal */}
+      {diffModal && diffModalStatus && repoPath && (
         <DiffModal
           open={diffModal.open}
           onClose={() => setDiffModal(null)}
           projectPath={repoPath}
           status={diffModalStatus}
+          staged={diffModal.staged}
         />
-      ) : null}
+      )}
     </div>
   );
 }

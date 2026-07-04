@@ -1,523 +1,204 @@
-import { Suspense, lazy, useCallback, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { useAppStore, genId, saveLayoutToConfig, selectWorkspaceState } from '../store';
-import {
-  closeManagedTerminalSession,
-  openManagedTerminalSession,
-  restartManagedTerminalSession,
-} from '../runtime/terminalOrchestrator';
-import { createTerminalPane } from '../utils/session';
-import { TabBar } from './TabBar';
-import { TerminalTabHost } from './TerminalTabHost';
-import { DocumentTabHost } from './DocumentTabHost';
-import {
-  collectPaneIds,
-  findPane,
-  insertSplit,
-  removePane,
-} from './terminal/splitTree';
+import { useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { useAppStore, genId, saveLayoutToConfig } from '../store';
+import { SplitLayout } from './SplitLayout';
 import { showContextMenu } from '../utils/contextMenu';
-import { showPrompt } from '../utils/prompt';
-import { areSplitNodesEquivalent } from '../utils/splitLayout';
-import type {
-  AgentTaskPanelTab,
-  LayoutDragPayload,
-  PaneState,
-  ShellConfig,
-  SplitNode,
-  TerminalTab,
-  WorkspacePane,
-  WorkspaceTab,
-} from '../types';
-import { WorkspaceTabDropSurface } from './WorkspaceTabDropSurface';
-
-const LazyCommitDiffTabHost = lazy(() => import('./DiffTabHost').then((module) => ({
-  default: module.CommitDiffTabHost,
-})));
-const LazyFileHistoryViewTabHost = lazy(() => import('./DiffTabHost').then((module) => ({
-  default: module.FileHistoryViewTabHost,
-})));
-const LazyWorktreeDiffTabHost = lazy(() => import('./DiffTabHost').then((module) => ({
-  default: module.WorktreeDiffTabHost,
-})));
-const LazyAgentTaskPanelTabHost = lazy(() => import('./AgentTaskPanelTabHost').then((module) => ({
-  default: module.AgentTaskPanelTabHost,
-})));
+import { getProjectEnvs } from '../utils/projectEnv';
+import { useT } from '../i18n';
+import type { TerminalTab, PaneState, SplitNode, ShellConfig } from '../types';
 
 interface Props {
-  workspaceId: string;
-  workspacePath: string;
-  isVisible: boolean;
-  onOpenSettings?: () => void;
+  projectId: string;
+  projectPath: string;
 }
 
-function isTerminalTab(tab: WorkspaceTab): tab is TerminalTab {
-  return tab.kind === 'terminal';
+// 收集 SplitNode 树中所有 pane ID
+function collectPaneIds(node: SplitNode): string[] {
+  if (node.type === 'leaf') return node.panes.map((p) => p.id);
+  return node.children.flatMap(collectPaneIds);
 }
 
-function isAgentTaskPanelTab(tab: WorkspaceTab): tab is AgentTaskPanelTab {
-  return tab.kind === 'agent-tasks';
-}
-
-function getTerminalTabById(ps: { tabs: WorkspaceTab[] } | undefined, tabId: string): TerminalTab | null {
-  const tab = ps?.tabs.find((item) => item.id === tabId);
-  return tab && isTerminalTab(tab) ? tab : null;
-}
-
-function getPaneTitle(pane: WorkspacePane) {
-  switch (pane.kind) {
-    case 'terminal':
-      return pane.shellName;
-    case 'file-viewer':
-      return pane.filePath.replace(/\\/g, '/').split('/').pop() ?? pane.filePath;
-    case 'worktree-diff':
-      return pane.gitStatus.path.replace(/\\/g, '/').split('/').pop() ?? pane.gitStatus.path;
-    case 'commit-diff':
-      return pane.commitMessage || pane.commitHash.slice(0, 7);
-    case 'file-history':
-      return pane.filePath.replace(/\\/g, '/').split('/').pop() ?? pane.filePath;
-    case 'agent-tasks':
-      return 'Tasks';
-  }
-}
-
-function getDefaultTerminalTitle(tab: TerminalTab): string {
-  if (tab.customTitle) return tab.customTitle;
-  if (tab.splitLayout.type === 'leaf') return getPaneTitle(tab.splitLayout.pane);
-  return 'Split View';
-}
-
-function getFirstPane(node: SplitNode): WorkspacePane {
-  if (node.type === 'leaf') return node.pane;
-  return getFirstPane(node.children[0]);
-}
-
-function isTerminalPane(pane: WorkspacePane | null | undefined): pane is PaneState {
-  return pane?.kind === 'terminal';
-}
-
-function DeferredTabFallback({ label }: { label: string }) {
-  return (
-    <div className="flex h-full min-h-0 items-center justify-center text-[var(--text-muted)]">
-      {label}
-    </div>
-  );
-}
-
-export function TerminalArea({ workspaceId, workspacePath, isVisible, onOpenSettings }: Props) {
-  const availableShells = useAppStore((state) => state.config.availableShells);
-  const defaultShell = useAppStore((state) => state.config.defaultShell);
-  const addTab = useAppStore((state) => state.addTab);
-  const moveWorkspacePaneToPane = useAppStore((state) => state.moveWorkspacePaneToPane);
-  const moveWorkspaceTabToPane = useAppStore((state) => state.moveWorkspaceTabToPane);
-  const updateTabLayout = useAppStore((state) => state.updateTabLayout);
-  const removeTab = useAppStore((state) => state.removeTab);
-  const setFileViewerTabMode = useAppStore((state) => state.setFileViewerTabMode);
-  const setActivePaneForTab = useAppStore((state) => state.setActivePaneForTab);
-  const clearActivePaneForTab = useAppStore((state) => state.clearActivePaneForTab);
-  const updatePaneSessionBinding = useAppStore((state) => state.updatePaneSessionBinding);
-  const setTabCustomTitle = useAppStore((state) => state.setTabCustomTitle);
-  const ps = useAppStore(selectWorkspaceState(workspaceId));
-  const [activatedDeferredTabIds, setActivatedDeferredTabIds] = useState<Set<string>>(() => new Set());
-  const tabIdsSignature = ps?.tabs.map((tab) => tab.id).join('|') ?? '';
-
-  useEffect(() => {
-    if (!isVisible || !ps?.activeTabId) {
-      return;
-    }
-
-    setActivatedDeferredTabIds((previous) => {
-      if (previous.has(ps.activeTabId)) {
-        return previous;
-      }
-
-      const next = new Set(previous);
-      next.add(ps.activeTabId);
-      return next;
-    });
-  }, [isVisible, ps?.activeTabId]);
-
-  useEffect(() => {
-    setActivatedDeferredTabIds((previous) => {
-      if (previous.size === 0) {
-        return previous;
-      }
-
-      const next = new Set<string>();
-      const liveTabIds = new Set(ps?.tabs.map((tab) => tab.id) ?? []);
-      let changed = false;
-
-      previous.forEach((tabId) => {
-        if (liveTabIds.has(tabId)) {
-          next.add(tabId);
-          return;
-        }
-
-        changed = true;
-      });
-
-      return changed ? next : previous;
-    });
-  }, [tabIdsSignature]);
-
-  const handleCloseTab = useCallback(
-    async (tabId: string) => {
-      const tab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-
-      if (tab) {
-        const panes = collectPaneIds(tab.splitLayout)
-          .map((paneId) => findPane(tab.splitLayout, paneId))
-          .filter((pane): pane is PaneState => isTerminalPane(pane));
-        for (const pane of panes) {
-          await closeManagedTerminalSession(pane.sessionId).catch(() => undefined);
-        }
-      }
-
-      clearActivePaneForTab(tabId);
-      removeTab(workspaceId, tabId);
-      saveLayoutToConfig(workspaceId);
-    },
-    [clearActivePaneForTab, removeTab, workspaceId],
-  );
-
-  const handleNewTab = useCallback(
-    async (selectedShell?: ShellConfig) => {
-      const shell =
-        selectedShell ??
-        availableShells.find((item) => item.name === defaultShell) ??
-        availableShells[0];
-      if (!shell) return;
-
-      const payload = await openManagedTerminalSession({
-        shell: shell.command,
-        args: shell.args ?? [],
-        cwd: workspacePath,
-      });
-
-      const pane = createTerminalPane(shell.name, payload.ptyId, genId(), 'human', undefined, undefined, payload.sessionId);
-      const tab: TerminalTab = {
-        kind: 'terminal',
-        id: genId(),
-        status: 'idle',
-        splitLayout: {
-          type: 'leaf',
-          pane,
-        },
+function insertSplit(
+  node: SplitNode,
+  targetPaneId: string,
+  direction: 'horizontal' | 'vertical',
+  newLeaf: SplitNode
+): SplitNode {
+  if (node.type === 'leaf') {
+    if (node.panes.some((p) => p.id === targetPaneId)) {
+      return {
+        type: 'split',
+        direction,
+        children: [node, newLeaf],
+        sizes: [50, 50],
       };
+    }
+    return node;
+  }
+  return {
+    ...node,
+    children: node.children.map((c) => insertSplit(c, targetPaneId, direction, newLeaf)),
+  };
+}
 
-      addTab(workspaceId, tab);
-      setActivePaneForTab(tab.id, pane.id);
-      saveLayoutToConfig(workspaceId);
-    },
-    [addTab, availableShells, defaultShell, setActivePaneForTab, workspaceId, workspacePath],
-  );
 
-  const handleNewTabClick = useCallback(
-    (event: ReactMouseEvent) => {
-      if (availableShells.length === 0) {
-        showContextMenu(event.clientX, event.clientY, [
-          {
-            label: '没有可用终端，打开设置',
-            onClick: () => onOpenSettings?.(),
-          },
-        ]);
-        return;
-      }
+export function TerminalArea({ projectId, projectPath }: Props) {
+  const t = useT();
+  const config = useAppStore((s) => s.config);
+  const projectStates = useAppStore((s) => s.projectStates);
+  const addTab = useAppStore((s) => s.addTab);
+  const updateTabLayout = useAppStore((s) => s.updateTabLayout);
+  const removeTab = useAppStore((s) => s.removeTab);
+  const ps = projectStates.get(projectId);
+  const activeTab = ps?.tabs.find((t) => t.id === ps.activeTabId);
 
-      showContextMenu(
-        event.clientX,
-        event.clientY,
-        availableShells.map((shell) => ({
-          label: shell.name,
-          onClick: () => handleNewTab(shell),
-        })),
-      );
-    },
-    [availableShells, handleNewTab, onOpenSettings],
-  );
+  const handleNewTab = useCallback(async (selectedShell?: ShellConfig) => {
+    const shell = selectedShell
+      ?? config.availableShells.find((s) => s.name === config.defaultShell)
+      ?? config.availableShells[0];
+    if (!shell) return;
+
+    const ptyId = await invoke<number>('create_pty', {
+      shell: shell.command,
+      args: shell.args ?? [],
+      cwd: projectPath,
+      envs: getProjectEnvs(projectId),
+    });
+
+    const paneId = genId();
+    const tabId = genId();
+
+    const tab: TerminalTab = {
+      id: tabId,
+      status: 'idle',
+      splitLayout: {
+        type: 'leaf',
+        panes: [{
+          id: paneId,
+          shellName: shell.name,
+          status: 'idle',
+          ptyId,
+        }],
+        activePaneId: paneId,
+      },
+    };
+
+    addTab(projectId, tab);
+    saveLayoutToConfig(projectId);
+  }, [projectId, projectPath, config, addTab]);
+
+  const handleNewTabClick = useCallback((e: React.MouseEvent) => {
+    showContextMenu(
+      e.clientX,
+      e.clientY,
+      config.availableShells.map((shell) => ({
+        label: shell.name,
+        onClick: () => handleNewTab(shell),
+      })),
+    );
+  }, [config.availableShells, handleNewTab]);
 
   const handleSplitPane = useCallback(
-    async (tabId: string, paneId: string, direction: 'horizontal' | 'vertical') => {
-      const workspaceState = useAppStore.getState().workspaceStates.get(workspaceId);
-      if (!getTerminalTabById(workspaceState, tabId)) return;
-
-      const shell =
-        availableShells.find((item) => item.name === defaultShell) ??
-        availableShells[0];
+    async (paneId: string, direction: 'horizontal' | 'vertical') => {
+      if (!ps || !activeTab) return;
+      const shell = config.availableShells.find((s) => s.name === config.defaultShell)
+        ?? config.availableShells[0];
       if (!shell) return;
 
-      const payload = await openManagedTerminalSession({
+      const ptyId = await invoke<number>('create_pty', {
         shell: shell.command,
         args: shell.args ?? [],
-        cwd: workspacePath,
+        cwd: projectPath,
+        envs: getProjectEnvs(projectId),
       });
 
-      const newPane: PaneState = createTerminalPane(
-        shell.name,
-        payload.ptyId,
-        genId(),
-        'human',
-        undefined,
-        undefined,
-        payload.sessionId,
-      );
+      const newPane: PaneState = {
+        id: genId(),
+        shellName: shell.name,
+        status: 'idle',
+        ptyId,
+      };
 
-      const latestTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-      if (!latestTab) return;
+      const newLeaf: SplitNode = {
+        type: 'leaf',
+        panes: [newPane],
+        activePaneId: newPane.id,
+      };
 
-      const nextLayout = insertSplit(latestTab.splitLayout, paneId, direction, newPane);
-      updateTabLayout(workspaceId, tabId, nextLayout);
-      setActivePaneForTab(tabId, newPane.id);
-      saveLayoutToConfig(workspaceId);
+      const newLayout = insertSplit(activeTab.splitLayout, paneId, direction, newLeaf);
+      updateTabLayout(projectId, activeTab.id, newLayout);
+      saveLayoutToConfig(projectId);
     },
-    [availableShells, defaultShell, setActivePaneForTab, updateTabLayout, workspaceId, workspacePath],
+    [ps, activeTab, config, projectId, projectPath, updateTabLayout]
   );
 
-  const handleLayoutDrop = useCallback(
-    (
-      payload: LayoutDragPayload,
-      targetTabId: string,
-      targetPaneId: string | undefined,
-      direction: 'horizontal' | 'vertical',
-      position: 'before' | 'after',
-    ) => {
-      if (payload.workspaceId !== workspaceId) {
-        return;
-      }
+  // Called when an entire leaf (pane group) is closed.
+  // PTYs are already killed by PaneGroup before this is called.
+  // For the root leaf case, we close the whole tab.
+  const handleCloseLeaf = useCallback((_leafNode: SplitNode) => {
+    const currentPs = useAppStore.getState().projectStates.get(projectId);
+    const currentTab = currentPs?.tabs.find(t => t.id === currentPs.activeTabId);
+    if (!currentTab) return;
 
-      if (payload.kind === 'tab') {
-        moveWorkspaceTabToPane(workspaceId, payload.tabId, targetTabId, targetPaneId, direction, position);
-      } else {
-        moveWorkspacePaneToPane(
-          workspaceId,
-          payload.tabId,
-          payload.paneId,
-          targetTabId,
-          targetPaneId,
-          direction,
-          position,
-        );
-      }
-      saveLayoutToConfig(workspaceId);
-    },
-    [moveWorkspacePaneToPane, moveWorkspaceTabToPane, workspaceId],
-  );
+    // PTYs are already killed by PaneGroup before this is called.
+    // Remove the entire layout tab.
+    removeTab(projectId, currentTab.id);
+    saveLayoutToConfig(projectId);
+  }, [projectId, removeTab]);
 
-  const handleClosePane = useCallback(
-    async (tabId: string, paneId: string) => {
-      const currentTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-      if (!currentTab) return;
+  const handleLayoutChange = useCallback((updatedNode: SplitNode) => {
+    const currentPs = useAppStore.getState().projectStates.get(projectId);
+    const currentActiveTab = currentPs?.tabs.find((t) => t.id === currentPs.activeTabId);
+    if (!currentActiveTab) return;
 
-      const pane = findPane(currentTab.splitLayout, paneId);
-      if (!pane) return;
+    // Validate layout structure: if pane ID sets differ, discard stale RAF callback
+    const currentIds = collectPaneIds(currentActiveTab.splitLayout).sort().join(',');
+    const updatedIds = collectPaneIds(updatedNode).sort().join(',');
+    if (currentIds !== updatedIds) return;
 
-      if (isTerminalPane(pane)) {
-        await closeManagedTerminalSession(pane.sessionId).catch(() => undefined);
-      }
+    updateTabLayout(projectId, currentActiveTab.id, updatedNode);
+    saveLayoutToConfig(projectId);
+  }, [projectId, updateTabLayout]);
 
-      const latestTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-      if (!latestTab) return;
-
-      const nextLayout = removePane(latestTab.splitLayout, paneId);
-      if (nextLayout) {
-        updateTabLayout(workspaceId, tabId, nextLayout);
-        setActivePaneForTab(tabId, getFirstPane(nextLayout).id);
-        saveLayoutToConfig(workspaceId);
-      } else {
-        await handleCloseTab(tabId);
-      }
-    },
-    [handleCloseTab, setActivePaneForTab, updateTabLayout, workspaceId],
-  );
-
-  const handleRestartPane = useCallback(
-    async (tabId: string, paneId: string) => {
-      const currentTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-      if (!currentTab) return;
-
-      const pane = findPane(currentTab.splitLayout, paneId);
-      if (!pane || !isTerminalPane(pane)) return;
-
-      const shell =
-        availableShells.find((item) => item.name === pane.shellName) ??
-        availableShells.find((item) => item.name === defaultShell) ??
-        availableShells[0];
-      if (!shell) return;
-
-      const payload = await restartManagedTerminalSession({
-        sessionId: pane.sessionId,
-        shell: shell.command,
-        args: shell.args ?? [],
-        cwd: workspacePath,
-        mode: pane.mode,
-      });
-
-      const latestTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-      if (!latestTab) return;
-
-      const latestPane = findPane(latestTab.splitLayout, paneId);
-      if (!latestPane) return;
-      updatePaneSessionBinding(tabId, paneId, {
-        sessionId: payload.sessionId,
-        ptyId: payload.ptyId,
-        phase: 'starting',
-      });
-      setActivePaneForTab(tabId, latestPane.id);
-      saveLayoutToConfig(workspaceId);
-    },
-    [availableShells, defaultShell, setActivePaneForTab, updatePaneSessionBinding, workspaceId, workspacePath],
-  );
-
-  const handleRenameTab = useCallback(
-    async (tabId: string) => {
-      const tab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-      if (!tab) return;
-
-      const nextTitle = await showPrompt(
-        '重命名标签页',
-        `当前：${getDefaultTerminalTitle(tab)}，留空则恢复默认标题`,
-        tab.customTitle ?? '',
-      );
-      if (nextTitle === null) return;
-
-      setTabCustomTitle(workspaceId, tabId, nextTitle);
-      saveLayoutToConfig(workspaceId);
-    },
-    [setTabCustomTitle, workspaceId],
-  );
-
-  const handleLayoutChange = useCallback(
-    (tabId: string, updatedNode: SplitNode) => {
-      const currentTab = getTerminalTabById(useAppStore.getState().workspaceStates.get(workspaceId), tabId);
-      if (!currentTab) return;
-
-      const currentIds = collectPaneIds(currentTab.splitLayout).sort().join(',');
-      const updatedIds = collectPaneIds(updatedNode).sort().join(',');
-      if (currentIds !== updatedIds || areSplitNodesEquivalent(currentTab.splitLayout, updatedNode)) {
-        return;
-      }
-
-      updateTabLayout(workspaceId, tabId, updatedNode);
-      const currentActivePaneId = useAppStore.getState().activePaneByTab.get(tabId);
-      if (!currentActivePaneId || !findPane(updatedNode, currentActivePaneId)) {
-        setActivePaneForTab(tabId, getFirstPane(updatedNode).id);
-      }
-      saveLayoutToConfig(workspaceId);
-    },
-    [setActivePaneForTab, updateTabLayout, workspaceId],
-  );
+  // Handler for structural changes: tabs added/removed/switched within a leaf,
+  // or children removed from a split. Bypasses pane-ID validation since the
+  // set of pane IDs is expected to change.
+  const handleUpdateNode = useCallback((updatedNode: SplitNode) => {
+    const currentPs = useAppStore.getState().projectStates.get(projectId);
+    const currentActiveTab = currentPs?.tabs.find((t) => t.id === currentPs.activeTabId);
+    if (!currentActiveTab) return;
+    updateTabLayout(projectId, currentActiveTab.id, updatedNode);
+    saveLayoutToConfig(projectId);
+  }, [projectId, updateTabLayout]);
 
   return (
-    <div className="flex h-full flex-col bg-[var(--bg-terminal)]">
-      <TabBar workspaceId={workspaceId} onNewTab={handleNewTabClick} onCloseTab={handleCloseTab} />
-
-      <div className="relative flex-1 overflow-hidden">
-        {ps?.tabs.map((tab) => {
-          const tabIsActive = isVisible && tab.id === ps.activeTabId;
-          const shouldRenderDeferredTab = tabIsActive || activatedDeferredTabIds.has(tab.id);
-
-          return (
-            <div
-              key={tab.id}
-              className="absolute inset-0"
-              style={{ display: tabIsActive ? 'block' : 'none' }}
-            >
-              {isTerminalTab(tab) ? (
-                <TerminalTabHost
-                  workspaceId={workspaceId}
-                  tab={tab}
-                  projectPath={workspacePath}
-                  isActive={tabIsActive}
-                  onActivatePane={(paneId) => setActivePaneForTab(tab.id, paneId)}
-                  onSplit={(paneId, direction) => handleSplitPane(tab.id, paneId, direction)}
-                  onClosePane={(paneId) => handleClosePane(tab.id, paneId)}
-                  onRestartPane={(paneId) => handleRestartPane(tab.id, paneId)}
-                  onNewTab={() => {
-                    void handleNewTab();
-                  }}
-                  onRenameTab={() => {
-                    void handleRenameTab(tab.id);
-                  }}
-                  onCloseTab={() => {
-                    void handleCloseTab(tab.id);
-                  }}
-                  onOpenSettings={onOpenSettings}
-                  onLayoutDrop={(payload, targetPaneId, direction, position) =>
-                    handleLayoutDrop(payload, tab.id, targetPaneId, direction, position)
-                  }
-                  onLayoutChange={(updatedNode) => handleLayoutChange(tab.id, updatedNode)}
-                />
-              ) : !shouldRenderDeferredTab ? null : (
-                <WorkspaceTabDropSurface
-                  workspaceId={workspaceId}
-                  tabId={tab.id}
-                  onLayoutDrop={(payload, direction, position) =>
-                    handleLayoutDrop(payload, tab.id, undefined, direction, position)
-                  }
-                >
-                  {tab.kind === 'file-viewer' ? (
-                    <DocumentTabHost
-                      tab={tab}
-                      workspaceId={workspaceId}
-                      isActive={tabIsActive}
-                      onModeChange={(mode) => setFileViewerTabMode(workspaceId, tab.id, mode)}
-                      onClose={() => {
-                        void handleCloseTab(tab.id);
-                      }}
-                    />
-                  ) : tab.kind === 'worktree-diff' ? (
-                    <Suspense fallback={<DeferredTabFallback label="Loading worktree diff..." />}>
-                      <LazyWorktreeDiffTabHost
-                        tab={tab}
-                        isActive={tabIsActive}
-                        onClose={() => {
-                          void handleCloseTab(tab.id);
-                        }}
-                      />
-                    </Suspense>
-                  ) : tab.kind === 'file-history' ? (
-                    <Suspense fallback={<DeferredTabFallback label="Loading file history..." />}>
-                      <LazyFileHistoryViewTabHost
-                        tab={tab}
-                        isActive={tabIsActive}
-                        onClose={() => {
-                          void handleCloseTab(tab.id);
-                        }}
-                      />
-                    </Suspense>
-                  ) : isAgentTaskPanelTab(tab) ? (
-                    <Suspense fallback={<DeferredTabFallback label="Loading task panel..." />}>
-                      <LazyAgentTaskPanelTabHost
-                        tab={tab}
-                        workspaceId={workspaceId}
-                        isActive={tabIsActive}
-                      />
-                    </Suspense>
-                  ) : (
-                    <Suspense fallback={<DeferredTabFallback label="Loading commit diff..." />}>
-                      <LazyCommitDiffTabHost
-                        tab={tab}
-                        isActive={tabIsActive}
-                        onClose={() => {
-                          void handleCloseTab(tab.id);
-                        }}
-                      />
-                    </Suspense>
-                  )}
-                </WorkspaceTabDropSurface>
-              )}
-            </div>
-          );
-        })}
+    <div data-panel className="flex flex-col h-full bg-[var(--bg-terminal)]">
+      <div className="flex-1 overflow-hidden relative">
+        {activeTab && (
+          <div
+            key={activeTab.id}
+            className="absolute inset-0"
+          >
+            <SplitLayout
+              projectId={projectId}
+              node={activeTab.splitLayout}
+              projectPath={projectPath}
+              onSplit={handleSplitPane}
+              onCloseLeaf={handleCloseLeaf}
+              onUpdateNode={handleUpdateNode}
+              onLayoutChange={handleLayoutChange}
+            />
+          </div>
+        )}
 
         {(!ps || ps.tabs.length === 0) && (
-          <div className="flex h-full flex-col items-center justify-center gap-3 text-[var(--text-muted)]">
-            <div className="text-3xl opacity-20">⌁</div>
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-[var(--text-muted)]">
+            <div className="text-3xl opacity-20">⌘</div>
             <button
-              type="button"
-              className="rounded-[var(--radius-md)] border border-dashed border-[var(--border-default)] px-5 py-2.5 text-sm transition-all duration-200 hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              className="px-5 py-2.5 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-sm hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all duration-200"
               onClick={handleNewTabClick}
             >
-              + 新建终端
+              + {t("terminalArea.newTerminal")}
             </button>
           </div>
         )}

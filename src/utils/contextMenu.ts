@@ -1,221 +1,139 @@
-export interface ContextMenuItem {
+export interface MenuItem {
   label: string;
-  onClick?: () => void;
   danger?: boolean;
   disabled?: boolean;
-  checked?: boolean;
-  shortcut?: string;
-  children?: ContextMenuEntry[];
+  onClick?: () => void;
+  /** 存在时该项为子菜单父项，悬停展开 submenu，自身点击不触发动作 */
+  submenu?: MenuEntry[];
 }
 
-export interface ContextMenuSeparator {
+export interface MenuSeparator {
   separator: true;
 }
 
-export type ContextMenuEntry = ContextMenuItem | ContextMenuSeparator;
-let activeCleanup: (() => void) | null = null;
-
-function isSeparator(entry: ContextMenuEntry): entry is ContextMenuSeparator {
-  return 'separator' in entry;
+/** 不可交互的分组标题 */
+export interface MenuHeader {
+  header: string;
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
+export type MenuEntry = MenuItem | MenuSeparator | MenuHeader;
 
-export function showContextMenu(x: number, y: number, items: ContextMenuEntry[]) {
-  if (items.length === 0) {
-    closeContextMenus();
-    return;
+// 模块级变量:追踪当前活跃菜单的 cleanup 函数。
+// 通过 `currentCleanup === cleanup` 同时承担"是否仍是当前菜单"与"是否已被清理"两个判断,
+// 避免额外的 cleanedUp 布尔标志。
+let currentCleanup: (() => void) | null = null;
+
+export function showContextMenu(x: number, y: number, items: MenuEntry[]) {
+  // 先关闭上一个菜单(DOM + document listener 一并清理)
+  if (currentCleanup) {
+    currentCleanup();
   }
 
-  closeContextMenus();
+  // 已打开的子菜单元素(独立挂在 body 上,便于溢出处理与统一清理)
+  const submenus: HTMLElement[] = [];
+  const closeSubmenus = () => {
+    while (submenus.length) {
+      submenus.pop()!.remove();
+    }
+  };
 
-  const openedMenus: HTMLDivElement[] = [];
-  const menuStack = new Map<number, HTMLDivElement>();
-  const menuLayer = document.createElement('div');
-  menuLayer.className = 'ctx-menu-layer';
-  menuLayer.style.position = 'fixed';
-  menuLayer.style.inset = '0';
-  menuLayer.style.pointerEvents = 'none';
-  menuLayer.style.zIndex = '90';
-  menuLayer.setAttribute('data-context-menu-layer', 'true');
+  // rootMenu 在 buildMenu 之后才赋值;cleanup 仅在之后被调用,闭包引用安全
+  let rootMenu: HTMLElement;
 
   const cleanup = () => {
-    menuLayer.remove();
-    document.removeEventListener('mousedown', handlePointerDown, true);
-    document.removeEventListener('keydown', handleKeyDown, true);
-    window.removeEventListener('blur', cleanup);
-    window.removeEventListener('resize', cleanup);
-    document.removeEventListener('scroll', cleanup, true);
-    if (activeCleanup === cleanup) {
-      activeCleanup = null;
-    }
+    // 已被替换或清理 → 幂等返回
+    if (currentCleanup !== cleanup) return;
+    currentCleanup = null;
+    closeSubmenus();
+    rootMenu.remove();
+    document.removeEventListener('click', cleanup);
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') cleanup();
   };
 
-  const closeMenusFromLevel = (level: number) => {
-    for (const [currentLevel, menu] of [...menuStack.entries()]) {
-      if (currentLevel >= level) {
-        menu.remove();
-        menuStack.delete(currentLevel);
-        const index = openedMenus.indexOf(menu);
-        if (index >= 0) openedMenus.splice(index, 1);
-      }
-    }
+  // 把菜单放进视口:右/下溢出则向反方向翻转
+  const placeInViewport = (menu: HTMLElement, px: number, py: number) => {
+    const margin = 4;
+    const { offsetWidth: w, offsetHeight: h } = menu;
+    let fx = px;
+    let fy = py;
+    if (px + w + margin > window.innerWidth) fx = Math.max(margin, px - w);
+    if (py + h + margin > window.innerHeight) fy = Math.max(margin, py - h);
+    menu.style.left = `${fx}px`;
+    menu.style.top = `${fy}px`;
+    menu.style.visibility = '';
   };
 
-  const placeMenu = (menu: HTMLDivElement, preferredLeft: number, preferredTop: number) => {
-    const margin = 8;
-    const rect = menu.getBoundingClientRect();
-    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
-    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
-
-    menu.style.left = `${clamp(preferredLeft, margin, maxLeft)}px`;
-    menu.style.top = `${clamp(preferredTop, margin, maxTop)}px`;
-  };
-
-  const openMenu = (
-    level: number,
-    entries: ContextMenuEntry[],
-    anchor: { left: number; top: number },
-    parentItem?: HTMLDivElement,
-  ) => {
-    closeMenusFromLevel(level);
-
+  // 递归构建菜单 DOM。isRoot 决定是否在悬停时管理子菜单(子菜单内的项不再嵌套)
+  const buildMenu = (entries: MenuEntry[], isRoot: boolean): HTMLElement => {
     const menu = document.createElement('div');
-    menu.className = 'ctx-menu ctx-menu-panel text-xs';
-    menu.style.position = 'fixed';
-    menu.style.pointerEvents = 'auto';
-    menu.style.minWidth = '196px';
-    menu.style.maxWidth = '320px';
-    menu.setAttribute('role', 'menu');
-    menu.setAttribute('data-menu-level', String(level));
+    menu.className = 'fixed ctx-menu text-xs';
+    menu.style.visibility = 'hidden';
 
     entries.forEach((entry) => {
-      if (isSeparator(entry)) {
-        const separator = document.createElement('div');
-        separator.className = 'ctx-menu-sep';
-        separator.setAttribute('role', 'separator');
-        menu.appendChild(separator);
+      if ('separator' in entry) {
+        const sep = document.createElement('div');
+        sep.className = 'ctx-menu-sep';
+        menu.appendChild(sep);
         return;
       }
-
+      if ('header' in entry) {
+        const head = document.createElement('div');
+        head.className = 'ctx-menu-header';
+        head.textContent = entry.header;
+        menu.appendChild(head);
+        return;
+      }
       const item = document.createElement('div');
-      item.className = 'ctx-menu-item';
-      item.setAttribute('role', 'menuitem');
-      item.setAttribute('tabindex', '-1');
-      if (entry.danger) item.classList.add('danger');
-      if (entry.disabled) item.classList.add('disabled');
-      if (entry.children?.length) item.classList.add('has-children');
-      if (entry.disabled) {
-        item.setAttribute('aria-disabled', 'true');
-      }
-      if (entry.children?.length) {
-        item.setAttribute('aria-haspopup', 'menu');
-      }
+      const classes = ['ctx-menu-item'];
+      if (entry.danger) classes.push('danger');
+      if (entry.disabled) classes.push('disabled');
+      if (entry.submenu) classes.push('has-submenu');
+      item.className = classes.join(' ');
+      item.textContent = entry.label;
 
-      const indicator = document.createElement('span');
-      indicator.className = 'ctx-menu-indicator';
-      indicator.textContent = entry.checked ? '✓' : '';
-      item.appendChild(indicator);
-
-      const label = document.createElement('span');
-      label.className = 'ctx-menu-label';
-      label.textContent = entry.label;
-      item.appendChild(label);
-
-      if (entry.shortcut) {
-        const shortcut = document.createElement('span');
-        shortcut.className = 'ctx-menu-shortcut';
-        shortcut.textContent = entry.shortcut;
-        item.appendChild(shortcut);
-      }
-
-      const childEntries = entry.children;
-
-      if (childEntries && childEntries.length) {
-        const chevron = document.createElement('span');
-        chevron.className = 'ctx-menu-chevron';
-        chevron.textContent = '›';
-        item.appendChild(chevron);
-
-        item.addEventListener('mouseenter', () => {
-          if (entry.disabled) return;
-
+      if (entry.submenu && !entry.disabled) {
+        const sub = entry.submenu;
+        item.onmouseenter = () => {
+          closeSubmenus();
+          const child = buildMenu(sub, false);
+          document.body.appendChild(child);
           const rect = item.getBoundingClientRect();
-          openMenu(
-            level + 1,
-            childEntries,
-            { left: rect.right - 4, top: rect.top - 4 },
-            item,
-          );
-        });
+          // 紧贴父项右缘展开,避免与父项之间出现鼠标可穿过的间隙
+          placeInViewport(child, rect.right - 2, rect.top - 4);
+          submenus.push(child);
+        };
+        // 点击子菜单父项本身不触发动作、也不关闭菜单
+        item.onclick = (e) => e.stopPropagation();
       } else {
-        item.addEventListener('mouseenter', () => {
-          closeMenusFromLevel(level + 1);
-        });
+        // 悬停根菜单的普通项时收起已展开的子菜单
+        if (isRoot) {
+          item.onmouseenter = () => closeSubmenus();
+        }
+        item.onclick = () => {
+          if (entry.disabled) return;
+          entry.onClick?.();
+          cleanup();
+        };
       }
-
-      item.addEventListener('click', (event) => {
-        event.stopPropagation();
-        if (entry.disabled || (childEntries && childEntries.length)) return;
-        entry.onClick?.();
-        cleanup();
-      });
-
       menu.appendChild(item);
     });
-
-    menuLayer.appendChild(menu);
-    menuStack.set(level, menu);
-    openedMenus.push(menu);
-
-    requestAnimationFrame(() => {
-      if (parentItem) {
-        const parentRect = parentItem.getBoundingClientRect();
-        const menuRect = menu.getBoundingClientRect();
-        const prefersLeft = parentRect.right + menuRect.width + 8 > window.innerWidth;
-        placeMenu(
-          menu,
-          prefersLeft ? parentRect.left - menuRect.width + 4 : anchor.left,
-          anchor.top,
-        );
-      } else {
-        placeMenu(menu, anchor.left, anchor.top);
-      }
-    });
+    return menu;
   };
 
-  const handlePointerDown = (event: MouseEvent) => {
-    const target = event.target as Node | null;
-    if (!target || !menuLayer.contains(target)) {
-      cleanup();
-    }
-  };
+  rootMenu = buildMenu(items, true);
+  document.body.appendChild(rootMenu);
+  placeInViewport(rootMenu, x, y);
 
-  const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape') {
-      cleanup();
-    }
-  };
+  currentCleanup = cleanup;
 
-  document.body.appendChild(menuLayer);
-  activeCleanup = cleanup;
-  openMenu(0, items, { left: x, top: y });
-
+  // 延迟一帧注册,避免当前鼠标事件冒泡到 document 立刻触发 cleanup
   setTimeout(() => {
-    document.addEventListener('mousedown', handlePointerDown, true);
-    document.addEventListener('keydown', handleKeyDown, true);
-    window.addEventListener('blur', cleanup);
-    window.addEventListener('resize', cleanup);
-    document.addEventListener('scroll', cleanup, true);
+    // 如果在排队期间已被替换或清理,不再注册
+    if (currentCleanup !== cleanup) return;
+    document.addEventListener('click', cleanup);
+    document.addEventListener('keydown', onKey);
   }, 0);
-}
-
-export function closeContextMenus() {
-  if (activeCleanup) {
-    activeCleanup();
-    return;
-  }
-  document.querySelectorAll('.ctx-menu-layer').forEach((element) => element.remove());
 }

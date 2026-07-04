@@ -1,25 +1,18 @@
-mod agent_api;
-mod agent_backend_runtime;
-mod agent_backends;
-pub mod agent_core;
-mod agent_ext;
-mod agent_policy;
-mod agent_tool_broker;
 mod ai_sessions;
+mod cc_connect;
 mod clipboard;
-pub mod config;
+mod config;
 mod editor;
 mod fs;
 mod git;
-mod host_control;
-pub mod mcp;
-mod mcp_host;
+mod hook_registry;
+mod hook_server;
 mod process_monitor;
 mod pty;
-pub mod reference_sidecar;
-mod reference_sidecar_provider;
-mod runtime_mcp;
-mod windows_shell;
+mod search;
+mod ssh;
+mod ssh_mcp_registry;
+mod window_theme;
 
 use tauri::Manager;
 
@@ -41,14 +34,34 @@ pub fn run() {
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .manage(pty::PtyManager::new())
         .manage(fs::FsWatcherManager::new())
+        .manage(search::SearchManager::new())
+        .manage(cc_connect::CcConnectManager::new())
         .setup(|app| {
-            runtime_mcp::initialize_runtime_host(env!("CARGO_PKG_VERSION"))?;
-            host_control::start_host_control_server(app.handle().clone())?;
-            runtime_mcp::start_runtime_heartbeat(env!("CARGO_PKG_VERSION").to_string());
+            // identifier 从 com.tauri-app.tauri-app 切换为 com.mini-term.app 后,
+            // 第一次启动时把旧 app_data_dir 下的 config.json 拷到新目录,
+            // 必须发生在任何 read_config 之前。
+            config::migrate_legacy_app_data(app.handle());
             clipboard::cleanup_old_clipboard_images();
+            ssh::cleanup_ssh_temp_keys();
+
+            // 初始化 hook 状态并注册为 Tauri managed state
+            let hook_state = hook_server::HookState::new();
+            app.manage(hook_state.clone());
+
+            // 读取配置，仅当 hookEnabled == true 时才启动 hook server
+            let app_config = config::read_config(app.handle());
+            if app_config.hook_enabled {
+                if let Err(e) =
+                    hook_server::start_hook_server(app.handle().clone(), hook_state.clone())
+                {
+                    eprintln!("[setup] hook server 启动失败: {}", e);
+                }
+            }
+
+            // 启动进程监控（传入 hook_state 实现 hook 优先 + 轮询降级）
             let pty_manager = app.state::<crate::pty::PtyManager>();
             let pty_clone = pty_manager.inner().clone();
-            process_monitor::start_monitor(app.handle().clone(), pty_clone);
+            process_monitor::start_monitor(app.handle().clone(), pty_clone, hook_state);
             Ok(())
         })
         .on_window_event(|_window, event| {
@@ -72,19 +85,12 @@ pub fn run() {
             config::load_config,
             config::save_config,
             pty::create_pty,
-            pty::create_terminal_session,
             pty::write_pty,
-            pty::write_terminal_input,
-            pty::run_terminal_command,
             pty::resize_pty,
-            pty::resize_terminal_session,
             pty::kill_pty,
-            pty::close_terminal_session,
-            pty::restart_terminal_session,
-            pty::take_startup_output,
-            pty::take_terminal_startup_output,
+            pty::arm_ssh_autofill,
+            ssh::prepare_ssh_key,
             fs::list_directory,
-            fs::complete_path_entries,
             fs::watch_directory,
             fs::unwatch_directory,
             fs::create_file,
@@ -93,31 +99,15 @@ pub fn run() {
             fs::rename_entry,
             fs::delete_entry,
             fs::filter_directories,
-            fs::read_document_preview,
-            fs::read_image_data_url,
-            fs::read_binary_preview_base64,
-            fs::write_text_file,
-            fs::write_binary_file,
-            fs::create_external_directory,
-            fs::write_external_text_file,
-            fs::write_external_binary_file,
             ai_sessions::get_ai_sessions,
-            agent_ext::session_import::list_external_sessions,
-            agent_ext::session_import::get_external_session_messages,
-            agent_ext::session_import::delete_external_session,
+            ai_sessions::get_ai_session_content,
             git::get_git_status,
             git::get_git_diff,
-            git::restore_git_file,
-            git::restore_git_hunk,
-            git::restore_git_change_block,
             git::discover_git_repos,
-            git::get_git_completion_data,
             git::get_git_log,
             git::get_repo_branches,
             git::get_commit_files,
             git::get_commit_file_diff,
-            git::get_file_git_history,
-            git::get_file_git_blame,
             git::git_pull,
             git::git_push,
             git::get_changes_status,
@@ -127,40 +117,30 @@ pub fn run() {
             git::git_unstage_all,
             git::git_commit,
             git::git_discard_file,
-            editor::open_in_vscode,
+            editor::open_in_editor,
+            editor::open_path_with_default_app,
             clipboard::read_clipboard_image,
             clipboard::save_clipboard_text,
-            agent_api::list_agent_backends,
-            agent_api::test_agent_backend_connection,
-            agent_api::list_agent_workspaces,
-            agent_api::get_agent_workspace_context,
-            agent_api::list_agent_tasks,
-            agent_api::get_agent_task_status,
-            agent_api::list_attention_task_summaries,
-            agent_api::list_approval_requests,
-            agent_api::resolve_approval_request,
-            agent_api::start_agent_task,
-            agent_api::spawn_worker_agent_task,
-            agent_api::send_agent_task_input,
-            agent_api::close_agent_task,
-            agent_api::resume_agent_task,
-            agent_api::list_agent_task_events,
-            agent_api::save_agent_task_plan,
-            agent_api::list_agent_policy_profiles,
-            agent_api::get_agent_policy_profile,
-            agent_api::get_default_agent_policy_profile,
-            agent_api::save_agent_policy_profile,
-            agent_api::reset_agent_policy_profile,
-            agent_api::export_agent_policy_bundle,
-            agent_api::install_mcp_client_config_command,
-            agent_api::get_task_injection_preview,
-            agent_api::get_task_effective_policy,
-            agent_api::get_embedded_mcp_launch_info,
-            agent_api::list_embedded_mcp_tools_command,
-            agent_api::call_embedded_mcp_tool_command,
-            agent_api::list_external_mcp_servers_command,
-            agent_api::sync_external_mcp_servers_command,
-            host_control::resolve_host_control_request,
+            search::start_search,
+            search::cancel_search,
+            hook_registry::register_ai_hooks,
+            hook_registry::unregister_ai_hooks,
+            hook_registry::get_hook_config_snippet,
+            hook_registry::get_hook_status,
+            hook_server::toggle_hook_server,
+            ssh_mcp_registry::enable_ssh_mcp,
+            ssh_mcp_registry::disable_ssh_mcp,
+            window_theme::set_window_dark_mode,
+            cc_connect::cc_connect_probe,
+            cc_connect::cc_connect_read_token,
+            cc_connect::cc_connect_config_path,
+            cc_connect::cc_connect_start,
+            cc_connect::cc_connect_stop,
+            cc_connect::cc_connect_restart,
+            cc_connect::cc_connect_list_projects,
+            cc_connect::cc_connect_import_project,
+            cc_connect::cc_connect_import_projects,
+            cc_connect::cc_connect_unlink_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

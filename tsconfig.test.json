@@ -10,7 +10,11 @@
     "outDir": ".tmp-tests"
   },
   "include": [
+    "src/types.ts",
+    "src/utils/projectKeepAlive.ts",
+    "src/utils/layoutRestore.ts",
     "src/utils/themeManager.ts",
+    "src/utils/terminalSnapshot.ts",
     "src/utils/ptyWriteQueue.ts"
   ]
 }

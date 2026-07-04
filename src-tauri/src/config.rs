@@ -1,16 +1,15 @@
-use crate::agent_ext::mcp_interop::{ExternalMcpCatalog, ExternalMcpSyncResult};
-use crate::agent_ext::model_gateway::{ModelGatewayProviderKind, PROVIDER_KIND_REFERENCE};
-use crate::agent_policy::AgentPoliciesConfig;
-#[cfg(target_os = "windows")]
-use crate::windows_shell::{cmd_utf8_bootstrap_command, powershell_utf8_bootstrap_script};
-use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::BTreeMap;
+use mt_core::SshConnection;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
+/// 历史 identifier。0.2.20 及之前版本使用模板默认值,从 0.2.21 开始切换到
+/// `com.mini-term.app`。首次启动时一次性把旧目录下的 config.json 拷到新目录,
+/// 旧文件保留不删,作为回退兜底。
+const LEGACY_IDENTIFIER: &str = "com.tauri-app.tauri-app";
+
+// 注意：variant 顺序不可调换！untagged 按声明顺序尝试匹配
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ProjectTreeItem {
@@ -39,13 +38,6 @@ pub struct OldProjectGroup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
-    #[serde(default)]
-    pub workspaces: Vec<WorkspaceConfig>,
-    #[serde(default)]
-    pub recent_workspaces: Vec<RecentWorkspaceEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_workspace_id: Option<String>,
-    #[serde(default)]
     pub projects: Vec<ProjectConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_tree: Option<Vec<ProjectTreeItem>>,
@@ -59,504 +51,103 @@ pub struct AppConfig {
     pub ui_font_size: f64,
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_font_family: Option<String>,
+    #[serde(default)]
+    pub terminal_ligatures: bool,
     #[serde(default)]
     pub layout_sizes: Option<Vec<f64>>,
     #[serde(default)]
-    pub theme: ThemeConfig,
-    #[serde(default)]
     pub middle_column_sizes: Option<Vec<f64>>,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_skin")]
+    pub skin: String,
+    #[serde(default = "default_terminal_follow_theme")]
+    pub terminal_follow_theme: bool,
+    #[serde(default = "default_ai_completion_popup")]
+    pub ai_completion_popup: bool,
+    #[serde(default = "default_ai_completion_taskbar_flash")]
+    pub ai_completion_taskbar_flash: bool,
+    #[serde(default = "default_true")]
+    pub ai_completion_sound: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_completion_sound_path: Option<String>,
     #[serde(default)]
-    pub workspace_sidebar_sizes: Option<Vec<f64>>,
-    #[serde(default)]
-    pub completion_usage: CompletionUsageConfig,
+    pub editors: Vec<EditorConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_policies: Option<AgentPoliciesConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_backends: Option<AgentBackendsConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_mcp: Option<ExternalMcpInteropConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_editor: Option<String>,
+    /// 旧字段，仅用于反序列化迁移，序列化时跳过
+    #[serde(default, skip_serializing)]
     pub vscode_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalMcpInteropConfig {
+    #[serde(default = "default_git_changes_view_mode")]
+    pub git_changes_view_mode: String,
+    #[serde(default = "default_true")]
+    pub long_paste_to_file: bool,
+    #[serde(default = "default_long_paste_line_threshold")]
+    pub long_paste_line_threshold: u32,
+    #[serde(default = "default_long_paste_char_threshold")]
+    pub long_paste_char_threshold: u32,
+    #[serde(default = "default_true")]
+    pub projects_visible: bool,
+    #[serde(default = "default_true")]
+    pub sessions_visible: bool,
+    #[serde(default = "default_true")]
+    pub files_visible: bool,
+    #[serde(default = "default_true")]
+    pub git_visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub imported_catalog: Option<ExternalMcpCatalog>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub last_sync_results: Vec<ExternalMcpSyncResult>,
+    pub last_active_project_id: Option<String>,
+    #[serde(default)]
+    pub hook_enabled: bool,
+    #[serde(default)]
+    pub smart_copy_paste: bool,
+    #[serde(default)]
+    pub ssh_connections: Vec<SshConnection>,
+    /// cc-connect 集成配置(进程管理 + 项目导入关联 + dashboard 嵌入)。
+    /// 未配置时为 None;序列化时省略以保持老 config.json 干净。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_imported_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_synced_at: Option<u64>,
+    pub cc_connect: Option<CcConnectConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+/// cc-connect 集成的持久化配置。详见 .trellis/tasks/05-28-embed-cc-connect-panel/prd.md
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentBackendsConfig {
+pub struct CcConnectConfig {
+    /// cc-connect 可执行文件路径(空字符串 = 让前端去 PATH 探测)
     #[serde(default)]
-    pub routing: AgentBackendRoutingConfig,
+    pub exe_path: String,
+    /// config.toml 路径(空字符串 = 用默认 ~/.cc-connect/config.toml)
     #[serde(default)]
-    pub claude_sidecar: SidecarBackendConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentBackendRoutingConfig {
-    #[serde(default = "default_codex_backend_routing")]
-    pub codex: TaskTargetBackendRoutingConfig,
-    #[serde(default = "default_claude_backend_routing")]
-    pub claude: TaskTargetBackendRoutingConfig,
-}
-
-impl Default for AgentBackendRoutingConfig {
-    fn default() -> Self {
-        Self {
-            codex: default_codex_backend_routing(),
-            claude: default_claude_backend_routing(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskTargetBackendRoutingConfig {
+    pub config_path: String,
+    /// mini-term 启动时自动 spawn cc-connect
     #[serde(default)]
-    pub preferred_backend_id: Option<String>,
-    #[serde(default = "default_allow_builtin_fallback")]
-    pub allow_builtin_fallback: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SidecarBackendConfig {
+    pub auto_start: bool,
+    /// 额外启动参数
     #[serde(default)]
-    pub enabled: bool,
+    pub extra_args: Vec<String>,
+    /// mini-term project id → cc-connect project name 映射
     #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default)]
-    pub provider: SidecarProviderConfig,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub startup_mode: SidecarStartupMode,
-    #[serde(default = "default_sidecar_connection_timeout_ms")]
-    pub connection_timeout_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct SidecarProviderConfig {
-    #[serde(default = "default_sidecar_provider_kind")]
-    pub kind: String,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub api_key_env_var: Option<String>,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-}
-
-impl Default for SidecarProviderConfig {
-    fn default() -> Self {
-        Self {
-            kind: default_sidecar_provider_kind(),
-            base_url: None,
-            model: None,
-            api_key: None,
-            api_key_env_var: None,
-            timeout_ms: None,
-            system_prompt: None,
-        }
-    }
-}
-
-impl Default for SidecarBackendConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            command: None,
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            provider: SidecarProviderConfig::default(),
-            cwd: None,
-            startup_mode: SidecarStartupMode::default(),
-            connection_timeout_ms: default_sidecar_connection_timeout_ms(),
-        }
-    }
-}
-
-impl SidecarBackendConfig {
-    pub fn is_launchable(&self) -> bool {
-        self.launch_validation_error().is_none()
-    }
-
-    pub fn launch_validation_error(&self) -> Option<String> {
-        if !self.enabled {
-            return Some("Sidecar backend is disabled in Mini-Term settings.".to_string());
-        }
-
-        if matches!(self.startup_mode, SidecarStartupMode::Process)
-            && self
-                .command
-                .as_deref()
-                .map(str::trim).is_none_or(|value| value.is_empty())
-        {
-            return Some(
-                "Sidecar backend is enabled, but the launch command is missing.".to_string(),
-            );
-        }
-
-        self.provider_validation_error()
-    }
-
-    pub fn provider_validation_error(&self) -> Option<String> {
-        let kind = self.provider.normalized_kind();
-        let Some(provider_kind) = ModelGatewayProviderKind::parse(&kind) else {
-            return Some(format!(
-                "Sidecar provider `{kind}` is not supported. Use `reference`, `openai-compatible`, or `anthropic`."
-            ));
-        };
-
-        if provider_kind.requires_model()
-            && self
-                .provider
-                .model
-                .as_deref().is_none_or(|value| value.is_empty())
-        {
-            return Some(format!(
-                "Sidecar provider `{}` requires a model.",
-                provider_kind.as_str()
-            ));
-        }
-
-        if provider_kind.requires_api_key() && !self.provider.has_resolved_api_key() {
-            return Some(format!(
-                "Sidecar provider `{}` requires an API key or API key env var.",
-                provider_kind.as_str()
-            ));
-        }
-
-        if let Some(base_url) = self.provider.base_url.as_deref() {
-            if let Some(error) = base_url_policy_error(base_url) {
-                return Some(error);
-            }
-        }
-
-        None
-    }
-
-    pub fn resolved_env(&self) -> BTreeMap<String, String> {
-        merge_sidecar_provider_into_runtime_env(self.env.clone(), &self.provider)
-    }
-
-    pub fn redact_secrets_in_text(&self, text: &str) -> String {
-        self.provider.redact_secrets_in_text(text)
-    }
-}
-
-impl SidecarProviderConfig {
-    pub fn normalized_kind(&self) -> String {
-        let kind = self.kind.trim().to_ascii_lowercase();
-        if kind.is_empty() {
-            default_sidecar_provider_kind()
-        } else {
-            kind
-        }
-    }
-
-    pub fn display_label(&self) -> String {
-        match self.normalized_kind().as_str() {
-            PROVIDER_KIND_REFERENCE => PROVIDER_KIND_REFERENCE.to_string(),
-            "openai-compatible" | "anthropic" => self
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|model| format!("{}/{model}", self.normalized_kind()))
-                .unwrap_or_else(|| self.normalized_kind()),
-            other => other.to_string(),
-        }
-    }
-
-    pub fn resolved_api_key(&self) -> Option<String> {
-        normalize_optional_string(self.api_key.clone()).or_else(|| {
-            normalize_optional_string(self.api_key_env_var.clone()).and_then(|env_var| {
-                std::env::var(&env_var)
-                    .ok()
-                    .and_then(|value| normalize_optional_string(Some(value)))
-            })
-        })
-    }
-
-    pub fn has_resolved_api_key(&self) -> bool {
-        self.resolved_api_key().is_some()
-    }
-
-    pub fn api_key_source(&self) -> &'static str {
-        if normalize_optional_string(self.api_key_env_var.clone()).is_some() {
-            "env-var"
-        } else if normalize_optional_string(self.api_key.clone()).is_some() {
-            "inline"
-        } else {
-            "missing"
-        }
-    }
-
-    pub fn redact_secrets_in_text(&self, text: &str) -> String {
-        let mut redacted = text.to_string();
-        let env_secret =
-            normalize_optional_string(self.api_key_env_var.clone()).and_then(|env_var| {
-                std::env::var(&env_var)
-                    .ok()
-                    .and_then(|value| normalize_optional_string(Some(value)))
-            });
-        for secret in [normalize_optional_string(self.api_key.clone()), env_secret]
-            .into_iter()
-            .flatten()
-        {
-            if secret.len() >= 4 {
-                redacted = redacted.replace(&secret, "[redacted]");
-            }
-        }
-        redacted
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum SidecarStartupMode {
-    #[default]
-    Process,
-    Loopback,
+    pub project_links: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceRootConfig {
-    pub id: String,
-    pub name: String,
-    pub path: String,
-    #[serde(default = "default_workspace_root_role")]
-    pub role: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceConfig {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub roots: Vec<WorkspaceRootConfig>,
-    #[serde(default)]
-    pub pinned: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub saved_layout: Option<SavedProjectLayout>,
-    #[serde(default)]
-    pub expanded_dirs_by_root: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    pub created_at: u64,
-    #[serde(default)]
-    pub last_opened_at: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecentWorkspaceEntry {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub root_paths: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accent: Option<String>,
-    #[serde(default)]
-    pub last_opened_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub saved_layout: Option<SavedProjectLayout>,
-    #[serde(default)]
-    pub expanded_dirs_by_root: BTreeMap<String, Vec<String>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompletionUsageConfig {
-    #[serde(default)]
-    pub commands: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub subcommands: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub options: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub arguments: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub scopes: BTreeMap<String, CompletionUsageScopeConfig>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompletionUsageScopeConfig {
-    #[serde(default)]
-    pub commands: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub subcommands: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub options: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub arguments: BTreeMap<String, u32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThemeConfig {
-    pub preset: String,
-    pub window_effect: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ThemeConfigRepr {
-    Modern {
-        #[serde(default = "default_theme_preset")]
-        preset: String,
-        #[serde(default = "default_theme_window_effect")]
-        window_effect: String,
-    },
-    Legacy(String),
-}
-
-impl<'de> Deserialize<'de> for ThemeConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let repr = ThemeConfigRepr::deserialize(deserializer)?;
-        Ok(match repr {
-            ThemeConfigRepr::Modern {
-                preset,
-                window_effect,
-            } => Self {
-                preset,
-                window_effect,
-            },
-            ThemeConfigRepr::Legacy(mode) => Self {
-                preset: legacy_theme_mode_to_preset(&mode),
-                window_effect: default_theme_window_effect(),
-            },
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RunProfile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub saved_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_run_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage_scope: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedTerminalPane {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+pub struct SavedPane {
     pub shell_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_profile: Option<RunProfile>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedFileViewerPane {
-    pub kind: String,
-    pub file_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub navigation_target: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedWorktreeDiffPane {
-    pub kind: String,
-    pub project_path: String,
-    pub git_status: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedCommitDiffPane {
-    pub kind: String,
-    pub repo_path: String,
-    pub commit_hash: String,
-    pub commit_message: String,
-    pub files: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedFileHistoryPane {
-    pub kind: String,
-    pub project_path: String,
-    pub file_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedAgentTaskPanelPane {
-    pub kind: String,
-    pub filter: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_task_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SavedUnknownPane {
-    pub kind: String,
-    #[serde(flatten)]
-    pub data: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum SavedPane {
-    Terminal(SavedTerminalPane),
-    FileViewer(SavedFileViewerPane),
-    WorktreeDiff(SavedWorktreeDiffPane),
-    CommitDiff(SavedCommitDiffPane),
-    FileHistory(SavedFileHistoryPane),
-    AgentTasks(SavedAgentTaskPanelPane),
-    Unknown(SavedUnknownPane),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum SavedSplitNode {
     Leaf {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// 旧格式（单个 pane），仅用于反序列化兼容，序列化时跳过
+        #[serde(default, skip_serializing)]
         pane: Option<SavedPane>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        /// 新格式（pane 数组），前端始终使用此字段
+        #[serde(default)]
         panes: Vec<SavedPane>,
     },
     Split {
@@ -581,6 +172,18 @@ pub struct SavedProjectLayout {
     pub active_tab_index: usize,
 }
 
+/// 项目级环境变量。注入到该项目新建终端 PTY 的子进程,与 portable-pty 默认继承的
+/// 父进程 env 合并(同名 key 覆盖)。已开终端不受影响。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectEnvVar {
+    pub key: String,
+    pub value: String,
+    /// 取消勾选时 value 保留但不注入;允许用户临时禁用某变量而无需删行重输。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
@@ -591,6 +194,16 @@ pub struct ProjectConfig {
     pub saved_layout: Option<SavedProjectLayout>,
     #[serde(default)]
     pub expanded_dirs: Vec<String>,
+    /// 是否已为该项目启用 SSH MCP（向项目目录写入了 Claude / Codex 的 MCP 注册配置）。
+    #[serde(default)]
+    pub ssh_mcp_enabled: bool,
+    /// 该项目的 agent 可访问的 SSH 连接 id 列表（「关联 SSH」设定的范围）。
+    /// `None` = 未设置 → 默认全部连接可见。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_connection_ids: Option<Vec<String>>,
+    /// 项目级环境变量列表,新建终端时注入。空 Vec 时序列化跳过保持文件干净。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_vars: Vec<ProjectEnvVar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,102 +214,50 @@ pub struct ShellConfig {
     pub args: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorConfig {
+    pub name: String,
+    pub command: String,
+}
+
 fn default_ui_font_size() -> f64 {
     13.0
 }
-
 fn default_terminal_font_size() -> f64 {
     14.0
 }
-
-fn default_sidecar_connection_timeout_ms() -> u64 {
-    10_000
-}
-
-fn default_sidecar_provider_kind() -> String {
-    PROVIDER_KIND_REFERENCE.into()
-}
-
-fn default_allow_builtin_fallback() -> bool {
-    true
-}
-
-fn default_codex_backend_routing() -> TaskTargetBackendRoutingConfig {
-    TaskTargetBackendRoutingConfig {
-        preferred_backend_id: Some("codex-cli".into()),
-        allow_builtin_fallback: true,
-    }
-}
-
-fn default_claude_backend_routing() -> TaskTargetBackendRoutingConfig {
-    TaskTargetBackendRoutingConfig {
-        preferred_backend_id: Some("claude-cli".into()),
-        allow_builtin_fallback: true,
-    }
-}
-
-fn default_workspace_root_role() -> String {
-    "member".into()
-}
-
-fn current_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn powershell_completion_bootstrap() -> String {
-    let mut commands = vec![powershell_utf8_bootstrap_script()];
-    commands.push("Import-Module PSReadLine -ErrorAction SilentlyContinue".to_string());
-    commands.push(
-        "if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {".to_string(),
-    );
-    commands.push("  Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete".to_string());
-    commands.push(
-        "  try { Set-PSReadLineOption -PredictionSource History -PredictionViewStyle ListView } catch {}"
-            .to_string(),
-    );
-    commands.push("}".to_string());
-    commands.join("; ")
-}
-
-#[cfg(target_os = "windows")]
-fn cmd_utf8_bootstrap() -> String {
-    cmd_utf8_bootstrap_command()
-}
-
-fn default_theme_preset() -> String {
-    "warm-carbon".into()
-}
-
-fn default_theme_window_effect() -> String {
+fn default_theme() -> String {
     "auto".into()
 }
-
-fn legacy_theme_mode_to_preset(mode: &str) -> String {
-    match mode {
-        "light" => "ghostty-light".into(),
-        "dark" => "ghostty-dark".into(),
-        _ => default_theme_preset(),
-    }
+fn default_skin() -> String {
+    "none".into()
 }
-
-impl Default for ThemeConfig {
-    fn default() -> Self {
-        Self {
-            preset: default_theme_preset(),
-            window_effect: default_theme_window_effect(),
-        }
-    }
+fn default_terminal_follow_theme() -> bool {
+    true
+}
+fn default_ai_completion_popup() -> bool {
+    true
+}
+fn default_ai_completion_taskbar_flash() -> bool {
+    true
+}
+fn default_git_changes_view_mode() -> String {
+    "list".into()
+}
+fn default_long_paste_line_threshold() -> u32 {
+    10
+}
+fn default_long_paste_char_threshold() -> u32 {
+    2000
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            workspaces: vec![],
-            recent_workspaces: vec![],
-            last_workspace_id: None,
             projects: vec![],
             project_tree: None,
             project_groups: None,
@@ -705,22 +266,41 @@ impl Default for AppConfig {
             available_shells: default_shells(),
             ui_font_size: default_ui_font_size(),
             terminal_font_size: default_terminal_font_size(),
+            ui_font_family: None,
+            terminal_font_family: None,
+            terminal_ligatures: false,
             layout_sizes: None,
-            theme: ThemeConfig::default(),
             middle_column_sizes: None,
-            workspace_sidebar_sizes: None,
-            completion_usage: CompletionUsageConfig::default(),
-            agent_policies: Some(crate::agent_policy::default_agent_policies()),
-            agent_backends: Some(AgentBackendsConfig::default()),
-            external_mcp: Some(ExternalMcpInteropConfig::default()),
+            theme: default_theme(),
+            skin: default_skin(),
+            terminal_follow_theme: default_terminal_follow_theme(),
+            ai_completion_popup: default_ai_completion_popup(),
+            ai_completion_taskbar_flash: default_ai_completion_taskbar_flash(),
+            ai_completion_sound: true,
+            ai_completion_sound_path: None,
+            editors: vec![],
+            default_editor: None,
             vscode_path: None,
+            git_changes_view_mode: default_git_changes_view_mode(),
+            long_paste_to_file: true,
+            long_paste_line_threshold: default_long_paste_line_threshold(),
+            long_paste_char_threshold: default_long_paste_char_threshold(),
+            projects_visible: true,
+            sessions_visible: true,
+            files_visible: true,
+            git_visible: true,
+            last_active_project_id: None,
+            hook_enabled: false,
+            smart_copy_paste: false,
+            ssh_connections: vec![],
+            cc_connect: None,
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn default_shell_name() -> String {
-    "powershell".into()
+    "cmd".into()
 }
 
 #[cfg(target_os = "macos")]
@@ -742,19 +322,19 @@ fn default_shell_name() -> String {
 fn default_shells() -> Vec<ShellConfig> {
     vec![
         ShellConfig {
-            name: "powershell".into(),
-            command: "powershell".into(),
-            args: Some(vec![
-                "-NoLogo".into(),
-                "-NoExit".into(),
-                "-Command".into(),
-                powershell_completion_bootstrap(),
-            ]),
-        },
-        ShellConfig {
             name: "cmd".into(),
             command: "cmd".into(),
-            args: Some(vec!["/K".into(), cmd_utf8_bootstrap()]),
+            args: None,
+        },
+        ShellConfig {
+            name: "powershell".into(),
+            command: "powershell".into(),
+            args: None,
+        },
+        ShellConfig {
+            name: "pwsh".into(),
+            command: "pwsh".into(),
+            args: None,
         },
     ]
 }
@@ -805,428 +385,69 @@ fn default_shells() -> Vec<ShellConfig> {
     }]
 }
 
-pub const APP_IDENTIFIER: &str = "com.tauri-app.tauri-app";
-
-pub fn config_path_for_data_dir(data_dir: &Path) -> PathBuf {
-    fs::create_dir_all(data_dir).ok();
-    data_dir.join("config.json")
-}
-
-fn resolve_app_data_dir(default_dir: PathBuf) -> PathBuf {
-    if let Ok(explicit) = std::env::var("MINI_TERM_DATA_DIR") {
-        let path = PathBuf::from(explicit);
-        fs::create_dir_all(&path).ok();
-        return path;
-    }
-
-    fs::create_dir_all(&default_dir).ok();
-    default_dir
-}
-
 fn config_path(app: &AppHandle) -> PathBuf {
-    let default_dir = app
+    let dir = app
         .path()
         .app_data_dir()
         .expect("failed to get app data dir");
-    let dir = resolve_app_data_dir(default_dir);
-    config_path_for_data_dir(&dir)
+    fs::create_dir_all(&dir).ok();
+    dir.join("config.json")
 }
 
-fn get_path_base_name(path: &str) -> String {
-    path.rsplit(['\\', '/'])
-        .find(|segment| !segment.is_empty())
-        .unwrap_or(path)
-        .to_string()
-}
-
-fn path_exists(path: &str) -> bool {
-    fs::metadata(path).is_ok()
-}
-
-fn normalize_path_string(path: &str) -> String {
-    path.replace('\\', "/").trim_end_matches('/').to_string()
-}
-
-fn path_is_within_root(path: &str, root_path: &str) -> bool {
-    let normalized_path = normalize_path_string(path);
-    let normalized_root = normalize_path_string(root_path);
-    normalized_path == normalized_root
-        || normalized_path.starts_with(&format!("{normalized_root}/"))
-}
-
-fn ensure_single_primary_root(roots: &mut [WorkspaceRootConfig]) {
-    let primary_root_id = roots
-        .iter()
-        .find(|root| root.role == "primary")
-        .map(|root| root.id.clone())
-        .or_else(|| roots.first().map(|root| root.id.clone()));
-
-    for root in roots.iter_mut() {
-        if root.name.trim().is_empty() {
-            root.name = get_path_base_name(&root.path);
-        }
-
-        if primary_root_id.as_deref() == Some(root.id.as_str()) {
-            root.role = "primary".into();
-        } else {
-            root.role = "member".into();
-        }
+/// 纯函数版本,接收新 app_data_dir 路径。便于单元测试。
+///
+/// 行为:
+/// 1. 新目录已有 `config.json` → 直接返回(已迁移过 / 全新用户首次保存生成)
+/// 2. 新目录无 `config.json`,但老 identifier 目录有 → 拷过来
+/// 3. 老目录也没有 → 返回(全新安装)
+///
+/// 老 config.json 不删除,作为回退兜底。create_dir_all / copy 失败仅打印日志,
+/// 不 panic — 后续 read_config 会在缺文件时退化为 default。
+fn migrate_app_data_at(new_dir: &Path) {
+    let new_config = new_dir.join("config.json");
+    if new_config.exists() {
+        return;
     }
-}
-
-fn legacy_project_root_id(project_id: &str) -> String {
-    format!("{project_id}-root-1")
-}
-
-fn project_to_workspace(project: &ProjectConfig) -> WorkspaceConfig {
-    let timestamp = current_timestamp_ms();
-    let root_id = legacy_project_root_id(&project.id);
-    WorkspaceConfig {
-        id: project.id.clone(),
-        name: project.name.clone(),
-        roots: vec![WorkspaceRootConfig {
-            id: root_id.clone(),
-            name: get_path_base_name(&project.path),
-            path: project.path.clone(),
-            role: "primary".into(),
-        }],
-        pinned: false,
-        accent: None,
-        saved_layout: project.saved_layout.clone(),
-        expanded_dirs_by_root: BTreeMap::from([(root_id, project.expanded_dirs.clone())]),
-        created_at: timestamp,
-        last_opened_at: timestamp,
+    let Some(base_dir) = new_dir.parent() else {
+        return;
+    };
+    let old_config = base_dir.join(LEGACY_IDENTIFIER).join("config.json");
+    if !old_config.exists() {
+        return;
     }
-}
-
-fn workspace_to_project(workspace: &WorkspaceConfig) -> ProjectConfig {
-    let primary_root = workspace
-        .roots
-        .iter()
-        .find(|root| root.role == "primary")
-        .or_else(|| workspace.roots.first());
-
-    let expanded_dirs = primary_root
-        .and_then(|root| workspace.expanded_dirs_by_root.get(&root.id))
-        .cloned()
-        .unwrap_or_default();
-
-    ProjectConfig {
-        id: workspace.id.clone(),
-        name: workspace.name.clone(),
-        path: primary_root
-            .map(|root| root.path.clone())
-            .unwrap_or_default(),
-        saved_layout: workspace.saved_layout.clone(),
-        expanded_dirs,
+    if let Err(e) = fs::create_dir_all(new_dir) {
+        eprintln!("[migrate] 创建新数据目录失败 {}: {e}", new_dir.display());
+        return;
     }
-}
-
-fn normalize_workspace(mut workspace: WorkspaceConfig) -> WorkspaceConfig {
-    if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
-        for root in &workspace.roots {
+    match fs::copy(&old_config, &new_config) {
+        Ok(_) => {
             eprintln!(
-                "[mini-term] normalize_workspace root={} exists={}",
-                root.path,
-                path_exists(&root.path)
+                "[migrate] 已将旧 config.json 迁移至新目录: {}",
+                new_config.display()
             );
         }
-    }
-
-    workspace
-        .roots
-        .retain(|root| !root.path.trim().is_empty() && path_exists(&root.path));
-    workspace.roots.retain(|root| !root.path.trim().is_empty());
-    ensure_single_primary_root(&mut workspace.roots);
-
-    if workspace.name.trim().is_empty() {
-        workspace.name = workspace
-            .roots
-            .first()
-            .map(|root| get_path_base_name(&root.path))
-            .unwrap_or_else(|| "Workspace".into());
-    }
-
-    let now = current_timestamp_ms();
-    if workspace.created_at == 0 {
-        workspace.created_at = now;
-    }
-    if workspace.last_opened_at == 0 {
-        workspace.last_opened_at = workspace.created_at;
-    }
-
-    workspace
-        .expanded_dirs_by_root
-        .retain(|root_id, _| workspace.roots.iter().any(|root| root.id == *root_id));
-
-    for root in &workspace.roots {
-        let filtered = workspace
-            .expanded_dirs_by_root
-            .get(&root.id)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|path| path_exists(path) && path_is_within_root(path, &root.path))
-            .collect::<Vec<_>>();
-        workspace
-            .expanded_dirs_by_root
-            .insert(root.id.clone(), filtered);
-    }
-
-    workspace
-}
-
-fn normalize_recent_workspace(mut workspace: RecentWorkspaceEntry) -> RecentWorkspaceEntry {
-    workspace.root_paths.retain(|path| !path.trim().is_empty());
-    if workspace.name.trim().is_empty() {
-        workspace.name = workspace
-            .root_paths
-            .first()
-            .map(|path| get_path_base_name(path))
-            .unwrap_or_else(|| "Workspace".into());
-    }
-    if workspace.last_opened_at == 0 {
-        workspace.last_opened_at = current_timestamp_ms();
-    }
-    workspace
-}
-
-const SIDECAR_PROVIDER_ENV_KEY: &str = "MINI_TERM_SIDECAR_PROVIDER";
-const SIDECAR_PROVIDER_BASE_URL_ENV_KEY: &str = "MINI_TERM_SIDECAR_BASE_URL";
-const SIDECAR_PROVIDER_MODEL_ENV_KEY: &str = "MINI_TERM_SIDECAR_MODEL";
-const SIDECAR_PROVIDER_API_KEY_ENV_KEY: &str = "MINI_TERM_SIDECAR_API_KEY";
-const SIDECAR_PROVIDER_TIMEOUT_ENV_KEY: &str = "MINI_TERM_SIDECAR_PROVIDER_TIMEOUT_MS";
-const SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY: &str = "MINI_TERM_SIDECAR_SYSTEM_PROMPT";
-const ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY: &str = "MINI_TERM_ALLOW_PRIVATE_BASE_URL";
-const SIDECAR_PROVIDER_ENV_KEYS: [&str; 6] = [
-    SIDECAR_PROVIDER_ENV_KEY,
-    SIDECAR_PROVIDER_BASE_URL_ENV_KEY,
-    SIDECAR_PROVIDER_MODEL_ENV_KEY,
-    SIDECAR_PROVIDER_API_KEY_ENV_KEY,
-    SIDECAR_PROVIDER_TIMEOUT_ENV_KEY,
-    SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY,
-];
-
-fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn allow_private_sidecar_base_urls() -> bool {
-    std::env::var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY)
-        .ok()
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
-}
-
-fn is_disallowed_private_host(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
-        return true;
-    }
-
-    match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(addr)) => {
-            addr.is_private() || addr.is_loopback() || addr.is_link_local() || addr.is_unspecified()
+        Err(e) => {
+            eprintln!("[migrate] 拷贝旧 config.json 失败: {e}");
         }
-        Ok(IpAddr::V6(addr)) => {
-            addr.is_loopback() || addr.is_unspecified() || addr.is_unique_local() || addr.is_unicast_link_local()
-        }
-        Err(_) => false,
     }
 }
 
-fn base_url_policy_error(base_url: &str) -> Option<String> {
-    let parsed = reqwest::Url::parse(base_url).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Some("Sidecar provider base URL must start with `http://` or `https://`.".to_string());
+/// 在 lib.rs setup 早期调用,保证所有 read_config 之前完成 identifier 迁移。
+pub fn migrate_legacy_app_data(app: &AppHandle) {
+    if let Ok(new_dir) = app.path().app_data_dir() {
+        migrate_app_data_at(&new_dir);
     }
-
-    let Some(host) = parsed
-        .host_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Some("Sidecar provider base URL must include a host.".to_string());
-    };
-
-    if !allow_private_sidecar_base_urls() && is_disallowed_private_host(host) {
-        return Some(
-            "Sidecar provider base URL must not target loopback, localhost, link-local, or private network addresses.".to_string(),
-        );
-    }
-
-    None
 }
 
-fn env_string(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
-    env.get(key)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn env_positive_u64(env: &BTreeMap<String, String>, key: &str) -> Option<u64> {
-    env.get(key)
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-}
-
-fn normalize_sidecar_provider_config(
-    mut provider: SidecarProviderConfig,
-    env: &BTreeMap<String, String>,
-) -> SidecarProviderConfig {
-    let normalized_kind = provider.kind.trim().to_ascii_lowercase();
-    let has_explicit_provider_config = normalized_kind != default_sidecar_provider_kind()
-        || provider.base_url.is_some()
-        || provider.model.is_some()
-        || provider.api_key.is_some()
-        || provider.api_key_env_var.is_some()
-        || provider.timeout_ms.is_some()
-        || provider.system_prompt.is_some();
-
-    provider.kind = normalized_kind;
-    if !has_explicit_provider_config || provider.kind.is_empty() {
-        provider.kind = env_string(env, SIDECAR_PROVIDER_ENV_KEY)
-            .map(|value| value.to_ascii_lowercase())
-            .unwrap_or_else(default_sidecar_provider_kind);
-    }
-
-    provider.base_url = normalize_optional_string(provider.base_url)
-        .or_else(|| env_string(env, SIDECAR_PROVIDER_BASE_URL_ENV_KEY));
-    provider.model = normalize_optional_string(provider.model)
-        .or_else(|| env_string(env, SIDECAR_PROVIDER_MODEL_ENV_KEY));
-    provider.api_key = normalize_optional_string(provider.api_key)
-        .or_else(|| env_string(env, SIDECAR_PROVIDER_API_KEY_ENV_KEY));
-    provider.api_key_env_var = normalize_optional_string(provider.api_key_env_var);
-    provider.timeout_ms = provider
-        .timeout_ms
-        .filter(|value| *value > 0)
-        .or_else(|| env_positive_u64(env, SIDECAR_PROVIDER_TIMEOUT_ENV_KEY));
-    provider.system_prompt = normalize_optional_string(provider.system_prompt)
-        .or_else(|| env_string(env, SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY));
-
-    provider
-}
-
-fn merge_sidecar_provider_into_persisted_env(
-    mut env: BTreeMap<String, String>,
-    provider: &SidecarProviderConfig,
-) -> BTreeMap<String, String> {
-    env.retain(|key, _| !SIDECAR_PROVIDER_ENV_KEYS.contains(&key.as_str()));
-    env.insert(SIDECAR_PROVIDER_ENV_KEY.into(), provider.normalized_kind());
-
-    if let Some(base_url) = normalize_optional_string(provider.base_url.clone()) {
-        env.insert(SIDECAR_PROVIDER_BASE_URL_ENV_KEY.into(), base_url);
-    }
-    if let Some(model) = normalize_optional_string(provider.model.clone()) {
-        env.insert(SIDECAR_PROVIDER_MODEL_ENV_KEY.into(), model);
-    }
-    if let Some(timeout_ms) = provider.timeout_ms.filter(|value| *value > 0) {
-        env.insert(
-            SIDECAR_PROVIDER_TIMEOUT_ENV_KEY.into(),
-            timeout_ms.to_string(),
-        );
-    }
-    if let Some(system_prompt) = normalize_optional_string(provider.system_prompt.clone()) {
-        env.insert(SIDECAR_PROVIDER_SYSTEM_PROMPT_ENV_KEY.into(), system_prompt);
-    }
-
-    env
-}
-
-fn merge_sidecar_provider_into_runtime_env(
-    mut env: BTreeMap<String, String>,
-    provider: &SidecarProviderConfig,
-) -> BTreeMap<String, String> {
-    env = merge_sidecar_provider_into_persisted_env(env, provider);
-    if let Some(api_key) = provider.resolved_api_key() {
-        env.insert(SIDECAR_PROVIDER_API_KEY_ENV_KEY.into(), api_key);
-    }
-    env
-}
-
-fn normalize_sidecar_config(mut config: SidecarBackendConfig) -> SidecarBackendConfig {
-    config.command = config
-        .command
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    config.args = config
-        .args
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect();
-    config.cwd = config
-        .cwd
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    config.env = config
-        .env
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let key = key.trim().to_string();
-            if key.is_empty() {
-                return None;
-            }
-            Some((key, value))
-        })
-        .collect();
-    config.provider = normalize_sidecar_provider_config(config.provider, &config.env);
-    config.env = merge_sidecar_provider_into_persisted_env(config.env, &config.provider);
-    if config.connection_timeout_ms == 0 {
-        config.connection_timeout_ms = default_sidecar_connection_timeout_ms();
-    }
-    config
-}
-
-fn sanitize_persisted_sidecar_provider(provider: &mut SidecarProviderConfig) {
-    provider.api_key = None;
-}
-
-fn sanitize_persisted_config(mut config: AppConfig) -> AppConfig {
-    if let Some(agent_backends) = config.agent_backends.as_mut() {
-        sanitize_persisted_sidecar_provider(&mut agent_backends.claude_sidecar.provider);
-        agent_backends.claude_sidecar.env.retain(|key, _| {
-            key.as_str() != SIDECAR_PROVIDER_API_KEY_ENV_KEY
-        });
-    }
-
-    config
-}
-
-fn normalize_target_backend_routing(
-    mut config: TaskTargetBackendRoutingConfig,
-    default_preferred_backend_id: &str,
-) -> TaskTargetBackendRoutingConfig {
-    config.preferred_backend_id = normalize_optional_string(config.preferred_backend_id)
-        .or_else(|| Some(default_preferred_backend_id.to_string()));
-    config
-}
-
-fn normalize_agent_backend_routing(
-    mut config: AgentBackendRoutingConfig,
-) -> AgentBackendRoutingConfig {
-    config.codex = normalize_target_backend_routing(config.codex, "codex-cli");
-    config.claude = normalize_target_backend_routing(config.claude, "claude-cli");
-    config
-}
-
-fn normalize_agent_backends(mut config: AgentBackendsConfig) -> AgentBackendsConfig {
-    config.routing = normalize_agent_backend_routing(config.routing);
-    config.claude_sidecar = normalize_sidecar_config(config.claude_sidecar);
-    config
-}
-
+/// 将旧格式 `pane`（单个）迁移到新格式 `panes`（数组）
 fn normalize_split_node(node: &mut SavedSplitNode) {
     match node {
         SavedSplitNode::Leaf { pane, panes } => {
-            if pane.is_none() {
-                *pane = panes.first().cloned();
+            if let Some(p) = pane.take() {
+                if panes.is_empty() {
+                    panes.push(p);
+                }
             }
-            panes.clear();
         }
         SavedSplitNode::Split { children, .. } => {
             for child in children.iter_mut() {
@@ -1236,28 +457,28 @@ fn normalize_split_node(node: &mut SavedSplitNode) {
     }
 }
 
-fn normalize_saved_layout(layout: &mut SavedProjectLayout) {
-    for tab in layout.tabs.iter_mut() {
-        normalize_split_node(&mut tab.split_layout);
-    }
-}
-
 fn migrate_config(mut config: AppConfig) -> AppConfig {
+    // 迁移 vscodePath → editors
+    if config.editors.is_empty() {
+        if let Some(ref path) = config.vscode_path {
+            let trimmed = path.trim();
+            if !trimmed.is_empty() {
+                config.editors.push(EditorConfig {
+                    name: "VS Code".into(),
+                    command: trimmed.into(),
+                });
+                config.default_editor = Some("VS Code".into());
+            }
+        }
+    }
+    config.vscode_path = None;
+
+    // 迁移 SavedSplitNode: pane → panes
     for project in config.projects.iter_mut() {
         if let Some(layout) = project.saved_layout.as_mut() {
-            normalize_saved_layout(layout);
-        }
-    }
-
-    for workspace in config.workspaces.iter_mut() {
-        if let Some(layout) = workspace.saved_layout.as_mut() {
-            normalize_saved_layout(layout);
-        }
-    }
-
-    for recent_workspace in config.recent_workspaces.iter_mut() {
-        if let Some(layout) = recent_workspace.saved_layout.as_mut() {
-            normalize_saved_layout(layout);
+            for tab in layout.tabs.iter_mut() {
+                normalize_split_node(&mut tab.split_layout);
+            }
         }
     }
 
@@ -1266,7 +487,6 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
         config.project_ordering = None;
         return config;
     }
-
     let groups = match config.project_groups.take() {
         Some(g) if !g.is_empty() => g,
         _ => return config,
@@ -1296,224 +516,37 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
     config
 }
 
-pub fn normalize_config(mut config: AppConfig) -> AppConfig {
-    if config.workspaces.is_empty() && !config.projects.is_empty() {
-        config.workspaces = config.projects.iter().map(project_to_workspace).collect();
+/// 从磁盘加载并迁移配置。供后端内部调用(例如 editor.rs 读取 vscode_path)。
+pub fn read_config(app: &AppHandle) -> AppConfig {
+    let path = config_path(app);
+    match fs::read_to_string(&path) {
+        Ok(content) => migrate_config(serde_json::from_str(&content).unwrap_or_default()),
+        Err(_) => migrate_config(AppConfig::default()),
     }
-
-    config.workspaces = config
-        .workspaces
-        .into_iter()
-        .map(normalize_workspace)
-        .filter(|workspace| !workspace.roots.is_empty())
-        .collect();
-
-    config.recent_workspaces = config
-        .recent_workspaces
-        .into_iter()
-        .map(normalize_recent_workspace)
-        .collect();
-
-    if config.last_workspace_id.is_none() {
-        config.last_workspace_id = config
-            .workspaces
-            .first()
-            .map(|workspace| workspace.id.clone());
-    }
-
-    config.projects = config.workspaces.iter().map(workspace_to_project).collect();
-
-    if config.available_shells.is_empty() {
-        config.available_shells = default_shells();
-    }
-
-    config.available_shells = config
-        .available_shells
-        .into_iter()
-        .map(normalize_shell)
-        .collect();
-
-    let default_shell_exists = config
-        .available_shells
-        .iter()
-        .any(|shell| shell.name == config.default_shell);
-
-    if config.default_shell.is_empty() || !default_shell_exists {
-        config.default_shell = config
-            .available_shells
-            .first()
-            .map(|shell| shell.name.clone())
-            .unwrap_or_else(default_shell_name);
-    }
-
-    if config.agent_policies.is_none() {
-        config.agent_policies = Some(crate::agent_policy::default_agent_policies());
-    }
-
-    config.agent_backends = Some(normalize_agent_backends(
-        config.agent_backends.unwrap_or_default(),
-    ));
-    config.external_mcp = Some(config.external_mcp.unwrap_or_default());
-
-    config
-}
-
-fn normalize_shell(mut shell: ShellConfig) -> ShellConfig {
-    let command_name = shell
-        .command
-        .rsplit('\\')
-        .next()
-        .unwrap_or(shell.command.as_str())
-        .rsplit('/')
-        .next()
-        .unwrap_or(shell.command.as_str())
-        .to_ascii_lowercase();
-
-    if matches!(shell.args.as_ref(), Some(args) if !args.is_empty()) {
-        return shell;
-    }
-
-    shell.args = match command_name.as_str() {
-        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => Some(vec![
-            "-NoLogo".into(),
-            "-NoExit".into(),
-            "-Command".into(),
-            powershell_completion_bootstrap(),
-        ]),
-        "cmd" | "cmd.exe" => Some(vec!["/K".into(), cmd_utf8_bootstrap()]),
-        _ => None,
-    };
-
-    shell
 }
 
 #[tauri::command]
 pub fn load_config(app: AppHandle) -> AppConfig {
-    let path = config_path(&app);
-    let config = load_config_from_path(&path);
-    if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
-        eprintln!(
-            "[mini-term] load_config path={} workspaces={}",
-            path.display(),
-            config.workspaces.len()
-        );
-    }
-    let _ = save_config_to_path(&path, config.clone());
-    config
+    read_config(&app)
 }
 
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let path = config_path(&app);
-    if std::env::var("MINI_TERM_DISABLE_CONFIG_WRITES")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
-            eprintln!(
-                "[mini-term] save_config skipped path={} workspaces={}",
-                path.display(),
-                config.workspaces.len()
-            );
-        }
-        return Ok(());
-    }
-    if std::env::var("MINI_TERM_DATA_DIR").is_ok() {
-        eprintln!(
-            "[mini-term] save_config path={} workspaces={}",
-            path.display(),
-            config.workspaces.len()
-        );
-    }
-    save_config_to_path(&path, config)
-}
-
-pub fn load_config_from_path(path: &Path) -> AppConfig {
-    match fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(config) => normalize_config(migrate_config(config)),
-            Err(err) => {
-                eprintln!(
-                    "[mini-term] failed to parse config at {}: {}",
-                    path.display(),
-                    err
-                );
-                normalize_config(migrate_config(AppConfig::default()))
-            }
-        },
-        Err(_) => normalize_config(migrate_config(AppConfig::default())),
-    }
-}
-
-pub fn save_config_to_path(path: &Path, config: AppConfig) -> Result<(), String> {
-    let config = sanitize_persisted_config(normalize_config(migrate_config(config)));
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    // 原子写,避免写入中途崩溃留下截断的 config.json 导致全部用户配置丢失
+    crate::fs::atomic_write(&path, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn create_temp_dir(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("mini-term-config-{label}-{unique}"));
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 
     #[test]
     fn default_config_has_shells() {
         let config = AppConfig::default();
         assert!(!config.available_shells.is_empty());
         assert!(!config.default_shell.is_empty());
-    }
-
-    #[test]
-    fn default_agent_backend_routing_prefers_builtin_clis() {
-        let routing = AppConfig::default().agent_backends.unwrap().routing;
-        assert_eq!(
-            routing.codex.preferred_backend_id.as_deref(),
-            Some("codex-cli")
-        );
-        assert!(routing.codex.allow_builtin_fallback);
-        assert_eq!(
-            routing.claude.preferred_backend_id.as_deref(),
-            Some("claude-cli")
-        );
-        assert!(routing.claude.allow_builtin_fallback);
-    }
-
-    #[test]
-    fn resolve_app_data_dir_prefers_mini_term_data_dir_env() {
-        let _guard = lock_env();
-        let override_dir = create_temp_dir("data-dir-override");
-        let fallback_dir = create_temp_dir("data-dir-fallback");
-        std::env::set_var("MINI_TERM_DATA_DIR", &override_dir);
-
-        let resolved = resolve_app_data_dir(fallback_dir.clone());
-        assert_eq!(resolved, override_dir);
-        assert!(resolved.exists());
-
-        std::env::remove_var("MINI_TERM_DATA_DIR");
-        let fallback_resolved = resolve_app_data_dir(fallback_dir.clone());
-        assert_eq!(fallback_resolved, fallback_dir);
-        assert!(fallback_resolved.exists());
     }
 
     #[test]
@@ -1525,40 +558,67 @@ mod tests {
     }
 
     #[test]
-    fn config_round_trip_preserves_external_mcp_state() {
-        let config = AppConfig {
-            external_mcp: Some(ExternalMcpInteropConfig {
-                imported_catalog: Some(ExternalMcpCatalog {
-                    servers: vec![],
-                    sources: vec![],
-                    warnings: vec!["warning".into()],
-                }),
-                last_sync_results: vec![ExternalMcpSyncResult {
-                    client_type: "codex".into(),
-                    server_count: 2,
-                    files: vec![],
-                }],
-                last_imported_at: Some(10),
-                last_synced_at: Some(20),
-            }),
-            ..AppConfig::default()
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
-        let external_mcp = parsed
-            .external_mcp
-            .expect("external MCP state should deserialize");
-        assert_eq!(external_mcp.last_sync_results.len(), 1);
-        assert_eq!(external_mcp.last_imported_at, Some(10));
-        assert_eq!(external_mcp.last_synced_at, Some(20));
+    fn font_family_round_trip() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "uiFontFamily": "Arial, sans-serif",
+            "terminalFontFamily": "'JetBrainsMono Nerd Font', monospace"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.ui_font_family.as_deref(), Some("Arial, sans-serif"));
         assert_eq!(
-            external_mcp
-                .imported_catalog
-                .expect("catalog should deserialize")
-                .warnings,
-            vec!["warning".to_string()]
+            config.terminal_font_family.as_deref(),
+            Some("'JetBrainsMono Nerd Font', monospace")
         );
+    }
+
+    #[test]
+    fn font_family_absent_is_none() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.ui_font_family.is_none());
+        assert!(config.terminal_font_family.is_none());
+    }
+
+    #[test]
+    fn terminal_ligatures_round_trip() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "terminalLigatures": true
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.terminal_ligatures);
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        assert!(reparsed.terminal_ligatures);
+    }
+
+    #[test]
+    fn terminal_ligatures_absent_defaults_false() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.terminal_ligatures);
     }
 
     #[test]
@@ -1591,50 +651,6 @@ mod tests {
     }
 
     #[test]
-    fn old_theme_mode_deserializes() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [{"name": "cmd", "command": "cmd"}],
-            "theme": "light"
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.theme.preset, "ghostty-light");
-        assert_eq!(config.theme.window_effect, "auto");
-    }
-
-    #[test]
-    fn normalize_shell_adds_powershell_completion_args() {
-        let shell = normalize_shell(ShellConfig {
-            name: "powershell".into(),
-            command: "powershell".into(),
-            args: None,
-        });
-
-        let args = shell.args.expect("powershell args should be added");
-        assert!(args.iter().any(|arg| arg == "-NoExit"));
-        assert!(args
-            .iter()
-            .any(|arg| arg.contains("Set-PSReadLineKeyHandler")));
-        assert!(args
-            .iter()
-            .any(|arg| arg.contains("[Console]::OutputEncoding = $miniTermUtf8")));
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn normalize_shell_adds_cmd_utf8_bootstrap_args() {
-        let shell = normalize_shell(ShellConfig {
-            name: "cmd".into(),
-            command: "cmd".into(),
-            args: None,
-        });
-
-        let args = shell.args.expect("cmd args should be added");
-        assert_eq!(args, vec!["/K".to_string(), "chcp 65001 > nul".to_string()]);
-    }
-
-    #[test]
     fn layout_round_trip() {
         let layout = SavedProjectLayout {
             tabs: vec![SavedTab {
@@ -1643,22 +659,16 @@ mod tests {
                     direction: "horizontal".into(),
                     children: vec![
                         SavedSplitNode::Leaf {
-                            pane: Some(SavedPane::Terminal(SavedTerminalPane {
-                                kind: None,
+                            pane: None,
+                            panes: vec![SavedPane {
                                 shell_name: "cmd".into(),
-                                run_command: None,
-                                run_profile: None,
-                            })),
-                            panes: Vec::new(),
+                            }],
                         },
                         SavedSplitNode::Leaf {
-                            pane: Some(SavedPane::Terminal(SavedTerminalPane {
-                                kind: None,
+                            pane: None,
+                            panes: vec![SavedPane {
                                 shell_name: "powershell".into(),
-                                run_command: None,
-                                run_profile: None,
-                            })),
-                            panes: Vec::new(),
+                            }],
                         },
                     ],
                     sizes: vec![50.0, 50.0],
@@ -1670,41 +680,6 @@ mod tests {
         let parsed: SavedProjectLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tabs.len(), 1);
         assert_eq!(parsed.active_tab_index, 0);
-    }
-
-    #[test]
-    fn layout_round_trip_supports_non_terminal_panes() {
-        let layout = SavedProjectLayout {
-            tabs: vec![SavedTab {
-                custom_title: Some("preview".into()),
-                split_layout: SavedSplitNode::Leaf {
-                    pane: Some(SavedPane::FileViewer(SavedFileViewerPane {
-                        kind: "file-viewer".into(),
-                        file_path: "D:/code/JavaScript/mini-term/README.md".into(),
-                        mode: Some("preview".into()),
-                        navigation_target: Some(serde_json::json!({
-                            "line": 12,
-                            "column": 4,
-                            "requestId": 1
-                        })),
-                    })),
-                    panes: Vec::new(),
-                },
-            }],
-            active_tab_index: 0,
-        };
-        let json = serde_json::to_string(&layout).unwrap();
-        let parsed: SavedProjectLayout = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.tabs.len(), 1);
-        assert_eq!(parsed.active_tab_index, 0);
-        match &parsed.tabs[0].split_layout {
-            SavedSplitNode::Leaf { pane: Some(SavedPane::FileViewer(pane)), .. } => {
-                assert_eq!(pane.kind, "file-viewer");
-                assert_eq!(pane.file_path, "D:/code/JavaScript/mini-term/README.md");
-                assert_eq!(pane.mode.as_deref(), Some("preview"));
-            }
-            other => panic!("unexpected layout: {other:?}"),
-        }
     }
 
     #[test]
@@ -1730,6 +705,126 @@ mod tests {
         assert_eq!(tree.len(), 2);
     }
 
+    fn unique_test_root(label: &str) -> PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("mini-term-test-{label}-{ts}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn migrate_copies_legacy_config_when_new_dir_empty() {
+        let root = unique_test_root("migrate-copy");
+        let new_dir = root.join("com.mini-term.app");
+        let old_dir = root.join(LEGACY_IDENTIFIER);
+        fs::create_dir_all(&old_dir).unwrap();
+        let payload = r#"{"projects":[],"defaultShell":"cmd","availableShells":[]}"#;
+        fs::write(old_dir.join("config.json"), payload).unwrap();
+
+        migrate_app_data_at(&new_dir);
+
+        let migrated = fs::read_to_string(new_dir.join("config.json")).unwrap();
+        assert_eq!(migrated, payload);
+        // 旧文件保留作为兜底
+        assert!(old_dir.join("config.json").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn migrate_skips_when_new_config_already_exists() {
+        let root = unique_test_root("migrate-skip-exists");
+        let new_dir = root.join("com.mini-term.app");
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(new_dir.join("config.json"), "current").unwrap();
+
+        let old_dir = root.join(LEGACY_IDENTIFIER);
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("config.json"), "legacy").unwrap();
+
+        migrate_app_data_at(&new_dir);
+
+        let after = fs::read_to_string(new_dir.join("config.json")).unwrap();
+        assert_eq!(after, "current");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn migrate_noop_when_legacy_missing() {
+        let root = unique_test_root("migrate-noop");
+        let new_dir = root.join("com.mini-term.app");
+
+        migrate_app_data_at(&new_dir);
+
+        // 没有任何东西被创建
+        assert!(!new_dir.join("config.json").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn env_vars_round_trip() {
+        let json = r#"{
+            "projects": [{
+                "id": "p1",
+                "name": "proj1",
+                "path": "/tmp/1",
+                "envVars": [
+                    {"key": "FOO", "value": "bar", "enabled": true},
+                    {"key": "API_KEY", "value": "sk-xxx", "enabled": false},
+                    {"key": "EMPTY", "value": ""}
+                ]
+            }],
+            "defaultShell": "cmd",
+            "availableShells": [{"name": "cmd", "command": "cmd"}],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let env_vars = &config.projects[0].env_vars;
+        assert_eq!(env_vars.len(), 3);
+        assert_eq!(env_vars[0].key, "FOO");
+        assert_eq!(env_vars[0].value, "bar");
+        assert!(env_vars[0].enabled);
+        assert!(!env_vars[1].enabled);
+        // enabled 字段缺省时默认 true
+        assert_eq!(env_vars[2].key, "EMPTY");
+        assert_eq!(env_vars[2].value, "");
+        assert!(env_vars[2].enabled);
+
+        // round-trip:再序列化再反序列化,字段顺序与值保持
+        let serialized = serde_json::to_string(&config).unwrap();
+        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.projects[0].env_vars.len(), 3);
+        assert_eq!(reparsed.projects[0].env_vars[1].value, "sk-xxx");
+    }
+
+    #[test]
+    fn env_vars_absent_is_empty_and_not_serialized() {
+        // 旧 config.json 无 envVars 字段 → 默认空 Vec
+        let json = r#"{
+            "projects": [{"id": "p1", "name": "proj1", "path": "/tmp/1"}],
+            "defaultShell": "cmd",
+            "availableShells": [{"name": "cmd", "command": "cmd"}],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.projects[0].env_vars.is_empty());
+
+        // 空 Vec 不写入 JSON,保持配置文件干净
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(
+            !serialized.contains("envVars"),
+            "空 envVars 不应序列化进 JSON: {serialized}"
+        );
+    }
+
     #[test]
     fn nested_tree_round_trip() {
         let tree = vec![
@@ -1752,491 +847,5 @@ mod tests {
         let json = serde_json::to_string(&tree).unwrap();
         let parsed: Vec<ProjectTreeItem> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.len(), 2);
-    }
-
-    #[test]
-    fn normalize_config_migrates_legacy_projects_to_workspaces() {
-        let root = create_temp_dir("legacy-workspace");
-        let src = root.join("src");
-        fs::create_dir_all(&src).unwrap();
-
-        let config = normalize_config(AppConfig {
-            projects: vec![ProjectConfig {
-                id: "workspace-1".into(),
-                name: "mini-term".into(),
-                path: root.to_string_lossy().to_string(),
-                saved_layout: None,
-                expanded_dirs: vec![src.to_string_lossy().to_string()],
-            }],
-            ..AppConfig::default()
-        });
-
-        assert_eq!(config.workspaces.len(), 1);
-        assert_eq!(config.workspaces[0].id, "workspace-1");
-        assert_eq!(config.workspaces[0].roots.len(), 1);
-        assert_eq!(config.workspaces[0].roots[0].role, "primary");
-        assert_eq!(
-            config.workspaces[0]
-                .expanded_dirs_by_root
-                .get("workspace-1-root-1")
-                .cloned()
-                .unwrap_or_default(),
-            vec![src.to_string_lossy().to_string()]
-        );
-        assert_eq!(config.last_workspace_id.as_deref(), Some("workspace-1"));
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn workspaces_round_trip_with_recent_entries() {
-        let root_a = create_temp_dir("workspace-root-a");
-        let root_a_src = root_a.join("src");
-        fs::create_dir_all(&root_a_src).unwrap();
-        let root_b = create_temp_dir("workspace-root-b");
-
-        let config = normalize_config(
-            serde_json::from_value(serde_json::json!({
-                "workspaces": [{
-                    "id": "workspace-1",
-                    "name": "mini-term",
-                    "roots": [
-                        {"id": "root-a", "name": "mini-term", "path": root_a.to_string_lossy(), "role": "member"},
-                        {"id": "root-b", "name": "shared", "path": root_b.to_string_lossy(), "role": "primary"}
-                    ],
-                    "pinned": true,
-                    "accent": "#ff6600",
-                    "expandedDirsByRoot": {
-                        "root-a": [root_a_src.to_string_lossy()]
-                    },
-                    "createdAt": 100,
-                    "lastOpenedAt": 200
-                }],
-                "recentWorkspaces": [{
-                    "id": "recent-1",
-                    "name": "recent workspace",
-                    "rootPaths": [root_a.to_string_lossy()],
-                    "lastOpenedAt": 300
-                }],
-                "lastWorkspaceId": "workspace-1",
-                "defaultShell": "cmd",
-                "availableShells": [{"name": "cmd", "command": "cmd"}]
-            }))
-            .unwrap(),
-        );
-
-        assert_eq!(config.workspaces.len(), 1);
-        assert_eq!(config.workspaces[0].roots[0].role, "member");
-        assert_eq!(config.workspaces[0].roots[1].role, "primary");
-        assert_eq!(config.recent_workspaces.len(), 1);
-        assert_eq!(
-            config.recent_workspaces[0].root_paths,
-            vec![root_a.to_string_lossy().to_string()]
-        );
-        assert_eq!(config.projects.len(), 1);
-        assert_eq!(
-            config.projects[0].path,
-            root_b.to_string_lossy().to_string()
-        );
-
-        let _ = fs::remove_dir_all(root_a);
-        let _ = fs::remove_dir_all(root_b);
-    }
-
-    #[test]
-    fn workspace_config_with_saved_terminal_tabs_deserializes() {
-        let root = create_temp_dir("workspace-saved-layout");
-
-        let config = normalize_config(
-            serde_json::from_value(serde_json::json!({
-                "workspaces": [{
-                    "id": "workspace-1",
-                    "name": "desktop-smoke",
-                    "roots": [
-                        {
-                            "id": "root-1",
-                            "name": "desktop-smoke",
-                            "path": root.to_string_lossy(),
-                            "role": "primary"
-                        }
-                    ],
-                    "pinned": true,
-                    "savedLayout": {
-                        "tabs": [
-                            {
-                                "customTitle": "Alpha",
-                                "splitLayout": {
-                                    "type": "leaf",
-                                    "pane": {
-                                        "kind": "terminal",
-                                        "shellName": "powershell"
-                                    },
-                                    "panes": []
-                                }
-                            },
-                            {
-                                "splitLayout": {
-                                    "type": "leaf",
-                                    "pane": {
-                                        "kind": "terminal",
-                                        "shellName": "cmd"
-                                    },
-                                    "panes": []
-                                }
-                            }
-                        ],
-                        "activeTabIndex": 0
-                    },
-                    "createdAt": 1,
-                    "lastOpenedAt": 1
-                }],
-                "recentWorkspaces": [],
-                "lastWorkspaceId": "workspace-1",
-                "defaultShell": "powershell",
-                "availableShells": [
-                    { "name": "powershell", "command": "powershell" },
-                    { "name": "cmd", "command": "cmd" }
-                ],
-                "uiFontSize": 13,
-                "terminalFontSize": 14,
-                "theme": {
-                    "preset": "warm-carbon",
-                    "windowEffect": "auto"
-                }
-            }))
-            .unwrap(),
-        );
-
-        assert_eq!(config.workspaces.len(), 1);
-        let saved_layout = config.workspaces[0]
-            .saved_layout
-            .as_ref()
-            .expect("saved layout should deserialize");
-        assert_eq!(saved_layout.tabs.len(), 2);
-        assert_eq!(saved_layout.active_tab_index, 0);
-        assert_eq!(
-            saved_layout.tabs[0].custom_title.as_deref(),
-            Some("Alpha")
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn normalize_config_drops_missing_expanded_dirs_and_empty_workspaces() {
-        let existing_root = std::env::temp_dir().join("mini-term-config-existing-root");
-        let existing_child = existing_root.join("src");
-        fs::create_dir_all(&existing_child).unwrap();
-
-        let missing_root = std::env::temp_dir().join("mini-term-config-missing-root");
-        let missing_child = existing_root.join("sanshu");
-
-        let config = normalize_config(AppConfig {
-            workspaces: vec![
-                WorkspaceConfig {
-                    id: "workspace-1".into(),
-                    name: "mini-term".into(),
-                    roots: vec![WorkspaceRootConfig {
-                        id: "root-1".into(),
-                        name: "mini-term".into(),
-                        path: existing_root.to_string_lossy().to_string(),
-                        role: "primary".into(),
-                    }],
-                    pinned: false,
-                    accent: None,
-                    saved_layout: None,
-                    expanded_dirs_by_root: BTreeMap::from([(
-                        "root-1".into(),
-                        vec![
-                            existing_child.to_string_lossy().to_string(),
-                            missing_child.to_string_lossy().to_string(),
-                        ],
-                    )]),
-                    created_at: 1,
-                    last_opened_at: 1,
-                },
-                WorkspaceConfig {
-                    id: "workspace-2".into(),
-                    name: "missing".into(),
-                    roots: vec![WorkspaceRootConfig {
-                        id: "root-2".into(),
-                        name: "missing".into(),
-                        path: missing_root.to_string_lossy().to_string(),
-                        role: "primary".into(),
-                    }],
-                    pinned: false,
-                    accent: None,
-                    saved_layout: None,
-                    expanded_dirs_by_root: BTreeMap::new(),
-                    created_at: 1,
-                    last_opened_at: 1,
-                },
-            ],
-            ..AppConfig::default()
-        });
-
-        assert_eq!(config.workspaces.len(), 1);
-        assert_eq!(
-            config.workspaces[0]
-                .expanded_dirs_by_root
-                .get("root-1")
-                .cloned()
-                .unwrap_or_default(),
-            vec![existing_child.to_string_lossy().to_string()]
-        );
-
-        let _ = fs::remove_dir_all(existing_root);
-    }
-
-    #[test]
-    fn normalize_sidecar_config_derives_provider_from_legacy_env() {
-        let config = normalize_config(
-            serde_json::from_value(serde_json::json!({
-                "workspaces": [],
-                "recentWorkspaces": [],
-                "defaultShell": "cmd",
-                "availableShells": [{"name": "cmd", "command": "cmd"}],
-                "agentBackends": {
-                    "claudeSidecar": {
-                        "enabled": true,
-                        "command": "node",
-                        "args": ["dist/sidecar.js"],
-                        "env": {
-                            "MINI_TERM_SIDECAR_PROVIDER": "openai-compatible",
-                            "MINI_TERM_SIDECAR_BASE_URL": "https://example.com/v1",
-                            "MINI_TERM_SIDECAR_MODEL": "gpt-4.1-mini",
-                            "MINI_TERM_SIDECAR_API_KEY": "secret-key",
-                            "MINI_TERM_SIDECAR_PROVIDER_TIMEOUT_MS": "45000",
-                            "MINI_TERM_SIDECAR_SYSTEM_PROMPT": "Reply plainly.",
-                            "KEEP_ME": "1"
-                        }
-                    }
-                }
-            }))
-            .unwrap(),
-        );
-
-        let sidecar = config.agent_backends.unwrap_or_default().claude_sidecar;
-        assert_eq!(sidecar.provider.kind, "openai-compatible");
-        assert_eq!(
-            sidecar.provider.base_url.as_deref(),
-            Some("https://example.com/v1")
-        );
-        assert_eq!(sidecar.provider.model.as_deref(), Some("gpt-4.1-mini"));
-        assert_eq!(sidecar.provider.api_key.as_deref(), Some("secret-key"));
-        assert_eq!(sidecar.provider.api_key_env_var.as_deref(), None);
-        assert_eq!(sidecar.provider.timeout_ms, Some(45_000));
-        assert_eq!(
-            sidecar.provider.system_prompt.as_deref(),
-            Some("Reply plainly.")
-        );
-        assert_eq!(sidecar.env.get("KEEP_ME").map(String::as_str), Some("1"));
-    }
-
-    #[test]
-    fn normalize_sidecar_config_syncs_provider_fields_back_into_env() {
-        let sidecar = normalize_sidecar_config(SidecarBackendConfig {
-            enabled: true,
-            command: Some("node".into()),
-            args: vec!["dist/sidecar.js".into()],
-            env: BTreeMap::from([("KEEP_ME".into(), "1".into())]),
-            provider: SidecarProviderConfig {
-                kind: "openai-compatible".into(),
-                base_url: Some("https://api.openai.com/v1".into()),
-                model: Some("gpt-4.1-mini".into()),
-                api_key: Some("sk-test".into()),
-                api_key_env_var: None,
-                timeout_ms: Some(60_000),
-                system_prompt: Some("Use plain text.".into()),
-            },
-            cwd: None,
-            startup_mode: SidecarStartupMode::Process,
-            connection_timeout_ms: 10_000,
-        });
-
-        assert_eq!(
-            sidecar
-                .env
-                .get("MINI_TERM_SIDECAR_PROVIDER")
-                .map(String::as_str),
-            Some("openai-compatible")
-        );
-        assert_eq!(
-            sidecar
-                .env
-                .get("MINI_TERM_SIDECAR_MODEL")
-                .map(String::as_str),
-            Some("gpt-4.1-mini")
-        );
-        assert!(!sidecar.env.contains_key("MINI_TERM_SIDECAR_API_KEY"));
-        assert_eq!(
-            sidecar
-                .resolved_env()
-                .get("MINI_TERM_SIDECAR_API_KEY")
-                .map(String::as_str),
-            Some("sk-test")
-        );
-        assert_eq!(
-            sidecar
-                .env
-                .get("MINI_TERM_SIDECAR_PROVIDER_TIMEOUT_MS")
-                .map(String::as_str),
-            Some("60000")
-        );
-        assert_eq!(sidecar.env.get("KEEP_ME").map(String::as_str), Some("1"));
-    }
-
-    #[test]
-    fn sidecar_provider_validation_rejects_missing_openai_fields() {
-        let config = normalize_sidecar_config(SidecarBackendConfig {
-            enabled: true,
-            command: Some("node".into()),
-            args: vec![],
-            env: BTreeMap::new(),
-            provider: SidecarProviderConfig {
-                kind: "openai-compatible".into(),
-                model: Some("gpt-4.1-mini".into()),
-                api_key: None,
-                api_key_env_var: None,
-                base_url: None,
-                timeout_ms: None,
-                system_prompt: None,
-            },
-            cwd: None,
-            startup_mode: SidecarStartupMode::Process,
-            connection_timeout_ms: 10_000,
-        });
-
-        assert_eq!(
-            config.provider_validation_error().as_deref(),
-            Some("Sidecar provider `openai-compatible` requires an API key or API key env var.")
-        );
-        assert!(!config.is_launchable());
-    }
-
-    #[test]
-    fn sidecar_provider_validation_rejects_private_base_url_by_default() {
-        let _guard = lock_env();
-        std::env::remove_var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY);
-        let config = normalize_sidecar_config(SidecarBackendConfig {
-            enabled: true,
-            command: Some("node".into()),
-            args: vec![],
-            env: BTreeMap::new(),
-            provider: SidecarProviderConfig {
-                kind: "openai-compatible".into(),
-                model: Some("gpt-4.1-mini".into()),
-                api_key_env_var: Some("MINI_TERM_TEST_PROVIDER_API_KEY".into()),
-                api_key: None,
-                base_url: Some("http://127.0.0.1:11434/v1".into()),
-                timeout_ms: None,
-                system_prompt: None,
-            },
-            cwd: None,
-            startup_mode: SidecarStartupMode::Process,
-            connection_timeout_ms: 10_000,
-        });
-
-        std::env::set_var("MINI_TERM_TEST_PROVIDER_API_KEY", "env-secret");
-        assert_eq!(
-            config.provider_validation_error().as_deref(),
-            Some(
-                "Sidecar provider base URL must not target loopback, localhost, link-local, or private network addresses."
-            )
-        );
-        std::env::remove_var("MINI_TERM_TEST_PROVIDER_API_KEY");
-    }
-
-    #[test]
-    fn sidecar_provider_validation_allows_private_base_url_with_override() {
-        let _guard = lock_env();
-        std::env::set_var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY, "1");
-        std::env::set_var("MINI_TERM_TEST_PROVIDER_API_KEY", "env-secret");
-        let config = normalize_sidecar_config(SidecarBackendConfig {
-            enabled: true,
-            command: Some("node".into()),
-            args: vec![],
-            env: BTreeMap::new(),
-            provider: SidecarProviderConfig {
-                kind: "openai-compatible".into(),
-                model: Some("gpt-4.1-mini".into()),
-                api_key_env_var: Some("MINI_TERM_TEST_PROVIDER_API_KEY".into()),
-                api_key: None,
-                base_url: Some("http://127.0.0.1:11434/v1".into()),
-                timeout_ms: None,
-                system_prompt: None,
-            },
-            cwd: None,
-            startup_mode: SidecarStartupMode::Process,
-            connection_timeout_ms: 10_000,
-        });
-
-        assert_eq!(config.provider_validation_error(), None);
-        std::env::remove_var("MINI_TERM_TEST_PROVIDER_API_KEY");
-        std::env::remove_var(ALLOW_PRIVATE_SIDECAR_BASE_URL_ENV_KEY);
-    }
-
-    #[test]
-    fn sidecar_provider_can_resolve_api_key_from_env_var_reference() {
-        let _guard = lock_env();
-        let env_var = "MINI_TERM_TEST_PROVIDER_API_KEY";
-        std::env::set_var(env_var, "env-secret");
-        let sidecar = normalize_sidecar_config(SidecarBackendConfig {
-            enabled: true,
-            command: Some("node".into()),
-            args: vec![],
-            env: BTreeMap::new(),
-            provider: SidecarProviderConfig {
-                kind: "openai-compatible".into(),
-                model: Some("gpt-4.1-mini".into()),
-                api_key: None,
-                api_key_env_var: Some(env_var.into()),
-                base_url: None,
-                timeout_ms: None,
-                system_prompt: None,
-            },
-            cwd: None,
-            startup_mode: SidecarStartupMode::Process,
-            connection_timeout_ms: 10_000,
-        });
-
-        assert_eq!(sidecar.provider.api_key_source(), "env-var");
-        assert_eq!(
-            sidecar.provider.resolved_api_key().as_deref(),
-            Some("env-secret")
-        );
-        assert_eq!(
-            sidecar
-                .resolved_env()
-                .get("MINI_TERM_SIDECAR_API_KEY")
-                .map(String::as_str),
-            Some("env-secret")
-        );
-        assert!(!sidecar.env.contains_key("MINI_TERM_SIDECAR_API_KEY"));
-        assert!(sidecar.is_launchable());
-
-        std::env::remove_var(env_var);
-    }
-
-    #[test]
-    fn sidecar_provider_redacts_resolved_secret_values_from_text() {
-        let _guard = lock_env();
-        let env_var = "MINI_TERM_TEST_PROVIDER_API_KEY_REDACT";
-        std::env::set_var(env_var, "env-secret-redact");
-        let provider = SidecarProviderConfig {
-            kind: "openai-compatible".into(),
-            base_url: None,
-            model: Some("gpt-4.1-mini".into()),
-            api_key: Some("inline-secret".into()),
-            api_key_env_var: Some(env_var.into()),
-            timeout_ms: None,
-            system_prompt: None,
-        };
-
-        let redacted =
-            provider.redact_secrets_in_text("inline-secret and env-secret-redact should not leak");
-        assert_eq!(redacted, "[redacted] and [redacted] should not leak");
-
-        std::env::remove_var(env_var);
     }
 }

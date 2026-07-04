@@ -1,3 +1,5 @@
+// === 配置持久化 ===
+
 export type ProjectTreeItem = string | ProjectGroup;
 
 export interface ProjectGroup {
@@ -7,146 +9,137 @@ export interface ProjectGroup {
   children: ProjectTreeItem[];
 }
 
-export interface LegacyProjectConfig {
-  id: string;
-  name: string;
-  path: string;
-  savedLayout?: SavedProjectLayout;
-  expandedDirs?: string[];
-}
-
-export type SettingsPage =
-  | "terminal"
-  | "theme"
-  | "system"
-  | "agent"
-  | "mcp"
-  | "shortcuts"
-  | "about";
-export type PreviewMode = "source" | "preview";
-export type InteractionDialogMode = "alert" | "confirm" | "prompt";
-export type InteractionDialogTone = "neutral" | "warning" | "danger";
-
-export interface CompletionUsageBucket {
-  commands: Record<string, number>;
-  subcommands: Record<string, number>;
-  options: Record<string, number>;
-  arguments: Record<string, number>;
-}
-
-export interface CompletionUsageStats extends CompletionUsageBucket {
-  scopes?: Record<string, CompletionUsageBucket>;
-}
-
-export type ThemePresetId = "warm-carbon" | "ghostty-dark" | "ghostty-light";
-export type ThemeWindowEffect = "auto" | "mica" | "acrylic" | "blur" | "none";
-
-export interface ThemeConfig {
-  preset: ThemePresetId;
-  windowEffect: ThemeWindowEffect;
-}
-
-export type WorkspaceRootRole = "primary" | "member";
-
-export interface WorkspaceRootConfig {
-  id: string;
-  name: string;
-  path: string;
-  role: WorkspaceRootRole;
-}
-
-export interface WorkspaceConfig {
-  id: string;
-  name: string;
-  roots: WorkspaceRootConfig[];
-  pinned: boolean;
-  accent?: string;
-  savedLayout?: SavedProjectLayout;
-  expandedDirsByRoot?: Record<string, string[]>;
-  createdAt: number;
-  lastOpenedAt: number;
-}
-
-export interface RecentWorkspaceEntry {
-  id: string;
-  name: string;
-  rootPaths: string[];
-  accent?: string;
-  lastOpenedAt: number;
-  savedLayout?: SavedProjectLayout;
-  expandedDirsByRoot?: Record<string, string[]>;
-}
-
-export interface ExternalMcpInteropConfig {
-  importedCatalog?: ExternalMcpCatalog;
-  lastSyncResults: ExternalMcpSyncResult[];
-  lastImportedAt?: number;
-  lastSyncedAt?: number;
-}
-
 export interface AppConfig {
-  workspaces: WorkspaceConfig[];
-  recentWorkspaces: RecentWorkspaceEntry[];
-  lastWorkspaceId?: string;
-  projects?: LegacyProjectConfig[];
+  projects: ProjectConfig[];
   projectTree?: ProjectTreeItem[];
-  projectGroups?: {
-    id: string;
-    name: string;
-    collapsed: boolean;
-    projectIds: string[];
-  }[];
+  // 旧字段仅用于迁移兼容（Rust 端处理后不再出现）
+  projectGroups?: { id: string; name: string; collapsed: boolean; projectIds: string[] }[];
   projectOrdering?: string[];
   defaultShell: string;
   availableShells: ShellConfig[];
   uiFontSize: number;
   terminalFontSize: number;
+  uiFontFamily?: string;
+  terminalFontFamily?: string;
+  terminalLigatures?: boolean;
   layoutSizes?: number[];
-  theme: ThemeConfig;
   middleColumnSizes?: number[];
-  workspaceSidebarSizes?: number[];
-  completionUsage?: CompletionUsageStats;
-  agentPolicies?: AgentPoliciesConfig;
-  agentBackends?: AgentBackendsConfig;
-  externalMcp?: ExternalMcpInteropConfig;
+  theme: 'auto' | 'light' | 'dark';
+  skin: 'none' | 'blueprint' | 'fluent2';
+  terminalFollowTheme: boolean;
+  aiCompletionPopup: boolean;
+  aiCompletionTaskbarFlash: boolean;
+  aiCompletionSound: boolean;
+  aiCompletionSoundPath?: string;
+  editors: EditorConfig[];
+  defaultEditor?: string;
+  gitChangesViewMode: 'list' | 'tree';
+  longPasteToFile: boolean;
+  longPasteLineThreshold: number;
+  longPasteCharThreshold: number;
+  projectsVisible: boolean;
+  sessionsVisible: boolean;
+  filesVisible: boolean;
+  gitVisible: boolean;
+  lastActiveProjectId?: string;
+  hookEnabled: boolean;
+  smartCopyPaste: boolean;
+  sshConnections: SshConnection[];
+  /** cc-connect 集成配置(进程管理 + 项目导入 + dashboard 嵌入),未配置时缺省 */
+  ccConnect?: CcConnectConfig;
 }
 
-export type SidecarStartupMode = "process" | "loopback";
-
-export interface ClaudeSidecarProviderConfig {
-  kind: string;
-  baseUrl?: string;
-  model?: string;
-  apiKey?: string;
-  apiKeyEnvVar?: string;
-  timeoutMs?: number;
-  systemPrompt?: string;
+export interface CcConnectConfig {
+  /** cc-connect 可执行文件路径,空字符串 = 让前端 PATH 探测 */
+  exePath: string;
+  /** config.toml 路径,空字符串 = 默认 ~/.cc-connect/config.toml */
+  configPath: string;
+  /** mini-term 启动时自动 spawn cc-connect */
+  autoStart: boolean;
+  /** 额外启动参数 */
+  extraArgs: string[];
+  /** mini-term project id → cc-connect project name 映射 */
+  projectLinks: Record<string, string>;
 }
 
-export interface ClaudeSidecarBackendConfig {
+/** cc_connect_probe 返回值。字段命名对齐后端 #[serde(rename_all = "camelCase")]. */
+export interface CcConnectStatus {
+  running: boolean;
+  port: number;
+  version?: string;
+  /** mini-term 自己 spawn 的 cc-connect PID,用户手动启动时为 undefined */
+  ownPid?: number;
+  /** 探活失败时的友好诊断信息(token 缺失 / 端口不通 / 配置文件不存在等) */
+  diagnostic?: string;
+}
+
+/** cc_connect_list_projects 返回的单条项目记录。 */
+export interface CcProject {
+  name: string;
+  workDir?: string;
+  agentType?: string;
+  hasPlatform: boolean;
+}
+
+/** cc_connect_import_project 的请求载荷。 */
+export interface ImportProjectRequest {
+  name: string;
+  workDir: string;
+  agentType?: string;
+}
+
+/**
+ * cc_connect_import_project 返回值。
+ *
+ * 后端在 toml 已写盘但 cc-connect restart 失败时不再返 Err,而是把 restartOk=false 编码到 result 里,
+ * 让前端按 tomlWritten && !restartOk 仍然写入 projectLinks(避免"项目存在但未关联"半同步态)。
+ */
+export interface ImportProjectResult {
+  name: string;
+  tomlWritten: boolean;
+  restartOk: boolean;
+  restartError?: string;
+}
+
+/**
+ * cc_connect_unlink_project 返回值。语义与 ImportProjectResult 对称:
+ * deletedOk=true 但 restartOk=false 时,前端仍清理本地 projectLinks。
+ */
+export interface UnlinkProjectResult {
+  name: string;
+  deletedOk: boolean;
+  restartOk: boolean;
+  restartError?: string;
+}
+
+/** cc_connect_import_projects(批量导入)返回值:一次写盘 + 仅重启一次。 */
+export interface BatchImportResult {
+  imported: string[];
+  skipped: string[];
+  tomlWritten: boolean;
+  restartOk: boolean;
+  restartError?: string;
+}
+
+export interface ProjectConfig {
+  id: string;
+  name: string;
+  path: string;
+  savedLayout?: SavedProjectLayout;
+  expandedDirs?: string[];
+  /** 是否已为该项目启用 SSH MCP（向项目目录写入了 Claude / Codex 的 MCP 注册配置） */
+  sshMcpEnabled?: boolean;
+  /** 该项目的 agent 可访问的 SSH 连接 id 列表（「关联 SSH」设定的范围）；undefined = 旧配置兼容,视为全部 */
+  sshConnectionIds?: string[];
+  /** 项目级环境变量,新建终端时注入到 PTY 子进程。已开终端不受影响。 */
+  envVars?: ProjectEnvVar[];
+}
+
+export interface ProjectEnvVar {
+  key: string;
+  value: string;
+  /** 取消勾选时 value 保留但不注入,允许临时禁用某变量而无需删行重输 */
   enabled: boolean;
-  command?: string;
-  args: string[];
-  env: Record<string, string>;
-  provider: ClaudeSidecarProviderConfig;
-  cwd?: string;
-  startupMode: SidecarStartupMode;
-  connectionTimeoutMs: number;
-}
-
-export interface AgentBackendRoutingTargetConfig {
-  preferredBackendId?: string;
-  allowBuiltinFallback: boolean;
-}
-
-export interface AgentBackendRoutingConfig {
-  codex: AgentBackendRoutingTargetConfig;
-  claude: AgentBackendRoutingTargetConfig;
-}
-
-export interface AgentBackendsConfig {
-  routing: AgentBackendRoutingConfig;
-  claudeSidecar: ClaudeSidecarBackendConfig;
 }
 
 export interface ShellConfig {
@@ -155,62 +148,31 @@ export interface ShellConfig {
   args?: string[];
 }
 
-export interface SavedTerminalPane {
-  kind?: "terminal";
+export interface EditorConfig {
+  name: string;
+  command: string;
+}
+
+export interface SshConnection {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  password?: string;
+  identityFile?: string;
+  group?: string;
+}
+
+// === 布局持久化 ===
+
+export interface SavedPane {
   shellName: string;
-  runCommand?: string;
-  runProfile?: RunProfile;
 }
-
-export interface SavedFileViewerPane {
-  kind: "file-viewer";
-  filePath: string;
-  mode?: PreviewMode;
-  navigationTarget?: FileNavigationTarget;
-}
-
-export interface SavedWorktreeDiffPane {
-  kind: "worktree-diff";
-  projectPath: string;
-  gitStatus: GitFileStatus;
-}
-
-export interface SavedCommitDiffPane {
-  kind: "commit-diff";
-  repoPath: string;
-  commitHash: string;
-  commitMessage: string;
-  files: CommitFileInfo[];
-}
-
-export interface SavedFileHistoryPane {
-  kind: "file-history";
-  projectPath: string;
-  filePath: string;
-}
-
-export interface SavedAgentTaskPanelPane {
-  kind: "agent-tasks";
-  filter: AgentTaskPanelFilter;
-  selectedTaskId?: string;
-}
-
-export type SavedPane =
-  | SavedTerminalPane
-  | SavedFileViewerPane
-  | SavedWorktreeDiffPane
-  | SavedCommitDiffPane
-  | SavedFileHistoryPane
-  | SavedAgentTaskPanelPane;
 
 export type SavedSplitNode =
-  | { type: "leaf"; pane: SavedPane }
-  | {
-      type: "split";
-      direction: "horizontal" | "vertical";
-      children: SavedSplitNode[];
-      sizes: number[];
-    };
+  | { type: 'leaf'; panes: SavedPane[] }
+  | { type: 'split'; direction: 'horizontal' | 'vertical'; children: SavedSplitNode[]; sizes: number[] };
 
 export interface SavedTab {
   customTitle?: string;
@@ -222,749 +184,64 @@ export interface SavedProjectLayout {
   activeTabIndex: number;
 }
 
-export type PaneStatus = "idle" | "ai-idle" | "ai-working" | "error";
-export type ShellKind =
-  | "powershell"
-  | "pwsh"
-  | "cmd"
-  | "bash"
-  | "zsh"
-  | "unknown";
-export type SessionMode = "human" | "agent" | "task";
-export type SessionPhase =
-  | "starting"
-  | "ready"
-  | "running"
-  | "waiting-input"
-  | "error"
-  | "exited";
+// === 运行时状态 ===
 
-export interface CommandBlock {
+export type PaneStatus = 'idle' | 'ai-idle' | 'ai-working' | 'error';
+
+export interface ProjectState {
   id: string;
-  command: string;
-  startedAt: number;
-  finishedAt?: number;
-  exitCode?: number;
-  status: "running" | "completed" | "success" | "error" | "interrupted";
-}
-
-export interface RunProfile {
-  savedCommand?: string;
-  lastRunAt?: number;
-  lastExitCode?: number;
-  usageScope?: string;
-}
-
-export interface TerminalSessionMeta {
-  sessionId: string;
-  ptyId: number;
-  shellKind: ShellKind;
-  mode: SessionMode;
-  phase: SessionPhase;
-  cwd?: string;
-  title?: string;
-  lastCommand?: string;
-  lastExitCode?: number;
-  usageScope?: string;
-  runProfile?: RunProfile;
-  commands: CommandBlock[];
-  activeCommand?: CommandBlock;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface TerminalSessionState extends TerminalSessionMeta {}
-
-export interface TerminalViewState {
-  viewId: string;
-  paneId: string;
-  tabId?: string;
-  workspaceId?: string;
-  sessionId: string;
-  isVisible: boolean;
-  isFocused: boolean;
-  cols?: number;
-  rows?: number;
-  mountedAt: number;
-  updatedAt: number;
-}
-
-export interface TerminalUiState {
-  runProfileInspectorPaneId: string | null;
-}
-
-export type TerminalOrchestratorAction =
-  | { type: "open-session"; sessionId: string; ptyId: number }
-  | {
-      type: "restart-session";
-      sessionId: string;
-      ptyId: number;
-      previousPtyId?: number;
-    }
-  | { type: "close-session"; sessionId: string; ptyId?: number }
-  | { type: "write-input"; sessionId: string; bytes: number }
-  | { type: "resize-session"; sessionId: string; cols: number; rows: number }
-  | { type: "run-command"; sessionId: string; command: string };
-
-export interface WorkspaceState {
-  id: string;
-  tabs: WorkspaceTab[];
+  tabs: TerminalTab[];
   activeTabId: string;
+  needsAttention?: boolean;
 }
 
-export interface PaneLayoutState {
+export interface AiCompletionNotification {
   id: string;
-  sessionId: string;
-  shellName: string;
-  runCommand?: string;
-  runProfile?: RunProfile;
-  mode: SessionMode;
-  ptyId: number;
-}
-
-export interface TerminalPaneState extends PaneLayoutState {
-  kind: "terminal";
-  status: PaneStatus;
-  phase: SessionPhase;
-}
-
-export interface PaneRuntimeState {
-  ptyId: number;
-  paneId: string;
-  tabId: string;
-  workspaceId: string;
-  status: PaneStatus;
-  phase: SessionPhase;
-  isFocused: boolean;
-}
-
-export interface WorkspaceExplorerRuntime {
-  dirtyPaths: string[];
-  lastFsChangeAt?: number;
-  lastGitDirtyAt?: number;
-  gitDirtyToken: number;
+  projectId: string;
+  projectName: string;
+  timestamp: number;
+  /** 通知类型,默认 'ai-completion'(AI 任务完成,点击跳到对应项目);
+   *  'wsl-info' 用于 WSL 启动器重写提示,不携带 projectId 跳转语义。 */
+  kind?: 'ai-completion' | 'wsl-info';
+  /** kind='wsl-info' 时的自定义消息文本,渲染时直接展示。 */
+  message?: string;
 }
 
 export interface TerminalTab {
-  kind: "terminal";
   id: string;
   customTitle?: string;
   splitLayout: SplitNode;
   status: PaneStatus;
 }
 
-export interface FileNavigationTarget {
-  line: number;
-  column?: number;
-  requestId: number;
-}
-
-export interface FileViewerTab {
-  kind: "file-viewer";
-  id: string;
-  filePath: string;
-  mode: PreviewMode;
-  navigationTarget?: FileNavigationTarget;
-  status: PaneStatus;
-}
-
-export interface WorktreeDiffTab {
-  kind: "worktree-diff";
-  id: string;
-  projectPath: string;
-  status: GitFileStatus;
-}
-
-export interface CommitDiffTab {
-  kind: "commit-diff";
-  id: string;
-  repoPath: string;
-  commitHash: string;
-  commitMessage: string;
-  files: CommitFileInfo[];
-}
-
-export interface FileHistoryTab {
-  kind: "file-history";
-  id: string;
-  projectPath: string;
-  filePath: string;
-}
-
-export interface AgentTaskPanelFilter {
-  scope: "workspace" | "all";
-  attention?: TaskAttentionState | "all";
-  target?: TaskTarget | "all";
-}
-
-export interface AgentTaskPanelTab {
-  kind: "agent-tasks";
-  id: string;
-  filter: AgentTaskPanelFilter;
-  selectedTaskId?: string;
-  status: PaneStatus;
-}
-
-export interface FileViewerPaneState {
-  kind: "file-viewer";
-  id: string;
-  filePath: string;
-  mode: PreviewMode;
-  navigationTarget?: FileNavigationTarget;
-  status: PaneStatus;
-}
-
-export interface WorktreeDiffPaneState {
-  kind: "worktree-diff";
-  id: string;
-  projectPath: string;
-  gitStatus: GitFileStatus;
-  status: PaneStatus;
-}
-
-export interface CommitDiffPaneState {
-  kind: "commit-diff";
-  id: string;
-  repoPath: string;
-  commitHash: string;
-  commitMessage: string;
-  files: CommitFileInfo[];
-  status: PaneStatus;
-}
-
-export interface FileHistoryPaneState {
-  kind: "file-history";
-  id: string;
-  projectPath: string;
-  filePath: string;
-  status: PaneStatus;
-}
-
-export interface AgentTaskPanelPaneState {
-  kind: "agent-tasks";
-  id: string;
-  filter: AgentTaskPanelFilter;
-  selectedTaskId?: string;
-  status: PaneStatus;
-}
-
-export type WorkspacePane =
-  | TerminalPaneState
-  | FileViewerPaneState
-  | WorktreeDiffPaneState
-  | CommitDiffPaneState
-  | FileHistoryPaneState
-  | AgentTaskPanelPaneState;
-
-export type WorkspaceTab =
-  | TerminalTab
-  | FileViewerTab
-  | WorktreeDiffTab
-  | CommitDiffTab
-  | FileHistoryTab
-  | AgentTaskPanelTab;
-
-export type LayoutDropZone = "top" | "bottom" | "left" | "right";
-export type LayoutDropPosition = "before" | "after";
-
-export type LayoutDragPayload =
-  | {
-      kind: "tab";
-      workspaceId: string;
-      tabId: string;
-    }
-  | {
-      kind: "pane";
-      workspaceId: string;
-      tabId: string;
-      paneId: string;
-    };
-
-export interface LayoutDropTarget {
-  workspaceId: string;
-  tabId: string;
-  paneId?: string;
-  kind: "tab-bar" | "tab-surface" | "pane";
-  zone?: LayoutDropZone;
-  position?: LayoutDropPosition;
-}
-
 export type SplitNode =
-  | { type: "leaf"; pane: WorkspacePane }
-  | {
-      type: "split";
-      direction: "horizontal" | "vertical";
-      children: SplitNode[];
-      sizes: number[];
-    };
+  | { type: 'leaf'; panes: PaneState[]; activePaneId: string }
+  | { type: 'split'; direction: 'horizontal' | 'vertical'; children: SplitNode[]; sizes: number[] };
 
-export type PaneState = TerminalPaneState;
+export interface PaneState {
+  id: string;
+  shellName: string;
+  customTitle?: string;
+  status: PaneStatus;
+  ptyId?: number;
+}
+
+// === AI 会话 ===
 
 export interface AiSession {
   id: string;
-  sessionType: "claude" | "codex";
+  sessionType: 'claude' | 'codex';
   title: string;
-  timestamp: string;
-  projectPath?: string;
+  timestamp: string; // ISO 8601
 }
 
-export type ExternalSessionProviderId = "claude" | "codex";
-
-export interface ExternalSessionSummary {
-  providerId: ExternalSessionProviderId;
-  sessionId: string;
-  title: string;
-  timestamp: string;
-  summary?: string;
-  projectPath?: string;
-  sourcePath: string;
-  resumeCommand?: string;
-}
-
-export interface ExternalSessionMessage {
-  role: string;
+export interface AiSessionMessage {
+  role: 'user' | 'assistant';
   content: string;
-  timestamp?: string;
+  timestamp: string;
 }
 
-export interface ExternalSessionDeleteOutcome {
-  providerId: ExternalSessionProviderId;
-  sessionId: string;
-  sourcePath: string;
-  deleted: boolean;
-}
-
-export type ExternalMcpClientType = "codex" | "claude";
-
-export interface ExternalMcpServer {
-  id: string;
-  name: string;
-  transport: string;
-  command?: string;
-  args: string[];
-  cwd?: string;
-  env: Record<string, string>;
-  url?: string;
-  headers: Record<string, string>;
-  sourceClients: ExternalMcpClientType[];
-  sourcePaths: string[];
-}
-
-export interface ExternalMcpSourceStatus {
-  clientType: ExternalMcpClientType;
-  sourceKind: string;
-  path: string;
-  exists: boolean;
-  serverCount: number;
-}
-
-export interface ExternalMcpCatalog {
-  servers: ExternalMcpServer[];
-  sources: ExternalMcpSourceStatus[];
-  warnings: string[];
-}
-
-export interface ExternalMcpSyncFileResult {
-  path: string;
-  kind: string;
-  created: boolean;
-  updated: boolean;
-}
-
-export interface ExternalMcpSyncResult {
-  clientType: ExternalMcpClientType;
-  serverCount: number;
-  files: ExternalMcpSyncFileResult[];
-}
-
-export type TaskTarget = "codex" | "claude";
-export type TaskRole = "coordinator" | "worker";
-export type TaskContextPreset = "light" | "standard" | "review";
-export type AgentBackendKind = "builtin-cli" | "sidecar";
-export type AgentBackendTransport = "pty-command" | "sidecar-rpc";
-export type AgentBackendRuntimeStatus =
-  | "unconfigured"
-  | "configured"
-  | "starting"
-  | "ready"
-  | "degraded"
-  | "error";
-export type TaskAttentionState =
-  | "running"
-  | "waiting-input"
-  | "needs-review"
-  | "failed"
-  | "completed";
-export type TaskTerminationCause =
-  | "manual-close"
-  | "process-exit"
-  | "startup-failed";
-export type ApprovalRiskLevel = "medium" | "high";
-export type ApprovalDecision = "pending" | "approved" | "rejected" | "executed";
-
-export interface AgentBackendCapabilities {
-  supportsWorkers: boolean;
-  supportsResume: boolean;
-  supportsToolCalls: boolean;
-  brokeredTools: boolean;
-  brokeredApprovals: boolean;
-  restrictedToolNames: string[];
-  toolCallAuthority?: string;
-  toolCallNotes?: string;
-  approvalFlowNotes?: string;
-}
-
-export interface AgentBackendDescriptor {
-  backendId: string;
-  displayName: string;
-  target: TaskTarget;
-  preferredForTarget?: boolean;
-  defaultForTarget?: boolean;
-  provider: string;
-  cliCommand?: string;
-  description: string;
-  builtin: boolean;
-  kind: AgentBackendKind;
-  transport: AgentBackendTransport;
-  capabilities: AgentBackendCapabilities;
-  configured?: boolean;
-  available?: boolean;
-  status?: AgentBackendRuntimeStatus;
-  statusMessage?: string;
-  routingStatusMessage?: string;
-  lastError?: string;
-  lastHandshakeAt?: number;
-}
-
-export interface ApprovalRequest {
-  requestId: string;
-  toolName: string;
-  reason: string;
-  riskLevel: ApprovalRiskLevel;
-  payloadPreview: string;
-  status: ApprovalDecision;
-  createdAt: number;
-  updatedAt: number;
-  actionDigest?: string;
-  approvalKey?: string;
-}
-
-export interface AgentTaskSummary {
-  taskId: string;
-  workspaceId: string;
-  workspaceName: string;
-  workspaceRootPath: string;
-  target: TaskTarget;
-  role: TaskRole;
-  parentTaskId?: string;
-  backendId?: string;
-  backendDisplayName?: string;
-  title: string;
-  status: string;
-  attentionState: TaskAttentionState;
-  sessionId: string;
-  cwd: string;
-  startedAt: number;
-  updatedAt: number;
-  completedAt?: number;
-  exitCode?: number;
-  contextPreset: TaskContextPreset;
-  changedFiles: GitFileStatus[];
-  promptPreview: string;
-  lastOutputExcerpt: string;
-  injectionProfileId?: string;
-  injectionPreset?: TaskContextPreset;
-  policySummary?: string;
-  terminationCause?: TaskTerminationCause;
-  retrySuperseded?: boolean;
-  supersededByTaskId?: string;
-}
-
-export type AgentTaskArtifactKind = "plan";
-
-export interface AgentTaskArtifact {
-  artifactId: string;
-  kind: AgentTaskArtifactKind;
-  title: string;
-  path: string;
-  mimeType: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface AgentActionResult<T> {
-  ok: boolean;
-  data?: T;
-  approvalRequired: boolean;
-  request?: ApprovalRequest;
-}
-
-export interface AgentTaskStatusDetail {
-  summary: AgentTaskSummary;
-  recentOutputExcerpt: string;
-  diffSummary: GitFileStatus[];
-  logPath: string;
-  artifacts: AgentTaskArtifact[];
-}
-
-export interface StartAgentTaskInput {
-  workspaceId: string;
-  target: TaskTarget;
-  prompt: string;
-  contextPreset: TaskContextPreset;
-  role?: TaskRole;
-  parentTaskId?: string;
-  backendId?: string;
-  cwd?: string;
-  title?: string;
-}
-
-export interface AgentBackendConnectionTestResult {
-  backendId: string;
-  ok: boolean;
-  status: AgentBackendRuntimeStatus;
-  message: string;
-  lastHandshakeAt?: number;
-}
-
-export interface SpawnWorkerInput {
-  parentTaskId: string;
-  prompt: string;
-  target?: TaskTarget;
-  contextPreset?: TaskContextPreset;
-  backendId?: string;
-  cwd?: string;
-  title?: string;
-}
-
-export interface AgentTaskRuntimeEvent {
-  eventId: string;
-  kind: string;
-  timestamp: number;
-  summary: string;
-  payloadPreview?: Record<string, unknown> | null;
-}
-
-export interface AgentWorkspaceSummary {
-  workspaceId: string;
-  name: string;
-  rootPaths: string[];
-  primaryRootPath?: string;
-}
-
-export interface ContextDocument {
-  path: string;
-  label: string;
-  content: string;
-}
-
-export interface GitSummary {
-  repoCount: number;
-  changedFiles: GitFileStatus[];
-}
-
-export interface WorkspaceContextResult {
-  workspace: AgentWorkspaceSummary;
-  preset: TaskContextPreset;
-  instructions: ContextDocument[];
-  gitSummary: GitSummary;
-  recentSessions: AiSession[];
-  relatedFiles: ContextDocument[];
-}
-
-export type AgentClientType = "codex" | "claude" | "cursor" | "generic-mcp";
-export type PromptStyle = "minimal" | "balanced" | "strict";
-export type InjectionTargets = "codex" | "claude" | "both";
-
-export interface ToolUsagePolicy {
-  preferredSequence: string[];
-  approvalTools: string[];
-  readOnlyTools: string[];
-  taskTools: string[];
-}
-
-export interface AgentPolicyProfile {
-  id: string;
-  clientType: AgentClientType;
-  enabled: boolean;
-  displayName: string;
-  platformPromptTemplate: string;
-  toolPolicyPromptTemplate: string;
-  clientWrapperPromptTemplate: string;
-  systemPromptTemplate: string;
-  skillTemplate: string;
-  mcpInstructionsTemplate: string;
-  toolUsagePolicy: ToolUsagePolicy;
-}
-
-export interface RenderedPromptSections {
-  platformPrompt: string;
-  toolPolicyPrompt: string;
-  clientWrapperPrompt: string;
-  taskPresetPrompt: string;
-  workspaceOverridePrompt: string;
-}
-
-export interface WorkspacePolicyOverride {
-  workspaceId: string;
-  profileId: string;
-  enabledTools: string[];
-  extraInstructions: string;
-  promptStyle: PromptStyle;
-}
-
-export interface PresetPolicyTemplates {
-  light: string;
-  standard: string;
-  review: string;
-}
-
-export interface TaskInjectionProfileBindings {
-  codex?: string;
-  claude?: string;
-}
-
-export interface TaskInjectionTargetPresetPolicies {
-  codex?: PresetPolicyTemplates;
-  claude?: PresetPolicyTemplates;
-}
-
-export interface TaskInjectionPolicy {
-  enabled: boolean;
-  targets: InjectionTargets;
-  presetPolicies: PresetPolicyTemplates;
-  approvalHints: boolean;
-  reviewHints: boolean;
-  profileBindings: TaskInjectionProfileBindings;
-  targetPresetPolicies: TaskInjectionTargetPresetPolicies;
-}
-
-export interface AgentPoliciesConfig {
-  profiles: AgentPolicyProfile[];
-  workspaceOverrides: WorkspacePolicyOverride[];
-  taskInjection: TaskInjectionPolicy;
-}
-
-export interface AgentPolicyExportBundle {
-  clientType: AgentClientType;
-  profile: AgentPolicyProfile;
-  workspaceId?: string;
-  workspaceName?: string;
-  platformPrompt: string;
-  toolPolicyPrompt: string;
-  clientWrapperPrompt: string;
-  taskPresetTemplates: PresetPolicyTemplates;
-  systemPrompt: string;
-  skillText: string;
-  mcpInstructions: string;
-  workspaceOverridePrompt: string;
-  effectivePolicySummary: string;
-  mcpLaunch: McpLaunchInfo;
-  mcpConfigJson: string;
-}
-
-export interface McpLaunchInfo {
-  status: "resolved" | "manual-required";
-  transport: "stdio" | "http";
-  command?: string;
-  args: string[];
-  url?: string;
-  cwd?: string;
-  notes?: string;
-}
-
-export interface McpClientInstallFileResult {
-  path: string;
-  kind: "primary" | "catalog" | string;
-  created: boolean;
-  updated: boolean;
-}
-
-export interface McpClientInstallResult {
-  clientType: AgentClientType;
-  serverName: string;
-  files: McpClientInstallFileResult[];
-  launch: McpLaunchInfo;
-}
-
-export interface EmbeddedMcpToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: unknown;
-  group: string;
-  stability: string;
-  readOnly: boolean;
-  requiresConfirmation: boolean;
-  requiresHostConnection?: boolean;
-  supportsDryRun: boolean;
-  supportsPagination: boolean;
-  authorityScope?: string;
-  riskLevel?: string;
-  idempotency?: string;
-  executionKind?: string;
-  degradationMode?: string;
-  stateDependencies?: string[];
-  whenToUse: string;
-}
-
-export interface EmbeddedMcpCallError {
-  code: string;
-  message: string;
-  retryable: boolean;
-}
-
-export interface EmbeddedMcpActionState {
-  toolName: string;
-  actionId: string;
-  phase: string;
-  replayUnsafe: boolean;
-  retryable: boolean;
-  degradationMode: string;
-}
-
-export interface EmbeddedMcpApprovalState {
-  required: boolean;
-  status?: ApprovalDecision | string;
-  request?: ApprovalRequest | null;
-}
-
-export interface EmbeddedMcpRetryHint {
-  allowed: boolean;
-  approvalRequestId?: string;
-}
-
-export interface EmbeddedMcpCallResult {
-  ok: boolean;
-  status?: string;
-  data?: unknown;
-  error?: EmbeddedMcpCallError | null;
-  meta?: Record<string, unknown>;
-  requiresConfirmation?: boolean;
-  confirmation?: ApprovalRequest | null;
-  approval?: EmbeddedMcpApprovalState | null;
-  action?: EmbeddedMcpActionState | null;
-  blockingReason?: string | null;
-  retry?: EmbeddedMcpRetryHint | null;
-}
-
-export interface TaskInjectionPreview {
-  profileId: string;
-  clientType: AgentClientType;
-  preset: TaskContextPreset;
-  workspaceId: string;
-  workspaceName: string;
-  policySummary: string;
-  renderedSections: RenderedPromptSections;
-  finalPrompt: string;
-}
-
-export interface TaskEffectivePolicy {
-  taskId: string;
-  injectionProfileId?: string;
-  injectionPreset?: TaskContextPreset;
-  policySummary?: string;
-  isInjected: boolean;
-}
+// === 文件树 ===
 
 export interface FileEntry {
   name: string;
@@ -974,57 +251,21 @@ export interface FileEntry {
   children?: FileEntry[];
 }
 
+// === Tauri 事件 payload ===
+
 export interface PtyOutputPayload {
-  sessionId?: string;
   ptyId: number;
   data: string;
 }
 
 export interface PtyExitPayload {
-  sessionId?: string;
   ptyId: number;
   exitCode: number;
 }
 
 export interface PtyStatusChangePayload {
-  sessionId?: string;
   ptyId: number;
   status: PaneStatus;
-}
-
-export interface PtySessionCreatedPayload {
-  sessionId: string;
-  ptyId: number;
-  shell: string;
-  shellKind: ShellKind;
-  cwd: string;
-  mode: SessionMode;
-  phase: SessionPhase;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface PtySessionPhasePayload {
-  sessionId?: string;
-  ptyId: number;
-  phase: SessionPhase;
-  lastExitCode?: number;
-  updatedAt: number;
-}
-
-export interface PtySessionCommandPayload {
-  sessionId?: string;
-  ptyId: number;
-  command: string;
-  usageScope?: string;
-  updatedAt: number;
-}
-
-export interface PtySessionCwdPayload {
-  sessionId?: string;
-  ptyId: number;
-  cwd: string;
-  updatedAt: number;
 }
 
 export interface FsChangePayload {
@@ -1033,19 +274,36 @@ export interface FsChangePayload {
   kind: string;
 }
 
-export type GitStatusType =
-  | "modified"
-  | "added"
-  | "deleted"
-  | "renamed"
-  | "untracked"
-  | "conflicted";
+// === 搜索 ===
+
+export interface SearchResultItem {
+  filePath: string;
+  fileName: string;
+  lineNumber?: number;
+  lineContent?: string;
+  matchRanges: [number, number][];
+}
+
+export interface SearchResultsPayload {
+  searchId: string;
+  items: SearchResultItem[];
+}
+
+export interface SearchCompletePayload {
+  searchId: string;
+  totalCount: number;
+  cancelled: boolean;
+}
+
+// === Git 状态 ===
+
+export type GitStatusType = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
 
 export interface GitFileStatus {
   path: string;
   oldPath?: string;
   status: GitStatusType;
-  statusLabel: string;
+  statusLabel: string; // "M", "A", "D", "R", "?", "C"
 }
 
 export interface ChangeFileStatus {
@@ -1057,36 +315,18 @@ export interface ChangeFileStatus {
 }
 
 export interface DiffHunk {
-  hunkKey: string;
   oldStart: number;
   oldLines: number;
   newStart: number;
   newLines: number;
   lines: DiffLine[];
-  changeBlocks: DiffChangeBlockInfo[];
 }
 
 export interface DiffLine {
-  kind: "add" | "delete" | "context";
+  kind: 'add' | 'delete' | 'context';
   content: string;
   oldLineno?: number;
   newLineno?: number;
-}
-
-export interface GitBlameInfo {
-  authorName: string;
-  authorEmail?: string;
-  authorTime: number;
-  commitId?: string;
-  summary?: string;
-  isUncommitted: boolean;
-}
-
-export interface DiffChangeBlockInfo {
-  blockIndex: number;
-  lineStartIndex: number;
-  lineEndIndex: number;
-  blame?: GitBlameInfo;
 }
 
 export interface GitDiffResult {
@@ -1095,11 +335,9 @@ export interface GitDiffResult {
   hunks: DiffHunk[];
   isBinary: boolean;
   tooLarge: boolean;
-  canRestoreFile: boolean;
-  canRestorePartial: boolean;
-  restoreMode: "file-only" | "file-and-hunk" | "unsupported";
-  diffCleared: boolean;
 }
+
+// === 文件查看 ===
 
 export interface FileContentResult {
   content: string;
@@ -1107,44 +345,12 @@ export interface FileContentResult {
   tooLarge: boolean;
 }
 
-export type DocumentPreviewKind =
-  | "text"
-  | "markdown"
-  | "svg"
-  | "image"
-  | "pdf"
-  | "docx"
-  | "doc"
-  | "unsupported";
-
-export interface DocumentPreviewResult {
-  kind: DocumentPreviewKind;
-  mimeType?: string;
-  textContent?: string;
-  tooLarge: boolean;
-  byteLength: number;
-  openExternallyRecommended?: boolean;
-  warning?: string;
-}
-
-export interface FileViewerOpenOptions {
-  initialMode?: PreviewMode;
-  navigationTarget?: FileNavigationTarget;
-}
+// === Git 历史 ===
 
 export interface GitRepoInfo {
   name: string;
   path: string;
   currentBranch?: string;
-}
-
-export interface GitCompletionData {
-  repoRoot: string;
-  currentBranch?: string;
-  localBranches: string[];
-  remoteBranches: string[];
-  remotes: string[];
-  tags: string[];
 }
 
 export interface GitCommitInfo {
@@ -1156,6 +362,12 @@ export interface GitCommitInfo {
   timestamp: number;
 }
 
+export interface CommitFileInfo {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  oldPath?: string;
+}
+
 export interface BranchInfo {
   name: string;
   isHead: boolean;
@@ -1163,77 +375,20 @@ export interface BranchInfo {
   commitHash: string;
 }
 
-export interface GitFileHistoryEntry {
-  commitHash: string;
-  shortHash: string;
-  message: string;
-  author: string;
-  timestamp: number;
-  path: string;
-  oldPath?: string;
-  status: "added" | "modified" | "deleted" | "renamed";
+// === AI 任务分段 marker ===
+
+export interface AiUserSubmitPayload {
+  ptyId: number;
+  line: string;
+  ts: number;
 }
 
-export interface GitFileHistoryResult {
-  repoPath: string;
-  filePath: string;
-  entries: GitFileHistoryEntry[];
-  hasMore: boolean;
-  nextCursor?: string;
+export interface AiMarker {
+  id: string;            // UUID,store 索引与 React key
+  seq: number;           // 该 pane 内自增序号,UI 显示 "#N"
+  ptyId: number;
+  line: string;          // 用户输入原文(trim 后)
+  ts: number;            // epoch ms
+  xtermMarkerId: number; // xterm IMarker.id,用于查找 module-local 缓存
+  inProgress: boolean;   // 最后一个 marker 为 true,新 marker 到来时前一个翻 false
 }
-
-export interface GitBlameRange {
-  startLine: number;
-  endLine: number;
-  lines: string[];
-  author: string;
-  timestamp: number;
-  commitHash: string;
-  shortHash: string;
-  message: string;
-  isUncommitted: boolean;
-}
-
-export interface GitFileBlameResult {
-  repoPath: string;
-  filePath: string;
-  ranges: GitBlameRange[];
-  isBinary: boolean;
-  tooLarge: boolean;
-}
-
-export interface CommitFileInfo {
-  path: string;
-  status: "added" | "modified" | "deleted" | "renamed";
-  oldPath?: string;
-}
-
-export type UiDialog =
-  | { kind: "settings"; page: SettingsPage }
-  | {
-      kind: "interaction-dialog";
-      dialogId: string;
-      mode: InteractionDialogMode;
-      title: string;
-      message?: string;
-      detail?: string;
-      placeholder?: string;
-      initialValue?: string;
-      confirmLabel?: string;
-      cancelLabel?: string;
-      tone?: InteractionDialogTone;
-      readOnly?: boolean;
-    };
-
-export type UiNoticeTone = "info" | "success" | "error";
-
-export interface UiNotice {
-  id: string;
-  message: string;
-  tone: UiNoticeTone;
-  durationMs: number;
-  createdAt: number;
-}
-
-export type ProjectConfig = LegacyProjectConfig;
-export type ProjectState = WorkspaceState;

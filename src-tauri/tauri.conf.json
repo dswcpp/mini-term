@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Mini-Term",
-  "version": "0.2.19",
-  "identifier": "com.tauri-app.tauri-app",
+  "version": "0.6.4",
+  "identifier": "com.mini-term.app",
   "build": {
-    "beforeDevCommand": "node scripts/ensure-vite-dev.mjs",
-    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1450",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -15,25 +15,24 @@
         "title": "Mini-Term",
         "width": 800,
         "height": 600,
-        "decorations": false,
-        "transparent": true,
         "visible": false,
         "dragDropEnabled": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": [
-      "../docs/AGENT_POLICY_PROMPTS.md",
-      "../docs/MCP.md",
-      "../docs/MCP_SETUP.md",
-      "../docs/skills/**/*",
-      "../scripts/install-mini-term-skills.ps1"
+    "externalBin": [
+      "binaries/mt-ssh-mcp",
+      "binaries/miniterm-hook"
     ],
     "icon": [
       "icons/32x32.png",
