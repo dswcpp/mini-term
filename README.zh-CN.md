@@ -63,6 +63,16 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 - **进阶能力** — 密钥文件登录（`ssh -i`）、连接分组管理
 - **SSH MCP Server** — 把已保存的 SSH 连接作为 MCP 工具暴露给终端里运行的 AI agent（Claude Code / Codex）。项目右键菜单「关联 SSH」勾选连接即按项目启用，并把可见范围限定在所选连接；内置 `mt-ssh-mcp` sidecar（基于官方 rmcp 的 stdio MCP server）提供 `ssh_list_connections`、`ssh_exec`、`ssh_upload`、`ssh_download` 四个工具，`ssh_exec` 复用密码 / 私钥认证，带超时、输出封顶与审计日志；`ssh_upload` / `ssh_download` 走 SFTP 单文件传输（分块流式、内存恒定，可传大文件，摆脱 `ssh_exec` + base64 echo 受输出封顶限制的 workaround），下载直接落盘到本地路径，并有一条硬护栏拒绝传输 mini-term 自身的 `config.json`（内含全部 SSH 明文凭据）；启用 / 停用时按命名 marker 幂等写入 Claude `.mcp.json` 与 Codex `.codex/config.toml`。**自 v0.4.10 起 sidecar 维护进程内 SSH 会话池**（russh 0.61 + tokio），首次调用某连接做一次 TCP 握手 + 认证（~秒级），后续命令仅消耗 RTT；会话空闲 10 分钟或最长 2 小时自动回收，并在 sidecar 退出时优雅 `disconnect`
 
+### SSH MCP SFTP 工具
+
+项目关联 SSH 连接后，Agent 可以使用以下单文件 SFTP 工具：
+
+```json
+{"connection":"prod","local_path":"C:/tmp/app.tar.gz","remote_path":"/tmp/app.tar.gz","timeout_secs":300}
+```
+
+把这段参数传给 `ssh_upload` 表示本地传到远端。`ssh_download` 的方向相反：`remote_path` 是 SSH 主机上的源文件，`local_path` 是运行 mini-term 这台机器上的落盘目标。不确定连接名时先调用 `ssh_list_connections`。
+
 ### WSL 支持（Windows）
 
 - **WSL 目录作为项目根** — 支持把 `\\wsl$\<distro>\<unix-path>` 与 `\\wsl.localhost\<distro>\<unix-path>` 两种形式的 WSL 路径添加为项目，前端展示路径自动剥掉 `\\?\UNC\` verbatim 前缀，文件树可正常展开与预览
@@ -97,7 +107,7 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 
 把本机跑的 AI agent 通过 IM 平台（飞书 / Slack / Telegram / Discord / 钉钉 / 微信等）远程驱动，与上游 [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect) 桥接。入口统一收在顶栏「连接」按钮弹窗内。
 
-- **进程管理（零配置）** — 「连接」弹窗内一键启动 / 停止 / 重启 / 测试连接 / 编辑 config.toml，可选 mini-term 启动时自动 spawn；可执行文件 / 配置路径留空时自动回退 PATH 中的 `cc-connect` 与 `~/.cc-connect/config.toml`，零配置即可使用；Windows 下按 PATH × PATHEXT 解析 npm 脚本壳（`.cmd` / `.ps1`），停止 / 重启用 `taskkill /T` 杀整棵进程树避免孤儿进程；关闭 mini-term 不联动 kill，保证 IM 持续可用
+- **进程管理（零配置）** — 「连接」弹窗内一键启动 / 停止 / 重启 / 测试连接 / 编辑 config.toml，可选 mini-term 启动时自动 spawn；可执行文件 / 配置路径留空时优先使用随包内置的 Windows `cc-connect` sidecar，再回退 PATH 中的 `cc-connect` 与 `~/.cc-connect/config.toml`，零配置即可使用；Windows 下按 PATH × PATHEXT 解析 npm 脚本壳（`.cmd` / `.ps1`），停止 / 重启用 `taskkill /T` 杀整棵进程树避免孤儿进程；关闭 mini-term 不联动 kill，保证 IM 持续可用
 - **一键导入项目** — 「连接」弹窗内列出全部 mini-term 项目，勾选 / 全选后一键批量导入（用 `toml_edit` 追加 `[[projects]]` 保留注释、单次写盘 + 仅重启一次 cc-connect、同名冲突自动加 8 字符 hash 后缀），也可逐项单独导入；已导入项显示「● 已导入」并可一键移除。每个导入项目会附带一个**占位 Telegram 平台**（cc-connect 强制每个项目至少一个平台，否则冷启动失败），导入后到 Dashboard 把占位替换为真实 IM 平台即可启用
 - **Dashboard 嵌入** — 「连接」弹窗内「打开 Dashboard」一键打开 cc-connect 自家 Web 控制台 iframe（自动登录态），直接在 mini-term 内配置 IM 平台 / 切换 provider / 管理 cron，无需另开浏览器；createPortal 到 `document.body` 绕开 Fluent 2 `[data-panel]` 的 backdrop-filter，确保全屏铺满；keep-alive 关闭走 `display:none` 不卸载，避免重新登录
 - **半同步态处理** — 项目导入 / 移除即使 cc-connect 重启失败，前端按 `tomlWritten` / `deletedOk` 分支仍维持本地 `projectLinks`，warning toast 提示 restart 失败原因，下次启动 cc-connect 自动生效
@@ -152,13 +162,13 @@ Mini-Term 用一个轻量桌面应用解决以上所有问题。
 | Git | git2 0.19 |
 | 文件监听 | notify 7 + ignore 0.4（.gitignore 过滤） |
 | Tauri 插件 | `window-state` · `clipboard-manager` · `dialog` · `opener` |
-| 测试覆盖 | 155 个 Rust 单元测试（pty / fs / config / hook / cc-connect） |
+| 测试覆盖 | 165 个 Rust 单元测试（pty / fs / config / hook / cc-connect） |
 
 ## 快速开始
 
 ### 直接下载
 
-前往 [Releases](https://github.com/dreamlonglll/mini-term/releases) 页面下载最新安装包。
+前往 [Releases](https://github.com/dswcpp/mini-term/releases) 页面下载最新安装包。
 
 > **平台支持说明**
 > - **Windows** — 主要支持平台，保证可用性，日常开发与测试均在 Windows 上进行
@@ -188,7 +198,7 @@ xattr -cr /Applications/Mini-Term.app
 
 ```bash
 # 克隆仓库
-git clone https://github.com/dreamlonglll/mini-term.git
+git clone https://github.com/dswcpp/mini-term.git
 cd mini-term
 
 # 安装依赖

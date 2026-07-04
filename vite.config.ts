@@ -4,6 +4,22 @@ import tailwindcss from "@tailwindcss/vite";
 
 const host = process.env.TAURI_DEV_HOST;
 
+// Claude/Codex/Trellis runtime files are written while users work inside
+// Mini-Term terminals. They must not trigger Vite reloads in tauri dev.
+const devWatchIgnored = [
+  "**/src-tauri/**",
+  "**/.agents/**",
+  "**/.claude/**",
+  "**/.codex/**",
+  "**/.qwen/**",
+  "**/.run-logs/**",
+  "**/.spec-workflow/**",
+  "**/.tmp-tests/**",
+  "**/.trellis/**",
+  "**/cc-connect/**",
+  "**/dist/**",
+];
+
 function matchesAny(id: string, patterns: string[]) {
   return patterns.some((pattern) => id.includes(pattern));
 }
@@ -52,7 +68,7 @@ export default defineConfig(async () => ({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1451 } : undefined,
-    watch: { ignored: ["**/src-tauri/**"] },
+    watch: { ignored: devWatchIgnored },
   },
   build: {
     // Main-path bundles are now well below 500 kB. The remaining larger chunks

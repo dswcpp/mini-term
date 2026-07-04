@@ -63,6 +63,16 @@ Mini-Term solves all of the above with one lightweight desktop app.
 - **Advanced capabilities** — Key-file login (`ssh -i`) and connection grouping.
 - **SSH MCP Server** — Exposes saved SSH connections as MCP tools to AI agents running in the terminal (Claude Code / Codex). The project right-click "Link SSH" menu enables them per project and limits visibility to the selected connections; the built-in `mt-ssh-mcp` sidecar (a stdio MCP server based on the official rmcp) provides `ssh_list_connections`, `ssh_exec`, `ssh_upload` and `ssh_download`, where `ssh_exec` reuses password / private-key auth with timeouts, output capping, and an audit log; `ssh_upload` / `ssh_download` transfer single files over SFTP (streamed in chunks for constant memory, so large files work, unlike base64-echoing through `ssh_exec`), download writes straight to a local path on disk, and a hard guard refuses to ever transfer mini-term's own `config.json` (which holds all saved SSH credentials); enabling / disabling writes idempotently into Claude's `.mcp.json` and Codex's `.codex/config.toml` using named markers. **Since v0.4.10 the sidecar maintains an in-process SSH session pool** (russh 0.61 + tokio): the first call to a connection does one TCP handshake + auth (~seconds), and subsequent commands cost only an RTT; sessions are recycled after 10 minutes idle or 2 hours max, and gracefully `disconnect` when the sidecar exits.
 
+### SSH MCP SFTP Tools
+
+After a project is linked to one or more SSH connections, agents can use these single-file SFTP tools:
+
+```json
+{"connection":"prod","local_path":"C:/tmp/app.tar.gz","remote_path":"/tmp/app.tar.gz","timeout_secs":300}
+```
+
+Use that payload with `ssh_upload` to copy local to remote. For `ssh_download`, swap the direction: `remote_path` is the source on the SSH host and `local_path` is the destination on the machine running mini-term. Use `ssh_list_connections` first when the connection name is unknown.
+
 ### WSL Support (Windows)
 
 - **WSL directories as project roots** — Supports adding WSL paths in both `\\wsl$\<distro>\<unix-path>` and `\\wsl.localhost\<distro>\<unix-path>` forms as projects; the displayed path automatically strips the `\\?\UNC\` verbatim prefix, and the file tree expands and previews normally.
@@ -97,7 +107,7 @@ Mini-Term solves all of the above with one lightweight desktop app.
 
 Remotely drive the AI agents running on your machine through IM platforms (Feishu / Slack / Telegram / Discord / DingTalk / WeChat, etc.), bridged with the upstream [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect). All entry points are gathered in the top-bar "Connect" button dialog.
 
-- **Process management (zero-config)** — Start / stop / restart / test-connection / edit config.toml from within the "Connect" dialog, optionally auto-spawned on mini-term startup; when the executable / config paths are left blank, it falls back to `cc-connect` on PATH and `~/.cc-connect/config.toml`, working with zero configuration; on Windows it resolves the npm script shell (`.cmd` / `.ps1`) via PATH × PATHEXT, and stop / restart use `taskkill /T` to kill the whole process tree to avoid orphans; closing mini-term does not kill it, keeping IM available continuously.
+- **Process management (zero-config)** — Start / stop / restart / test-connection / edit config.toml from within the "Connect" dialog, optionally auto-spawned on mini-term startup; when the executable / config paths are left blank, it prefers the bundled Windows `cc-connect` sidecar, then falls back to `cc-connect` on PATH and `~/.cc-connect/config.toml`, working with zero configuration; on Windows it resolves the npm script shell (`.cmd` / `.ps1`) via PATH × PATHEXT, and stop / restart use `taskkill /T` to kill the whole process tree to avoid orphans; closing mini-term does not kill it, keeping IM available continuously.
 - **One-click project import** — The "Connect" dialog lists all mini-term projects; check / select-all to batch-import in one click (appending `[[projects]]` via `toml_edit` to preserve comments, a single disk write + a single cc-connect restart, with an 8-char hash suffix auto-added on name conflicts), or import individually; imported entries show "● Imported" and can be removed in one click. Each imported project comes with a **placeholder Telegram platform** (cc-connect requires at least one platform per project or cold start fails); after importing, replace the placeholder with a real IM platform in the Dashboard to enable it.
 - **Embedded Dashboard** — "Open Dashboard" in the "Connect" dialog opens cc-connect's own web console in an iframe (already authenticated), letting you configure IM platforms / switch providers / manage cron directly inside mini-term without opening a browser; it `createPortal`s to `document.body` to bypass the backdrop-filter of Fluent 2's `[data-panel]` and ensure full-screen coverage; keep-alive close uses `display:none` without unmounting, avoiding re-login.
 - **Half-synced state handling** — Even if cc-connect's restart fails on project import / removal, the frontend keeps the local `projectLinks` based on the `tomlWritten` / `deletedOk` branches and shows a warning toast explaining the restart failure; the change takes effect the next time cc-connect starts.
@@ -152,13 +162,13 @@ Remotely drive the AI agents running on your machine through IM platforms (Feish
 | Git | git2 0.19 |
 | File watching | notify 7 + ignore 0.4 (.gitignore filtering) |
 | Tauri plugins | `window-state` · `clipboard-manager` · `dialog` · `opener` |
-| Test coverage | 155 Rust unit tests (pty / fs / config / hook / cc-connect) |
+| Test coverage | 165 Rust unit tests (pty / fs / config / hook / cc-connect) |
 
 ## Getting Started
 
 ### Direct Download
 
-Head to the [Releases](https://github.com/dreamlonglll/mini-term/releases) page to download the latest installer.
+Head to the [Releases](https://github.com/dswcpp/mini-term/releases) page to download the latest installer.
 
 > **Platform support note**
 > - **Windows** — The primary supported platform with guaranteed usability; daily development and testing all happen on Windows.
@@ -188,7 +198,7 @@ After that it launches normally on double-click. You'll need to run it again aft
 
 ```bash
 # Clone the repo
-git clone https://github.com/dreamlonglll/mini-term.git
+git clone https://github.com/dswcpp/mini-term.git
 cd mini-term
 
 # Install dependencies

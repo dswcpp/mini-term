@@ -22,8 +22,14 @@ export interface AppConfig {
   uiFontFamily?: string;
   terminalFontFamily?: string;
   terminalLigatures?: boolean;
+  terminalEncoding: TerminalEncoding;
+  terminalDepthUi: boolean;
+  terminalLogEnabled?: boolean;
+  terminalLogPath?: string;
+  terminalLogMaxSizeMb?: number;
   layoutSizes?: number[];
   middleColumnSizes?: number[];
+  settingsModalSize?: SettingsModalSize;
   theme: 'auto' | 'light' | 'dark';
   skin: 'none' | 'blueprint' | 'fluent2';
   terminalFollowTheme: boolean;
@@ -41,6 +47,7 @@ export interface AppConfig {
   sessionsVisible: boolean;
   filesVisible: boolean;
   gitVisible: boolean;
+  overviewVisible: boolean;
   lastActiveProjectId?: string;
   hookEnabled: boolean;
   smartCopyPaste: boolean;
@@ -49,8 +56,13 @@ export interface AppConfig {
   ccConnect?: CcConnectConfig;
 }
 
+export interface SettingsModalSize {
+  width: number;
+  height: number;
+}
+
 export interface CcConnectConfig {
-  /** cc-connect 可执行文件路径,空字符串 = 让前端 PATH 探测 */
+  /** cc-connect 可执行文件路径,空字符串 = 后端优先使用内置 sidecar,再回退 PATH */
   exePath: string;
   /** config.toml 路径,空字符串 = 默认 ~/.cc-connect/config.toml */
   configPath: string;
@@ -151,6 +163,16 @@ export interface ShellConfig {
   args?: string[];
 }
 
+export type TerminalEncoding =
+  | 'auto'
+  | 'utf-8'
+  | 'gbk'
+  | 'gb18030'
+  | 'big5'
+  | 'shift_jis'
+  | 'euc-kr'
+  | 'windows-1252';
+
 export interface EditorConfig {
   name: string;
   command: string;
@@ -171,6 +193,8 @@ export interface SshConnection {
 
 export interface SavedPane {
   shellName: string;
+  customTitle?: string;
+  terminalEncoding?: TerminalEncoding;
 }
 
 export type SavedSplitNode =
@@ -210,6 +234,56 @@ export interface AiCompletionNotification {
   message?: string;
 }
 
+// === 工作区总览 ===
+
+export type WorkspaceOverviewRefreshStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+export interface OverviewTotals {
+  projectCount: number;
+  openTabCount: number;
+  paneCount: number;
+  aiWorkingCount: number;
+  gitChangedProjectCount: number;
+  gitChangeCount: number;
+  notificationCount: number;
+}
+
+export interface OverviewProjectSummary {
+  projectId: string;
+  name: string;
+  path: string;
+  status: PaneStatus;
+  tabCount: number;
+  paneCount: number;
+  aiWorkingCount: number;
+  gitChangeCount: number;
+  gitError?: string;
+  ccConnectLinked: boolean;
+  ccConnectProjectName?: string;
+  ccConnectMissing: boolean;
+}
+
+export interface OverviewCcConnectSummary {
+  running: boolean;
+  port: number;
+  version?: string;
+  ownPid?: number;
+  diagnostic?: string;
+  linkedProjectCount: number;
+  missingLinkCount: number;
+  remoteListLoaded: boolean;
+  remoteListError?: string;
+}
+
+export interface WorkspaceOverviewState {
+  refreshStatus: WorkspaceOverviewRefreshStatus;
+  lastUpdated?: number;
+  error?: string;
+  totals: OverviewTotals;
+  projects: OverviewProjectSummary[];
+  ccConnect: OverviewCcConnectSummary;
+}
+
 export interface TerminalTab {
   id: string;
   customTitle?: string;
@@ -225,6 +299,7 @@ export interface PaneState {
   id: string;
   shellName: string;
   customTitle?: string;
+  terminalEncoding?: TerminalEncoding;
   status: PaneStatus;
   ptyId?: number;
 }
@@ -361,6 +436,15 @@ export interface FileContentResult {
 export interface GitRepoInfo {
   name: string;
   path: string;
+  currentBranch?: string;
+}
+
+export type VcsKind = 'git' | 'svn';
+
+export interface VcsRepoInfo {
+  name: string;
+  path: string;
+  vcsKind: VcsKind;
   currentBranch?: string;
 }
 

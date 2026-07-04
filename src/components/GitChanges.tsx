@@ -1,17 +1,28 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { ask } from '@tauri-apps/plugin-dialog';
 import { useT } from '../i18n';
 import { useAppStore } from '../store';
 import { useTauriEvent } from '../hooks/useTauriEvent';
 import { showContextMenu } from '../utils/contextMenu';
 import { isAiPty } from '../utils/terminalCache';
+import { showAlert, showConfirm } from '../utils/prompt';
+import { formatError, saveConfigPatch } from '../utils/appConfigPersistence';
+import {
+  getVcsChangesStatus,
+  gitUnstage,
+  gitUnstageAll,
+  vcsCommit,
+  vcsDiscardFile,
+  vcsStage,
+  vcsStageAll,
+  vcsUpdate,
+} from '../utils/vcsApi';
 import { DiffModal } from './DiffModal';
-import type { ChangeFileStatus, PtyOutputPayload } from '../types';
+import type { ChangeFileStatus, PtyOutputPayload, VcsKind } from '../types';
 
 interface GitChangesProps {
   projectPath: string;
   repoPath: string;
+  vcsKind: VcsKind;
   onCommitSuccess: () => void;
 }
 
@@ -21,6 +32,15 @@ const GIT_REFRESH_PATTERNS = [
   /Already up to date/,
   /insertions?\(\+\)/,
   /deletions?\(-\)/,
+];
+
+const SVN_REFRESH_PATTERNS = [
+  /Sending\s+/,
+  /Transmitting file data/,
+  /Committed revision/,
+  /Updated to revision/,
+  /At revision/,
+  /Reverted\s+/,
 ];
 
 // --- Tree view helpers ---
@@ -82,10 +102,9 @@ function statusColor(_file: ChangeFileStatus, area: string): string {
 
 // --- Main component ---
 
-export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSuccess }: GitChangesProps) {
+export function GitChanges({ projectPath: _projectPath, repoPath, vcsKind, onCommitSuccess }: GitChangesProps) {
   const t = useT();
   const config = useAppStore((s) => s.config);
-  const setConfig = useAppStore((s) => s.setConfig);
 
   const [changes, setChanges] = useState<ChangeFileStatus[]>([]);
   const [loading, setLoading] = useState(false);
@@ -93,6 +112,7 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
 
   const [commitMsg, setCommitMsg] = useState('');
   const [committing, setCommitting] = useState(false);
+  const [updating, setUpdating] = useState(false);
 
   const [diffModal, setDiffModal] = useState<{
     open: boolean;
@@ -102,21 +122,23 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
   } | null>(null);
 
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const isSvn = vcsKind === 'svn';
 
   // Grouping
   const staged = changes.filter((c) => c.stagedStatus);
   const unstaged = changes.filter((c) => c.unstagedStatus && c.unstagedStatus !== 'untracked');
   const untracked = changes.filter((c) => c.unstagedStatus === 'untracked');
+  const committable = isSvn ? changes.filter((c) => c.unstagedStatus !== 'untracked') : staged;
 
   // Load changes
   const loadChanges = useCallback(() => {
     if (!repoPath) return;
     setLoading(true);
-    invoke<ChangeFileStatus[]>('get_changes_status', { repoPath })
+    getVcsChangesStatus(repoPath, vcsKind)
       .then(setChanges)
       .catch(() => setChanges([]))
       .finally(() => setLoading(false));
-  }, [repoPath]);
+  }, [repoPath, vcsKind]);
 
   useEffect(() => {
     loadChanges();
@@ -134,89 +156,115 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     useCallback(
       (payload: PtyOutputPayload) => {
         if (isAiPty(payload.ptyId)) return;
-        if (GIT_REFRESH_PATTERNS.some((p) => p.test(payload.data))) {
+        const patterns = isSvn ? SVN_REFRESH_PATTERNS : GIT_REFRESH_PATTERNS;
+        if (patterns.some((p) => p.test(payload.data))) {
           debouncedRefresh();
         }
       },
-      [debouncedRefresh],
+      [debouncedRefresh, isSvn],
     ),
   );
 
   // --- Action handlers ---
 
+  const showActionError = useCallback(
+    (error: unknown) => showAlert(t('gitChanges.actionFailedTitle'), formatError(error)),
+    [t],
+  );
+
   const handleStage = useCallback(async (files: string[]) => {
     try {
-      await invoke('git_stage', { repoPath, files });
+      await vcsStage(repoPath, vcsKind, files);
       loadChanges();
-    } catch (e) {
-      console.error('stage failed:', e);
+    } catch (error) {
+      await showActionError(error);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, vcsKind, loadChanges, showActionError]);
 
   const handleUnstage = useCallback(async (files: string[]) => {
+    if (isSvn) return;
     try {
-      await invoke('git_unstage', { repoPath, files });
+      await gitUnstage(repoPath, files);
       loadChanges();
-    } catch (e) {
-      console.error('unstage failed:', e);
+    } catch (error) {
+      await showActionError(error);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, loadChanges, isSvn, showActionError]);
 
-  const handleStageAll = useCallback(async () => {
+  const handleStageAll = useCallback(async (includeUntracked = true) => {
     try {
-      await invoke('git_stage_all', { repoPath });
+      await vcsStageAll(repoPath, vcsKind, includeUntracked);
       loadChanges();
-    } catch (e) {
-      console.error('stage all failed:', e);
+    } catch (error) {
+      await showActionError(error);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, vcsKind, loadChanges, showActionError]);
 
   const handleUnstageAll = useCallback(async () => {
+    if (isSvn) return;
     try {
-      await invoke('git_unstage_all', { repoPath });
+      await gitUnstageAll(repoPath);
       loadChanges();
-    } catch (e) {
-      console.error('unstage all failed:', e);
+    } catch (error) {
+      await showActionError(error);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, loadChanges, isSvn, showActionError]);
 
   const handleCommit = useCallback(async () => {
-    if (!commitMsg.trim() || staged.length === 0) return;
+    if (!commitMsg.trim() || committable.length === 0) return;
     setCommitting(true);
     try {
-      await invoke('git_commit', { repoPath, message: commitMsg.trim() });
+      await vcsCommit(repoPath, vcsKind, commitMsg.trim());
       setCommitMsg('');
       loadChanges();
       onCommitSuccess();
-    } catch (e) {
-      console.error('commit failed:', e);
+    } catch (error) {
+      await showActionError(error);
     } finally {
       setCommitting(false);
     }
-  }, [repoPath, commitMsg, staged.length, loadChanges, onCommitSuccess]);
+  }, [repoPath, vcsKind, commitMsg, committable.length, loadChanges, onCommitSuccess, showActionError]);
 
   const handleDiscard = useCallback(async (files: string[]) => {
-    const confirmed = await ask(
+    const confirmed = await showConfirm(
+      t('gitChanges.discardTitle'),
       t('gitChanges.discardConfirm', { count: files.length }),
-      { title: t('gitChanges.discardTitle'), kind: 'warning', okLabel: t('gitChanges.discardOk'), cancelLabel: t('gitChanges.discardCancel') },
+      {
+        confirmLabel: t('gitChanges.discardOk'),
+        cancelLabel: t('gitChanges.discardCancel'),
+      },
     );
     if (!confirmed) return;
     try {
-      await invoke('git_discard_file', { repoPath, files });
+      await vcsDiscardFile(repoPath, vcsKind, files);
       loadChanges();
-    } catch (e) {
-      console.error('discard failed:', e);
+    } catch (error) {
+      await showActionError(error);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, vcsKind, loadChanges, t, showActionError]);
 
   const handleViewDiff = useCallback((filePath: string, isStaged: boolean, statusLabel: string) => {
     setDiffModal({ open: true, filePath, staged: isStaged, statusLabel });
   }, []);
 
+  const handleUpdate = useCallback(async () => {
+    if (!repoPath || updating) return;
+    setUpdating(true);
+    try {
+      await vcsUpdate(repoPath, vcsKind);
+      loadChanges();
+    } catch (error) {
+      await showActionError(error);
+    } finally {
+      setUpdating(false);
+    }
+  }, [repoPath, vcsKind, updating, loadChanges, showActionError]);
+
   const toggleViewMode = useCallback(() => {
     const next = viewMode === 'list' ? 'tree' : 'list';
-    setConfig({ ...config, gitChangesViewMode: next });
-  }, [viewMode, config, setConfig]);
+    void saveConfigPatch((current) => ({ ...current, gitChangesViewMode: next }))
+      .catch((error) => showAlert(t('gitChanges.saveViewModeFailed'), formatError(error)));
+  }, [viewMode, t]);
 
   // --- Render helpers ---
 
@@ -240,12 +288,16 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
         onContextMenu={(e) => {
           e.preventDefault();
           const sep = { separator: true as const };
+          const vcsActions: Parameters<typeof showContextMenu>[2] = isSvn
+            ? (area === 'untracked'
+              ? [{ label: t('gitChanges.add'), onClick: () => handleStage([file.path]) }]
+              : [])
+            : (isStaged
+              ? [{ label: 'Unstage', onClick: () => handleUnstage([file.path]) }]
+              : [{ label: 'Stage', onClick: () => handleStage([file.path]) }]);
           const items: Parameters<typeof showContextMenu>[2] = [
             { label: t('gitChanges.contextViewDiff'), onClick: () => handleViewDiff(file.path, isStaged, statusChar) },
-            sep,
-            ...(isStaged
-              ? [{ label: 'Unstage', onClick: () => handleUnstage([file.path]) }]
-              : [{ label: 'Stage', onClick: () => handleStage([file.path]) }]),
+            ...(vcsActions.length > 0 ? [sep, ...vcsActions] : []),
             ...(area !== 'staged'
               ? [sep, { label: t('gitChanges.contextDiscard'), onClick: () => handleDiscard([file.path]) }]
               : []),
@@ -261,16 +313,22 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
             {displayName}
           </span>
         </div>
-        <button
-          className="shrink-0 w-5 h-5 flex items-center justify-center text-sm opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-opacity"
-          title={isStaged ? 'Unstage' : 'Stage'}
-          onClick={(e) => {
-            e.stopPropagation();
-            isStaged ? handleUnstage([file.path]) : handleStage([file.path]);
-          }}
-        >
-          {isStaged ? '−' : '+'}
-        </button>
+        {(!isSvn || area === 'untracked') && (
+          <button
+            className="shrink-0 w-5 h-5 flex items-center justify-center text-sm opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-opacity"
+            title={isSvn ? t('gitChanges.add') : isStaged ? 'Unstage' : 'Stage'}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isSvn) {
+                handleStage([file.path]);
+              } else {
+                isStaged ? handleUnstage([file.path]) : handleStage([file.path]);
+              }
+            }}
+          >
+            {isSvn ? '+' : isStaged ? '−' : '+'}
+          </button>
+        )}
       </div>
     );
   };
@@ -356,13 +414,25 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     <div className="h-full flex flex-col">
       {/* Toolbar */}
       <div className="flex items-center justify-between px-3 py-1.5 flex-shrink-0">
-        <button
-          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-sm"
-          onClick={loadChanges}
-          title={t('gitChanges.refresh')}
-        >
-          ↻
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-sm"
+            onClick={loadChanges}
+            title={t('gitChanges.refresh')}
+          >
+            ↻
+          </button>
+          {isSvn && (
+            <button
+              className={`text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-sm ${updating ? 'animate-pulse' : ''}`}
+              onClick={handleUpdate}
+              disabled={updating}
+              title={t('gitChanges.update')}
+            >
+              ↓
+            </button>
+          )}
+        </div>
         <button
           className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
           onClick={toggleViewMode}
@@ -386,13 +456,13 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
           label: t('gitChanges.unstageAll'),
           onClick: handleUnstageAll,
         })}
-        {renderGroup('Changes', unstaged, 'unstaged', {
-          label: t('gitChanges.stageAll'),
-          onClick: handleStageAll,
+        {renderGroup(isSvn ? 'Versioned Changes' : 'Changes', unstaged, 'unstaged', {
+          label: isSvn ? t('gitChanges.prepareAll') : t('gitChanges.stageAll'),
+          onClick: () => handleStageAll(!isSvn),
         })}
         {renderGroup('Untracked Files', untracked, 'untracked', {
-          label: t('gitChanges.stageAll'),
-          onClick: handleStageAll,
+          label: isSvn ? t('gitChanges.addAll') : t('gitChanges.stageAll'),
+          onClick: () => handleStageAll(true),
         })}
       </div>
 
@@ -412,14 +482,14 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
         />
         <button
           className={`w-full mt-1.5 py-1.5 text-sm rounded font-medium transition-colors ${
-            commitMsg.trim() && staged.length > 0 && !committing
+            commitMsg.trim() && committable.length > 0 && !committing
               ? 'bg-[var(--accent)] text-white hover:opacity-90 cursor-pointer'
               : 'bg-[var(--bg-elevated)] text-[var(--text-muted)] cursor-not-allowed'
           }`}
-          disabled={!commitMsg.trim() || staged.length === 0 || committing}
+          disabled={!commitMsg.trim() || committable.length === 0 || committing}
           onClick={handleCommit}
         >
-          {committing ? t('gitChanges.committing') : `Commit (${staged.length})`}
+          {committing ? t('gitChanges.committing') : `Commit (${committable.length})`}
         </button>
       </div>
 
@@ -431,6 +501,7 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
           projectPath={repoPath}
           status={diffModalStatus}
           staged={diffModal.staged}
+          vcsKind={vcsKind}
         />
       )}
     </div>

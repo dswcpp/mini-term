@@ -4,6 +4,11 @@ export const app = {
       settings: "设置",
       connect: "连接",
     },
+    windowControls: {
+      minimize: "最小化",
+      maximizeRestore: "最大化/还原",
+      close: "关闭",
+    },
     update: {
       badge: "新版本 {version}",
       title: "新版本 {version} 可用，点击前往下载",
@@ -19,6 +24,11 @@ export const app = {
     menu: {
       settings: "Settings",
       connect: "Connect",
+    },
+    windowControls: {
+      minimize: "Minimize",
+      maximizeRestore: "Maximize / Restore",
+      close: "Close",
     },
     update: {
       badge: "New version {version}",

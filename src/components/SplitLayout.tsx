@@ -1,13 +1,15 @@
 import { useRef } from 'react';
 import { Allotment } from 'allotment';
 import { PaneGroup } from './PaneGroup';
+import type { TerminalLayoutPreset } from '../utils/terminalLayoutPresets';
 import type { SplitNode } from '../types';
 
 interface Props {
   projectId: string;
   node: SplitNode;
   projectPath: string;
-  onSplit?: (paneId: string, direction: 'horizontal' | 'vertical') => void;
+  onSplit?: (paneId: string, direction: 'horizontal' | 'vertical') => void | Promise<void>;
+  onLayoutPreset?: (paneId: string, preset: TerminalLayoutPreset) => void | Promise<void>;
   onCloseLeaf?: (node: SplitNode) => void;
   onUpdateNode?: (updated: SplitNode) => void;
   onLayoutChange?: (updatedNode: SplitNode) => void;
@@ -21,7 +23,7 @@ function getNodeKey(node: SplitNode): string {
   return getNodeKey(node.children[0]);
 }
 
-export function SplitLayout({ projectId, node, projectPath, onSplit, onCloseLeaf, onUpdateNode, onLayoutChange }: Props) {
+export function SplitLayout({ projectId, node, projectPath, onSplit, onLayoutPreset, onCloseLeaf, onUpdateNode, onLayoutChange }: Props) {
   const rafRef = useRef<number>(0);
   const nodeRef = useRef(node);
   nodeRef.current = node;
@@ -33,6 +35,7 @@ export function SplitLayout({ projectId, node, projectPath, onSplit, onCloseLeaf
         node={node}
         projectPath={projectPath}
         onSplit={onSplit ?? (() => {})}
+        onLayoutPreset={onLayoutPreset ?? (() => {})}
         onClosePane={() => onCloseLeaf?.(node)}
         onUpdateNode={(updated) => onUpdateNode?.(updated)}
       />
@@ -98,6 +101,7 @@ export function SplitLayout({ projectId, node, projectPath, onSplit, onCloseLeaf
             node={child}
             projectPath={projectPath}
             onSplit={onSplit}
+            onLayoutPreset={onLayoutPreset}
             onCloseLeaf={() => handleChildClose(index)}
             onUpdateNode={(updated) => handleChildUpdate(index, updated)}
             onLayoutChange={(updated) => handleChildLayoutChange(index, updated)}

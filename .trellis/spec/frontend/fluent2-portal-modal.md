@@ -78,6 +78,23 @@ export function MyModal({ open, onClose, ...rest }: Props) {
 }
 ```
 
+### Imperative prompt overlays
+
+`src/utils/prompt.ts` creates alert / confirm / prompt overlays imperatively
+instead of through React. These overlays must still follow the same viewport
+escape rule:
+
+- append the root overlay directly to `document.body`;
+- remove all document-level keyboard listeners during cleanup for every close
+  path(button, backdrop, Enter, Escape);
+- guard cleanup so it is idempotent;
+- keep a prompt stack so Enter / Escape only affects the topmost prompt;
+- restore focus to the previously focused element after cleanup when it still
+  exists in the document.
+
+This prevents replacing native MessageBox with app UI from introducing leaked
+keyboard handlers or multi-dialog key events.
+
 ### Keep-alive iframe (avoid re-login on each open)
 
 ```tsx

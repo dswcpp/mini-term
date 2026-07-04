@@ -257,6 +257,18 @@ fn build_codex_hook_entry(hook_path: &str, event: &str) -> Value {
     }])
 }
 
+/// 更新 Codex config.toml 的 hooks feature flag。
+fn apply_codex_hooks_feature(doc: &mut toml_edit::DocumentMut) {
+    if doc.get("features").is_none() {
+        doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+
+    if let Some(features) = doc["features"].as_table_mut() {
+        features.remove("codex_hooks");
+    }
+    doc["features"]["hooks"] = toml_edit::value(true);
+}
+
 /// 确保 Codex config.toml 中启用了 hooks feature flag
 fn ensure_codex_hooks_feature() -> Result<(), String> {
     let config_path = codex_config_path().ok_or_else(|| "无法获取 home 目录".to_string())?;
@@ -278,11 +290,7 @@ fn ensure_codex_hooks_feature() -> Result<(), String> {
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| format!("解析 config.toml 失败: {}", e))?;
 
-    // 确保 [features] 段落存在并设置 codex_hooks = true
-    if doc.get("features").is_none() {
-        doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    doc["features"]["codex_hooks"] = toml_edit::value(true);
+    apply_codex_hooks_feature(&mut doc);
 
     crate::fs::atomic_write(&config_path, doc.to_string().as_bytes())
         .map_err(|e| format!("写入 config.toml 失败: {}", e))?;
@@ -519,7 +527,7 @@ pub fn get_hook_config_snippet(_app: AppHandle) -> Result<Value, String> {
                 {
                     "file": "~/.codex/config.toml",
                     "note": "追加以下内容",
-                    "content": "[features]\ncodex_hooks = true"
+                    "content": "[features]\nhooks = true"
                 }
             ]
         }
@@ -536,4 +544,47 @@ pub fn get_hook_status(
         port: hook_state.get_port(),
         running: hook_state.is_server_running(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_hooks_feature_uses_current_key() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[features]
+js_repl = false
+memories = true
+codex_hooks = true
+"#
+        .parse()
+        .unwrap();
+
+        apply_codex_hooks_feature(&mut doc);
+
+        assert_eq!(doc["features"]["hooks"].as_bool(), Some(true));
+        assert_eq!(doc["features"]["js_repl"].as_bool(), Some(false));
+        assert_eq!(doc["features"]["memories"].as_bool(), Some(true));
+        assert!(doc["features"]
+            .as_table()
+            .unwrap()
+            .get("codex_hooks")
+            .is_none());
+        assert!(!doc.to_string().contains("codex_hooks"));
+    }
+
+    #[test]
+    fn codex_hooks_feature_creates_features_table_when_missing() {
+        let mut doc: toml_edit::DocumentMut = r#"
+model = "gpt-5.5"
+"#
+        .parse()
+        .unwrap();
+
+        apply_codex_hooks_feature(&mut doc);
+
+        assert_eq!(doc["features"]["hooks"].as_bool(), Some(true));
+        assert_eq!(doc["model"].as_str(), Some("gpt-5.5"));
+    }
 }

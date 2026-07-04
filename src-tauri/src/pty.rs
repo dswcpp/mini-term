@@ -1,3 +1,4 @@
+use encoding_rs::{CoderResult, Decoder, Encoding, BIG5, EUC_KR, GB18030, GBK, SHIFT_JIS, UTF_8, WINDOWS_1252};
 use mt_core::{parse_wsl_unc, scan_ssh_prompt, strip_ansi_codes, SshPromptScan};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -90,24 +91,125 @@ pub struct AiUserSubmitPayload {
     pub ts: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalEncoding {
+    Auto,
+    Utf8,
+    Gbk,
+    Gb18030,
+    Big5,
+    ShiftJis,
+    EucKr,
+    Windows1252,
+}
+
+impl TerminalEncoding {
+    fn from_label(label: Option<&str>) -> Self {
+        let Some(label) = label else {
+            return Self::Auto;
+        };
+        let normalized = label.trim().to_ascii_lowercase().replace('_', "-");
+        match normalized.as_str() {
+            "auto" => Self::Auto,
+            "utf-8" | "utf8" => Self::Utf8,
+            "gbk" | "gb2312" => Self::Gbk,
+            "gb18030" => Self::Gb18030,
+            "big5" => Self::Big5,
+            "shift-jis" | "shiftjis" | "sjis" | "cp932" => Self::ShiftJis,
+            "euc-kr" | "euckr" | "cp949" => Self::EucKr,
+            "windows-1252" | "cp1252" => Self::Windows1252,
+            _ => Self::Auto,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Utf8 => "utf-8",
+            Self::Gbk => "gbk",
+            Self::Gb18030 => "gb18030",
+            Self::Big5 => "big5",
+            Self::ShiftJis => "shift_jis",
+            Self::EucKr => "euc-kr",
+            Self::Windows1252 => "windows-1252",
+        }
+    }
+
+    fn encoding(self) -> &'static Encoding {
+        match self {
+            Self::Auto | Self::Utf8 => UTF_8,
+            Self::Gbk => GBK,
+            Self::Gb18030 => GB18030,
+            Self::Big5 => BIG5,
+            Self::ShiftJis => SHIFT_JIS,
+            Self::EucKr => EUC_KR,
+            Self::Windows1252 => WINDOWS_1252,
+        }
+    }
+
+    fn locale(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Utf8 => "C.UTF-8",
+            Self::Gbk => "zh_CN.GBK",
+            Self::Gb18030 => "zh_CN.GB18030",
+            Self::Big5 => "zh_TW.Big5",
+            Self::ShiftJis => "ja_JP.SJIS",
+            Self::EucKr => "ko_KR.EUC-KR",
+            Self::Windows1252 => "en_US.CP1252",
+        }
+    }
+
+    fn is_utf8_like(self) -> bool {
+        matches!(self, Self::Auto | Self::Utf8)
+    }
+
+    fn new_decoder(self) -> Decoder {
+        self.encoding().new_decoder()
+    }
+}
+
+fn decode_pty_bytes(decoder: &mut Decoder, bytes: &[u8], last: bool) -> String {
+    if bytes.is_empty() && !last {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let mut input = bytes;
+    loop {
+        let reserve_len = decoder
+            .max_utf8_buffer_length(input.len())
+            .unwrap_or_else(|| input.len().saturating_mul(4))
+            .max(4);
+        output.reserve(reserve_len);
+        let (result, read, _) = decoder.decode_to_string(input, &mut output, last);
+        input = &input[read..];
+        match result {
+            CoderResult::InputEmpty => break,
+            CoderResult::OutputFull => continue,
+        }
+    }
+    output
+}
+
+fn encode_pty_input(encoding: TerminalEncoding, data: &str) -> Vec<u8> {
+    let (encoded, _, _) = encoding.encoding().encode(data);
+    encoded.into_owned()
+}
+
 struct PtyInstance {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
+    encoding: Arc<Mutex<TerminalEncoding>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 enum EscapeState {
+    #[default]
     None,
     Escape,
     Csi(String),
     Ss3,
-}
-
-impl Default for EscapeState {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Clone, Default)]
@@ -378,7 +480,7 @@ impl PtyManager {
 
     pub fn has_recent_output(&self, pty_id: u32, within: Duration) -> bool {
         let map = self.last_output.lock().unwrap();
-        map.get(&pty_id).map_or(false, |t| t.elapsed() < within)
+        map.get(&pty_id).is_some_and(|t| t.elapsed() < within)
     }
 
     pub fn is_ai_session(&self, pty_id: u32) -> bool {
@@ -411,7 +513,7 @@ impl PtyManager {
             .lock()
             .ok()
             .and_then(|m| m.get(&pty_id).copied())
-            .map_or(false, |until| Instant::now() < until)
+            .is_some_and(|until| Instant::now() < until)
     }
 
     /// 若 data 是 xterm 焦点事件序列(CSI I / CSI O),打开焦点冷却窗口,
@@ -610,7 +712,9 @@ pub fn create_pty(
     args: Vec<String>,
     cwd: String,
     envs: Option<Vec<(String, String)>>,
+    encoding: Option<String>,
 ) -> Result<u32, String> {
+    let terminal_encoding = TerminalEncoding::from_label(encoding.as_deref());
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -653,14 +757,13 @@ pub fn create_pty(
     // enable colors and advanced cursor rendering.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    // Ensure UTF-8 encoding for proper CJK/emoji rendering.
-    // On Windows, Git for Windows (MSYS2) checks LANG to determine terminal encoding;
-    // without it, git falls back to the system ANSI code page (e.g. GBK on Chinese Windows),
-    // causing mojibake in commit messages. LESSCHARSET tells git's pager (less) to handle
-    // UTF-8 bytes instead of escaping them as <XX> hex sequences.
-    cmd.env("LANG", "C.UTF-8");
-    cmd.env("LC_CTYPE", "C.UTF-8");
-    cmd.env("LESSCHARSET", "utf-8");
+    // Keep locale hints aligned with the selected PTY encoding. Git for Windows
+    // and MSYS2 tools consult LANG/LC_CTYPE when choosing their output encoding.
+    cmd.env("LANG", terminal_encoding.locale());
+    cmd.env("LC_CTYPE", terminal_encoding.locale());
+    if terminal_encoding.is_utf8_like() {
+        cmd.env("LESSCHARSET", "utf-8");
+    }
 
     // 先获取 pty_id，以便注入环境变量供 hook 子进程继承
     let pty_id = {
@@ -727,6 +830,7 @@ pub fn create_pty(
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let master = pair.master;
+    let encoding_state = Arc::new(Mutex::new(terminal_encoding));
 
     // Channel + flush 定时器实现 16ms 批量缓冲
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -753,8 +857,11 @@ pub fn create_pty(
     let ai_sessions_flush = state.ai_sessions.clone();
     let last_enter_flush = state.last_enter.clone();
     let mgr_flush = (*state).clone();
+    let encoding_for_flush = Arc::clone(&encoding_state);
     thread::spawn(move || {
         let mut pending = Vec::new();
+        let mut active_encoding = terminal_encoding;
+        let mut decoder = active_encoding.new_decoder();
 
         loop {
             match rx.recv_timeout(Duration::from_millis(16)) {
@@ -766,8 +873,22 @@ pub fn create_pty(
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    if !pending.is_empty() {
-                        let data = String::from_utf8_lossy(&pending).into_owned();
+                    {
+                        if let Ok(encoding) = encoding_for_flush.lock() {
+                            if *encoding != active_encoding {
+                                active_encoding = *encoding;
+                                decoder = active_encoding.new_decoder();
+                            }
+                        }
+                    }
+                    let data = decode_pty_bytes(&mut decoder, &pending, true);
+                    pending.clear();
+                    if !data.is_empty() {
+                        crate::terminal_log::append_pty_output(
+                            &app_flush,
+                            pty_id_for_reader,
+                            data.as_str(),
+                        );
                         let _ = app_flush.emit(
                             "pty-output",
                             PtyOutputPayload {
@@ -803,42 +924,16 @@ pub fn create_pty(
             }
 
             if !pending.is_empty() {
-                // 找到最后一个完整 UTF-8 字符的边界，避免截断多字节字符
-                let valid_len = {
-                    let mut i = pending.len();
-                    // 从末尾向前扫描，找到可能不完整的 UTF-8 序列起始位置
-                    while i > 0 {
-                        i -= 1;
-                        let byte = pending[i];
-                        if byte < 0x80 {
-                            // ASCII 字符，本身就是完整的
-                            i = pending.len();
-                            break;
-                        } else if byte >= 0xC0 {
-                            // 多字节序列的起始字节，检查序列是否完整
-                            let expected_len = if byte >= 0xF0 {
-                                4
-                            } else if byte >= 0xE0 {
-                                3
-                            } else {
-                                2
-                            };
-                            let remaining = pending.len() - i;
-                            if remaining >= expected_len {
-                                // 序列完整
-                                i = pending.len();
-                            }
-                            // 否则 i 就是不完整序列的起始位置
-                            break;
-                        }
-                        // 0x80..0xBF 是延续字节，继续向前找起始字节
+                if let Ok(encoding) = encoding_for_flush.lock() {
+                    if *encoding != active_encoding {
+                        active_encoding = *encoding;
+                        decoder = active_encoding.new_decoder();
                     }
-                    i
-                };
+                }
+                let data = decode_pty_bytes(&mut decoder, &pending, false);
+                pending.clear();
 
-                if valid_len > 0 {
-                    let data = String::from_utf8_lossy(&pending[..valid_len]).into_owned();
-
+                if !data.is_empty() {
                     // SSH 密码自动填充:扫描输出,命中密码提示则回写已保存的密码
                     mgr_flush.process_ssh_autofill(pty_id_for_reader, &data);
 
@@ -861,6 +956,7 @@ pub fn create_pty(
                         }
                     }
 
+                    crate::terminal_log::append_pty_output(&app_flush, pty_id_for_reader, &data);
                     let _ = app_flush.emit(
                         "pty-output",
                         PtyOutputPayload {
@@ -879,15 +975,6 @@ pub fn create_pty(
                         }
                     }
                 }
-
-                // 保留不完整的 UTF-8 字节到下次刷新
-                if valid_len < pending.len() {
-                    let leftover = pending[valid_len..].to_vec();
-                    pending.clear();
-                    pending.extend(leftover);
-                } else {
-                    pending.clear();
-                }
             }
         }
     });
@@ -900,6 +987,7 @@ pub fn create_pty(
                 writer,
                 master,
                 child,
+                encoding: encoding_state,
             },
         );
     }
@@ -910,13 +998,11 @@ pub fn create_pty(
 /// Windows ConPTY 无法一次处理大量输入数据（粘贴长文本时只剩最后一行）。
 /// 将数据按行拆分，每行写入后加短暂延迟，给 ConPTY 时间消化。
 /// 短数据（普通键盘输入）直接写入不受影响。
-fn write_pty_chunked(writer: &mut dyn Write, data: &str) -> Result<(), String> {
+fn write_pty_chunked(writer: &mut dyn Write, bytes: &[u8]) -> Result<(), String> {
     const CHUNK_THRESHOLD: usize = 128;
     const INTER_LINE_DELAY: Duration = Duration::from_millis(1);
 
-    let bytes = data.as_bytes();
-
-    if !cfg!(windows) || bytes.len() <= CHUNK_THRESHOLD || !data.contains('\n') {
+    if !cfg!(windows) || bytes.len() <= CHUNK_THRESHOLD || !bytes.contains(&b'\n') {
         writer.write_all(bytes).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
         return Ok(());
@@ -942,6 +1028,20 @@ fn write_pty_chunked(writer: &mut dyn Write, data: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn set_pty_encoding(
+    state: tauri::State<'_, PtyManager>,
+    pty_id: u32,
+    encoding: String,
+) -> Result<String, String> {
+    let terminal_encoding = TerminalEncoding::from_label(Some(&encoding));
+    let instances = state.instances.lock().unwrap();
+    let instance = instances.get(&pty_id).ok_or("PTY not found")?;
+    let mut current = instance.encoding.lock().unwrap();
+    *current = terminal_encoding;
+    Ok(terminal_encoding.label().to_string())
+}
+
+#[tauri::command]
 pub fn write_pty(
     app: tauri::AppHandle,
     state: tauri::State<'_, PtyManager>,
@@ -955,7 +1055,9 @@ pub fn write_pty(
     {
         let mut instances = state.instances.lock().unwrap();
         let instance = instances.get_mut(&pty_id).ok_or("PTY not found")?;
-        write_pty_chunked(&mut *instance.writer, &data)?;
+        let encoding = *instance.encoding.lock().unwrap();
+        let bytes = encode_pty_input(encoding, &data);
+        write_pty_chunked(&mut *instance.writer, &bytes)?;
     }
     state.track_input_with_line_snapshot(pty_id, &data, line_snapshot.as_deref());
 
@@ -1061,6 +1163,30 @@ pub fn arm_ssh_autofill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_encoding_label_aliases_normalize() {
+        assert_eq!(TerminalEncoding::from_label(None), TerminalEncoding::Auto);
+        assert_eq!(TerminalEncoding::from_label(Some("UTF8")), TerminalEncoding::Utf8);
+        assert_eq!(TerminalEncoding::from_label(Some("gb2312")), TerminalEncoding::Gbk);
+        assert_eq!(TerminalEncoding::from_label(Some("cp932")), TerminalEncoding::ShiftJis);
+        assert_eq!(TerminalEncoding::from_label(Some("unknown")), TerminalEncoding::Auto);
+    }
+
+    #[test]
+    fn gbk_output_decoder_keeps_split_multibyte_sequence() {
+        let mut decoder = TerminalEncoding::Gbk.new_decoder();
+        assert_eq!(decode_pty_bytes(&mut decoder, &[0xD6], false), "");
+        assert_eq!(decode_pty_bytes(&mut decoder, &[0xD0], false), "中");
+    }
+
+    #[test]
+    fn gbk_input_encoder_writes_legacy_bytes() {
+        assert_eq!(
+            encode_pty_input(TerminalEncoding::Gbk, "中文"),
+            vec![0xD6, 0xD0, 0xCE, 0xC4]
+        );
+    }
 
     #[test]
     fn detect_claude_command() {

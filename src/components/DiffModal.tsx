@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { invoke } from '@tauri-apps/api/core';
 import { Allotment } from 'allotment';
 import { useAppStore } from '../store';
 import { useT } from '../i18n';
-import type { GitFileStatus, GitDiffResult, DiffLine } from '../types';
+import { getVcsDiff } from '../utils/vcsApi';
+import type { GitFileStatus, GitDiffResult, DiffLine, VcsKind } from '../types';
 
 interface DiffModalProps {
   open: boolean;
@@ -12,6 +12,7 @@ interface DiffModalProps {
   projectPath: string;
   status: GitFileStatus;
   staged?: boolean;
+  vcsKind?: VcsKind;
 }
 
 type ViewMode = 'side-by-side' | 'inline';
@@ -152,7 +153,7 @@ export function SideBySideView({ hunks, fontSize = 13 }: { hunks: GitDiffResult[
 
 // ─── DiffModal ───
 
-export function DiffModal({ open, onClose, projectPath, status, staged }: DiffModalProps) {
+export function DiffModal({ open, onClose, projectPath, status, staged, vcsKind }: DiffModalProps) {
   const t = useT();
   const [viewMode, setViewMode] = useState<ViewMode>('side-by-side');
   const [diffResult, setDiffResult] = useState<GitDiffResult | null>(null);
@@ -166,15 +167,16 @@ export function DiffModal({ open, onClose, projectPath, status, staged }: DiffMo
     setError('');
     setDiffResult(null);
 
-    invoke<GitDiffResult>('get_git_diff', {
+    getVcsDiff({
       projectPath,
       filePath: status.path,
       staged: staged ?? false,
+      vcsKind: vcsKind ?? 'git',
     })
       .then(setDiffResult)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [open, projectPath, status.path]);
+  }, [open, projectPath, status.path, staged, vcsKind]);
 
   useEffect(() => {
     if (!open) return;

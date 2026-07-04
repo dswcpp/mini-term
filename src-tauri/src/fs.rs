@@ -496,7 +496,10 @@ mod tests {
 
         // 目标已存在 → 原子覆盖(Windows 下也应成功,验证 rename 替换语义)
         atomic_write(&target, b"second-longer-content").unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), "second-longer-content");
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "second-longer-content"
+        );
 
         // 不应残留任何 .tmp 临时文件
         let leftover: Vec<_> = fs::read_dir(&dir)

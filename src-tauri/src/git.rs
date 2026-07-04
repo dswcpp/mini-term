@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 // Data structures
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum GitStatus {
     Modified,
@@ -218,6 +218,22 @@ pub struct GitRepoInfo {
     pub current_branch: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum VcsKind {
+    Git,
+    Svn,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct VcsRepoInfo {
+    pub name: String,
+    pub path: String,
+    pub vcs_kind: VcsKind,
+    pub current_branch: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GitCommitInfo {
@@ -286,7 +302,7 @@ fn discover_repo_limited(start: &Path) -> Option<Repository> {
             _ => break,
         }
     }
-    Repository::open_ext(start, RepositoryOpenFlags::empty(), &[&ceiling]).ok()
+    Repository::open_ext(start, RepositoryOpenFlags::empty(), [&ceiling]).ok()
 }
 
 struct RepoPathEntry {
@@ -295,9 +311,11 @@ struct RepoPathEntry {
     is_worktree: bool,
 }
 
-static REPO_PATH_CACHE: std::sync::LazyLock<
-    Mutex<HashMap<PathBuf, (Instant, Vec<RepoPathEntry>)>>,
-> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+type RepoPathCacheValue = (Instant, Vec<RepoPathEntry>);
+type RepoPathCache = Mutex<HashMap<PathBuf, RepoPathCacheValue>>;
+
+static REPO_PATH_CACHE: std::sync::LazyLock<RepoPathCache> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const REPO_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -1099,10 +1117,7 @@ pub fn get_git_diff(
         }
     };
 
-    let old_content = match get_head_content(&repo, &rel_str)? {
-        None => String::new(),
-        Some(s) => s,
-    };
+    let old_content = get_head_content(&repo, &rel_str)?.unwrap_or_default();
 
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines_vec: Vec<&str> = new_content.lines().collect();
@@ -1134,6 +1149,411 @@ fn hide_console_window(_cmd: &mut std::process::Command) {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         _cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn repo_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repository")
+        .to_string()
+}
+
+fn run_svn_command(repo_path: &Path, args: &[&str]) -> Result<String, String> {
+    if !repo_path.is_dir() {
+        return Err(format!("不是有效目录:{}", repo_path.display()));
+    }
+
+    let mut cmd = std::process::Command::new("svn");
+    cmd.args(args)
+        .current_dir(repo_path)
+        .stdin(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    let output = cmd.output().map_err(|e| format!("启动 svn 失败:{}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            stderr
+        })
+    }
+}
+
+fn svn_working_copy_root(path: &Path) -> Option<PathBuf> {
+    let mut cmd = std::process::Command::new("svn");
+    cmd.args(["info", "--show-item", "wc-root"])
+        .arg(path)
+        .stdin(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
+fn svn_status_from_char(ch: char) -> Option<GitStatus> {
+    match ch {
+        'M' | '~' => Some(GitStatus::Modified),
+        'A' => Some(GitStatus::Added),
+        'D' | '!' => Some(GitStatus::Deleted),
+        'R' => Some(GitStatus::Renamed),
+        '?' => Some(GitStatus::Untracked),
+        'C' => Some(GitStatus::Conflicted),
+        _ => None,
+    }
+}
+
+fn parse_svn_status_line(line: &str) -> Option<(String, GitStatus)> {
+    let mut chars = line.chars();
+    let text_status = chars.next()?;
+    let prop_status = chars.next().unwrap_or(' ');
+    let status_char = if text_status == ' ' && prop_status == 'M' {
+        'M'
+    } else {
+        text_status
+    };
+    let status = svn_status_from_char(status_char)?;
+    let path = line.get(7..).or_else(|| line.get(1..))?.trim();
+    if path.is_empty() || path.starts_with("moved ") {
+        return None;
+    }
+    Some((path.replace('\\', "/"), status))
+}
+
+fn parse_svn_status(output: &str) -> Vec<(String, GitStatus)> {
+    output.lines().filter_map(parse_svn_status_line).collect()
+}
+
+fn parse_svn_raw_status_line(line: &str) -> Option<(String, char)> {
+    let status_char = line.chars().next()?;
+    if !matches!(status_char, '?' | '!') {
+        return None;
+    }
+    let path = line.get(7..).or_else(|| line.get(1..))?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some((path.replace('\\', "/"), status_char))
+}
+
+fn parse_svn_raw_status(output: &str) -> Vec<(String, char)> {
+    output
+        .lines()
+        .filter_map(parse_svn_raw_status_line)
+        .collect()
+}
+
+fn collect_svn_status(
+    repo_root: &Path,
+    display_base: Option<&Path>,
+) -> Result<Vec<GitFileStatus>, String> {
+    let output = run_svn_command(repo_root, &["status"])?;
+    let mut result = Vec::new();
+
+    for (path, status) in parse_svn_status(&output) {
+        let display_path = if let Some(base) = display_base {
+            let abs = repo_root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            match diff_paths(&abs, base) {
+                Some(p) => {
+                    let normalized = p.to_string_lossy().replace('\\', "/");
+                    if normalized.starts_with("../") || normalized == ".." {
+                        continue;
+                    }
+                    normalized
+                }
+                None => continue,
+            }
+        } else {
+            path
+        };
+
+        result.push(GitFileStatus {
+            path: display_path,
+            old_path: None,
+            status_label: status_label(&status).to_string(),
+            status,
+        });
+    }
+
+    Ok(result)
+}
+
+fn get_svn_changes_status(repo_path: &str) -> Result<Vec<ChangeFileStatus>, String> {
+    let repo_root = Path::new(repo_path);
+    let files = collect_svn_status(repo_root, None)?;
+    Ok(files
+        .into_iter()
+        .map(|file| ChangeFileStatus {
+            path: file.path,
+            old_path: None,
+            staged_status: None,
+            unstaged_status: Some(file.status),
+            status_label: file.status_label,
+        })
+        .collect())
+}
+
+fn svn_stage_file(repo: &Path, file: &str) -> Result<(), String> {
+    let abs = repo.join(file.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if abs.exists() {
+        run_svn_command(repo, &["add", "--parents", file])?;
+    } else {
+        run_svn_command(repo, &["delete", "--force", file])?;
+    }
+    Ok(())
+}
+
+fn svn_stage_all(repo_path: &str, include_untracked: bool) -> Result<(), String> {
+    let repo = Path::new(repo_path);
+    let output = run_svn_command(repo, &["status"])?;
+    for (path, status) in parse_svn_raw_status(&output) {
+        match status {
+            '?' if include_untracked => {
+                run_svn_command(repo, &["add", "--parents", &path])?;
+            }
+            '!' => {
+                run_svn_command(repo, &["delete", "--force", &path])?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn read_text_file_for_diff(path: &Path) -> Result<(String, bool, bool), String> {
+    if !path.exists() {
+        return Ok((String::new(), false, false));
+    }
+
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    if bytes.len() > 1_048_576 {
+        return Ok((String::new(), false, true));
+    }
+    match std::str::from_utf8(&bytes) {
+        Ok(s) => Ok((s.to_string(), false, false)),
+        Err(_) => Ok((String::new(), true, false)),
+    }
+}
+
+fn get_svn_base_content(repo_root: &Path, rel_path: &str) -> Result<(String, bool), String> {
+    let mut cmd = std::process::Command::new("svn");
+    cmd.args(["cat", rel_path])
+        .current_dir(repo_root)
+        .stdin(std::process::Stdio::null());
+    hide_console_window(&mut cmd);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("启动 svn cat 失败:{}", e))?;
+
+    if !output.status.success() {
+        return Ok((String::new(), false));
+    }
+    if output.stdout.len() > 1_048_576 {
+        return Ok((String::new(), false));
+    }
+    match std::str::from_utf8(&output.stdout) {
+        Ok(s) => Ok((s.to_string(), false)),
+        Err(_) => Ok((String::new(), true)),
+    }
+}
+
+fn get_svn_diff(project_path: String, file_path: String) -> Result<GitDiffResult, String> {
+    let project = Path::new(&project_path);
+    let repo_root = svn_working_copy_root(project)
+        .ok_or_else(|| format!("不是 SVN 工作副本:{}", project.display()))?;
+    let abs_file = project.join(&file_path);
+    let rel_path = diff_paths(&abs_file, &repo_root)
+        .ok_or("file is outside SVN working copy")?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let (old_content, old_binary) = get_svn_base_content(&repo_root, &rel_path)?;
+    if old_binary {
+        return Ok(GitDiffResult {
+            old_content: String::new(),
+            new_content: String::new(),
+            hunks: Vec::new(),
+            is_binary: true,
+            too_large: false,
+        });
+    }
+
+    let (new_content, new_binary, too_large) = read_text_file_for_diff(&abs_file)?;
+    if new_binary || too_large {
+        return Ok(GitDiffResult {
+            old_content: String::new(),
+            new_content: String::new(),
+            hunks: Vec::new(),
+            is_binary: new_binary,
+            too_large,
+        });
+    }
+
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+    let ol = old_lines.len() as u64;
+    let nl = new_lines.len() as u64;
+    let hunks = if ol * nl > 10_000_000 {
+        full_replace_diff(&old_content, &new_content)
+    } else {
+        build_hunks(&old_lines, &new_lines)
+    };
+
+    Ok(GitDiffResult {
+        old_content,
+        new_content,
+        hunks,
+        is_binary: false,
+        too_large: false,
+    })
+}
+
+#[tauri::command]
+pub fn discover_vcs_repos(project_path: String) -> Result<Vec<VcsRepoInfo>, String> {
+    let path = Path::new(&project_path);
+    let mut repos: Vec<VcsRepoInfo> = discover_git_repos(project_path.clone())?
+        .into_iter()
+        .map(|repo| VcsRepoInfo {
+            name: repo.name,
+            path: repo.path,
+            vcs_kind: VcsKind::Git,
+            current_branch: repo.current_branch,
+        })
+        .collect();
+
+    if let Some(root) = svn_working_copy_root(path) {
+        let root_str = root.to_string_lossy().to_string();
+        if !repos.iter().any(|repo| repo.path == root_str) {
+            repos.push(VcsRepoInfo {
+                name: repo_display_name(&root),
+                path: root_str,
+                vcs_kind: VcsKind::Svn,
+                current_branch: None,
+            });
+        }
+    }
+
+    Ok(repos)
+}
+
+#[tauri::command]
+pub fn get_vcs_status(project_path: String) -> Result<Vec<GitFileStatus>, String> {
+    let path = Path::new(&project_path);
+    let mut all = get_git_status(project_path.clone())?;
+    if let Some(root) = svn_working_copy_root(path) {
+        if let Ok(mut files) = collect_svn_status(&root, Some(path)) {
+            all.append(&mut files);
+        }
+    }
+    Ok(all)
+}
+
+#[tauri::command]
+pub fn get_vcs_changes_status(
+    repo_path: String,
+    vcs_kind: Option<VcsKind>,
+) -> Result<Vec<ChangeFileStatus>, String> {
+    match vcs_kind.unwrap_or(VcsKind::Git) {
+        VcsKind::Git => get_changes_status(repo_path),
+        VcsKind::Svn => get_svn_changes_status(&repo_path),
+    }
+}
+
+#[tauri::command]
+pub fn get_vcs_diff(
+    project_path: String,
+    file_path: String,
+    staged: Option<bool>,
+    vcs_kind: Option<VcsKind>,
+) -> Result<GitDiffResult, String> {
+    match vcs_kind.unwrap_or(VcsKind::Git) {
+        VcsKind::Git => get_git_diff(project_path, file_path, staged),
+        VcsKind::Svn => get_svn_diff(project_path, file_path),
+    }
+}
+
+#[tauri::command]
+pub fn vcs_commit(repo_path: String, vcs_kind: VcsKind, message: String) -> Result<String, String> {
+    match vcs_kind {
+        VcsKind::Git => git_commit(repo_path, message),
+        VcsKind::Svn => run_svn_command(Path::new(&repo_path), &["commit", "-m", &message]),
+    }
+}
+
+#[tauri::command]
+pub fn vcs_stage(repo_path: String, vcs_kind: VcsKind, files: Vec<String>) -> Result<(), String> {
+    match vcs_kind {
+        VcsKind::Git => git_stage(repo_path, files),
+        VcsKind::Svn => {
+            let repo = Path::new(&repo_path);
+            for file in files {
+                svn_stage_file(repo, &file)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+pub fn vcs_stage_all(
+    repo_path: String,
+    vcs_kind: VcsKind,
+    include_untracked: Option<bool>,
+) -> Result<(), String> {
+    match vcs_kind {
+        VcsKind::Git => git_stage_all(repo_path),
+        VcsKind::Svn => svn_stage_all(&repo_path, include_untracked.unwrap_or(true)),
+    }
+}
+
+#[tauri::command(async)]
+pub fn vcs_update(repo_path: String, vcs_kind: VcsKind) -> Result<String, String> {
+    match vcs_kind {
+        VcsKind::Git => git_pull(repo_path),
+        VcsKind::Svn => run_svn_command(Path::new(&repo_path), &["update"]),
+    }
+}
+
+#[tauri::command]
+pub fn vcs_discard_file(
+    repo_path: String,
+    vcs_kind: VcsKind,
+    files: Vec<String>,
+) -> Result<(), String> {
+    match vcs_kind {
+        VcsKind::Git => git_discard_file(repo_path, files),
+        VcsKind::Svn => {
+            let repo = Path::new(&repo_path);
+            let changes = get_svn_changes_status(&repo_path)?;
+            let status_by_path: HashMap<String, GitStatus> = changes
+                .into_iter()
+                .filter_map(|change| change.unstaged_status.map(|status| (change.path, status)))
+                .collect();
+
+            for file in files {
+                if matches!(status_by_path.get(&file), Some(GitStatus::Untracked)) {
+                    let abs = repo.join(file.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    if abs.is_dir() {
+                        std::fs::remove_dir_all(&abs).map_err(|e| e.to_string())?;
+                    } else if abs.exists() {
+                        std::fs::remove_file(&abs).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    run_svn_command(repo, &["revert", "--depth", "infinity", &file])?;
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1352,4 +1772,69 @@ pub fn git_discard_file(repo_path: String, files: Vec<String>) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_svn_status_maps_common_states() {
+        let output = "\
+M       src/main.ts
+ M      props-only.txt
+A       src/new.ts
+D       src/old.ts
+?       scratch.txt
+C       conflicted.txt
+!       missing.txt
+";
+
+        let parsed = parse_svn_status(output);
+
+        assert_eq!(parsed.len(), 7);
+        assert_eq!(parsed[0], ("src/main.ts".to_string(), GitStatus::Modified));
+        assert_eq!(
+            parsed[1],
+            ("props-only.txt".to_string(), GitStatus::Modified)
+        );
+        assert_eq!(parsed[2], ("src/new.ts".to_string(), GitStatus::Added));
+        assert_eq!(parsed[3], ("src/old.ts".to_string(), GitStatus::Deleted));
+        assert_eq!(parsed[4], ("scratch.txt".to_string(), GitStatus::Untracked));
+        assert_eq!(
+            parsed[5],
+            ("conflicted.txt".to_string(), GitStatus::Conflicted)
+        );
+        assert_eq!(parsed[6], ("missing.txt".to_string(), GitStatus::Deleted));
+    }
+
+    #[test]
+    fn parse_svn_status_ignores_metadata_lines() {
+        let output = "\
+        > moved from old-name.txt
+X       external-lib
+I       ignored.tmp
+";
+
+        assert!(parse_svn_status(output).is_empty());
+    }
+
+    #[test]
+    fn parse_svn_raw_status_extracts_add_and_delete_candidates() {
+        let output = "\
+?       scratch.txt
+!       missing.txt
+M       modified.txt
+";
+
+        let parsed = parse_svn_raw_status(output);
+
+        assert_eq!(
+            parsed,
+            vec![
+                ("scratch.txt".to_string(), '?'),
+                ("missing.txt".to_string(), '!'),
+            ]
+        );
+    }
 }

@@ -12,8 +12,11 @@ import { SessionList } from './SessionList';
 import { SshAssocModal } from './SshAssocModal';
 import { ProjectEnvVarsModal } from './ProjectEnvVarsModal';
 import { showContextMenu } from '../utils/contextMenu';
-import { showPrompt } from '../utils/prompt';
+import { showAlert, showPrompt } from '../utils/prompt';
 import { disposeTerminal } from '../utils/terminalCache';
+import { saveConfig as persistAppConfig } from '../utils/configApi';
+import { formatError, saveConfigPatch } from '../utils/appConfigPersistence';
+import { killPtyQuietly } from '../utils/terminalApi';
 import { initProjectDrag, isProjectDragging, getProjectDragPayload, onProjectDragEnd } from '../utils/projectDragState';
 import { isWslPath } from '../utils/wslPath';
 import { useT } from '../i18n';
@@ -33,7 +36,7 @@ import type { PaneStatus, SplitNode, ProjectConfig, ProjectGroup, WslDistro } fr
 // 保存配置的快捷方法
 function saveConfig() {
   const config = useAppStore.getState().config;
-  invoke('save_config', { config });
+  void persistAppConfig(config);
 }
 
 // 模块级缓存:WSL 发行版列表只 invoke 一次。
@@ -92,16 +95,15 @@ export function ProjectList() {
 
   // 写入项目的 WSL 会话来源发行版(undefined = 不启用),并持久化
   const setWslSessionsDistro = useCallback((projectId: string, distro: string | undefined) => {
-    const cfg = useAppStore.getState().config;
-    const newConfig = {
+    void saveConfigPatch((cfg) => ({
       ...cfg,
       projects: cfg.projects.map((p) =>
         p.id === projectId ? { ...p, wslSessionsDistro: distro } : p,
       ),
-    };
-    useAppStore.getState().setConfig(newConfig);
-    invoke('save_config', { config: newConfig });
-  }, []);
+    })).catch((error) => {
+      void showAlert(t('projectList.saveFailed'), formatError(error));
+    });
+  }, [t]);
 
   // === 系统文件拖放（从资源管理器拖入文件夹添加项目） ===
   useEffect(() => {
@@ -218,7 +220,7 @@ export function ProjectList() {
         for (const pid of collectPtyIds(tab.splitLayout)) ptyIds.add(pid);
       }
       for (const ptyId of ptyIds) {
-        invoke('kill_pty', { ptyId }).catch(() => {});
+        killPtyQuietly(ptyId);
         disposeTerminal(ptyId);
       }
     }

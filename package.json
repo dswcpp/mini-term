@@ -1,15 +1,15 @@
 {
   "name": "tauri-app",
   "private": true,
-  "version": "0.6.5",
+  "version": "0.6.6",
   "type": "module",
   "scripts": {
     "dev": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vite/bin/vite.js",
     "build": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/typescript/bin/tsc; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; node ./node_modules/vite/bin/vite.js build",
+    "test": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/typescript/bin/tsc -p tsconfig.test.json; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Get-ChildItem tests/*.test.cjs | ForEach-Object { node $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }",
     "preview": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/vite/bin/vite.js preview",
-    "tauri": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./node_modules/@tauri-apps/cli/tauri.js",
-    "build-sidecars": "node scripts/stage-sidecars.mjs",
-    "pretauri": "npm run build-sidecars"
+    "tauri": "$cwd = (Get-Location).Path -replace '^Microsoft\\.PowerShell\\.Core\\\\FileSystem::\\\\\\\\\\\\?\\\\', ''; Set-Location $cwd; node ./scripts/tauri.mjs",
+    "build-sidecars": "node scripts/stage-sidecars.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

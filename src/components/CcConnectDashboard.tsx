@@ -1,8 +1,8 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { useT } from '../i18n';
+import { readCcConnectToken } from '../utils/ccConnectApi';
 
 interface Props {
   /** modal 是否打开;false 时 iframe 仍保留(visibility:hidden) */
@@ -43,9 +43,7 @@ export function CcConnectDashboard({ open, onClose, deepLink }: Props) {
       return null;
     }
     try {
-      const token = await invoke<string>('cc_connect_read_token', {
-        configPath: ccConfig?.configPath || undefined,
-      });
+      const token = await readCcConnectToken(ccConfig?.configPath);
       const port = status.port;
       const params = new URLSearchParams({ token });
       if (deepLink) params.set('redirect', deepLink);

@@ -8,6 +8,7 @@ const config = {
     { name: 'cmd', command: 'cmd' },
   ],
   defaultShell: 'cmd',
+  terminalEncoding: 'utf-8',
 };
 
 let id = 0;
@@ -20,7 +21,7 @@ const savedLayout = {
       customTitle: 'first',
       splitLayout: {
         type: 'leaf',
-        panes: [{ shellName: 'nushell' }],
+        panes: [{ shellName: 'nushell', customTitle: 'Build', terminalEncoding: 'gbk' }],
       },
     },
     {
@@ -45,6 +46,8 @@ assert.equal(restored.activeTabId, restored.tabs[1].id);
 
 const firstPane = restored.tabs[0].splitLayout.panes[0];
 assert.equal(firstPane.shellName, 'nushell');
+assert.equal(firstPane.customTitle, 'Build');
+assert.equal(firstPane.terminalEncoding, 'gbk');
 assert.equal(Object.hasOwn(firstPane, 'ptyId'), false);
 assert.equal(firstPane.status, 'idle');
 

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { showAlert } from '../utils/prompt';
+import { saveConfig } from '../utils/configApi';
 import { connectionSummary } from './SshModal';
 import { useT, t as tStatic } from '../i18n';
 import type { ProjectConfig, SshConnection } from '../types';
@@ -95,7 +96,7 @@ export function SshAssocModal({ project, onClose }: Props) {
         ),
       };
       useAppStore.getState().setConfig(newConfig);
-      await invoke('save_config', { config: newConfig });
+      await saveConfig(newConfig);
       onClose();
 
       const scopeDesc =

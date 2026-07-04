@@ -1,4 +1,5 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
+@source ".";
 @import "allotment/dist/style.css";
 @import "./blueprint.css";
 @import "./fluent2.css";
@@ -128,6 +129,102 @@ body.project-dragging {
   user-select: none !important;
 }
 
+/* ===== Terminal depth surface ===== */
+.terminal-depth-shell {
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025), transparent 18%),
+    linear-gradient(90deg, rgba(255,255,255,0.018), transparent 28%, transparent 72%, rgba(0,0,0,0.16)),
+    var(--bg-terminal);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.045),
+    inset 0 -20px 34px rgba(0,0,0,0.22),
+    inset 14px 0 24px rgba(0,0,0,0.16),
+    0 12px 28px rgba(0,0,0,0.18);
+}
+
+.terminal-depth-shell::before,
+.terminal-depth-shell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.terminal-depth-shell::before {
+  z-index: 0;
+  border: 1px solid var(--border-subtle);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.018),
+    inset 0 0 44px rgba(0,0,0,0.28);
+}
+
+.terminal-depth-shell::after {
+  z-index: 2;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.04), transparent 9%),
+    linear-gradient(90deg, rgba(200,128,90,0.07), transparent 10%, transparent 90%, rgba(0,0,0,0.18));
+  mix-blend-mode: screen;
+  opacity: 0.55;
+}
+
+.terminal-depth-content {
+  z-index: 1;
+}
+
+:root[data-theme="light"] .terminal-depth-shell {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.72), transparent 20%),
+    linear-gradient(90deg, rgba(255,255,255,0.48), transparent 30%, transparent 72%, rgba(0,0,0,0.06)),
+    var(--bg-terminal);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.8),
+    inset 0 -20px 34px rgba(0,0,0,0.045),
+    inset 14px 0 24px rgba(0,0,0,0.035),
+    0 12px 28px rgba(0,0,0,0.08);
+}
+
+:root[data-theme="light"] .terminal-depth-shell::before {
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.5),
+    inset 0 0 40px rgba(0,0,0,0.055);
+}
+
+:root[data-theme="light"] .terminal-depth-shell::after {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.52), transparent 10%),
+    linear-gradient(90deg, rgba(176,104,48,0.065), transparent 12%, transparent 88%, rgba(0,0,0,0.05));
+  mix-blend-mode: multiply;
+  opacity: 0.45;
+}
+
+:root[data-theme="light"] .terminal-depth-shell[data-terminal-tone="dark"] {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.025), transparent 18%),
+    linear-gradient(90deg, rgba(255,255,255,0.018), transparent 28%, transparent 72%, rgba(0,0,0,0.16)),
+    var(--bg-terminal);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.045),
+    inset 0 -20px 34px rgba(0,0,0,0.22),
+    inset 14px 0 24px rgba(0,0,0,0.16),
+    0 12px 28px rgba(0,0,0,0.18);
+}
+
+:root[data-theme="light"] .terminal-depth-shell[data-terminal-tone="dark"]::before {
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.018),
+    inset 0 0 44px rgba(0,0,0,0.28);
+}
+
+:root[data-theme="light"] .terminal-depth-shell[data-terminal-tone="dark"]::after {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.04), transparent 9%),
+    linear-gradient(90deg, rgba(200,128,90,0.07), transparent 10%, transparent 90%, rgba(0,0,0,0.18));
+  mix-blend-mode: screen;
+  opacity: 0.55;
+}
+
 /* ===== Subtle noise texture overlay ===== */
 #root::before {
   content: '';
@@ -173,6 +270,116 @@ body.project-dragging {
 .split-view-view .sash-container .sash:hover,
 .split-view-view .sash-container .sash.active {
   background: var(--accent-muted) !important;
+}
+
+/* ===== Terminal pane controls ===== */
+.terminal-pane-frame {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.terminal-pane-frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border: 1px solid transparent;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.terminal-pane-frame.is-focused::after {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-muted);
+}
+
+.pane-action-strip {
+  min-height: 22px;
+}
+
+.pane-action-button {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+.pane-action-button:hover:not(:disabled) {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.pane-action-button--danger:hover:not(:disabled) {
+  background: var(--color-error-muted);
+  color: var(--color-error);
+}
+
+.pane-action-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.layout-preview,
+.ctx-menu-preview {
+  width: 16px;
+  height: 13px;
+  display: grid;
+  gap: 2px;
+  padding: 1px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.layout-preview span,
+.ctx-menu-preview span {
+  min-width: 0;
+  min-height: 0;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.72;
+}
+
+.layout-preview--two-columns,
+.ctx-menu-preview--two-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.layout-preview--two-rows,
+.ctx-menu-preview--two-rows {
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
+.layout-preview--quad,
+.ctx-menu-preview--quad {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+
+.pane-action-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: paneActionSpin 0.7s linear infinite;
+}
+
+@keyframes paneActionSpin {
+  to { transform: rotate(360deg); }
 }
 
 /* ===== Animations ===== */
@@ -323,6 +530,11 @@ body.project-dragging {
 }
 
 .ctx-menu-item {
+  min-width: 190px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 6px 12px;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -331,9 +543,53 @@ body.project-dragging {
   transition: all 0.1s ease;
 }
 
+.ctx-menu-item-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ctx-menu-icon {
+  width: 16px;
+  flex: 0 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+}
+
+.ctx-menu-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ctx-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-menu-description {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
 .ctx-menu-item:hover {
   background: var(--accent-muted);
   color: var(--text-primary);
+}
+
+.ctx-menu-item:hover .ctx-menu-description {
+  color: var(--text-secondary);
 }
 
 .ctx-menu-item.danger {
@@ -371,10 +627,7 @@ body.project-dragging {
 }
 
 .ctx-menu-item.has-submenu {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  padding-right: 10px;
 }
 
 .ctx-menu-item.has-submenu::after {
@@ -391,12 +644,16 @@ body.project-dragging {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 16px;
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(4px);
 }
 
 .prompt-dialog {
   width: 360px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
   background: var(--bg-surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -440,6 +697,12 @@ body.project-dragging {
 
 .prompt-input:focus {
   border-color: var(--accent);
+}
+
+.prompt-input:focus-visible,
+.prompt-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .prompt-buttons {

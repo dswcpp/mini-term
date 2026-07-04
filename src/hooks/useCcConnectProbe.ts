@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { t } from '../i18n';
-import type { CcConnectConfig, CcConnectStatus } from '../types';
+import { probeCcConnect } from '../utils/ccConnectApi';
+import type { CcConnectConfig } from '../types';
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -11,7 +11,7 @@ const POLL_INTERVAL_MS = 5000;
  *
  * - 每 5s 调一次 cc_connect_probe,结果写入 store.ccConnectStatus
  * - 窗口失焦(document.hidden = true)时暂停轮询省 CPU
- * - 仅当用户在设置里配置过 ccConnect 时才启用(传 undefined 时 noop)
+ * - 传入 undefined 时 noop;未保存 ccConnect 配置时可传默认配置走默认路径探活
  * - cc_connect_probe 即使后端 HTTP 失败也会返回带 diagnostic 的 status 对象,
  *   只有 invoke 整体失败才会进 catch 分支
  */
@@ -30,9 +30,7 @@ export function useCcConnectProbe(ccConfig: CcConnectConfig | undefined): void {
     let timer: ReturnType<typeof setInterval> | null = null;
 
     const probeOnce = () => {
-      invoke<CcConnectStatus>('cc_connect_probe', {
-        configPath: configPath || undefined,
-      })
+      probeCcConnect(configPath)
         .then((status) => {
           if (!disposed) setCcConnectStatus(status);
         })

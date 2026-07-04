@@ -1,26 +1,19 @@
-import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { t } from '../i18n';
 import { showConfirm, showAlert } from './prompt';
+import { normalizeCcConnectConfig, saveCcConnectConfigPatch } from './ccConnectConfig';
+import {
+  importCcConnectProject,
+  importCcConnectProjects,
+  listCcConnectProjects,
+  probeCcConnect,
+  unlinkCcConnectProject,
+} from './ccConnectApi';
 import type {
   AppConfig,
-  BatchImportResult,
-  CcConnectConfig,
-  CcConnectStatus,
-  CcProject,
   ImportProjectRequest,
-  ImportProjectResult,
   ProjectConfig,
-  UnlinkProjectResult,
 } from '../types';
-
-const DEFAULT_CC_CONNECT_CONFIG: CcConnectConfig = {
-  exePath: '',
-  configPath: '',
-  autoStart: false,
-  extraArgs: [],
-  projectLinks: {},
-};
 
 /**
  * 导入会附带的占位平台说明(后端 make_project_table 硬编码注入一个占位 telegram 平台)。
@@ -45,9 +38,7 @@ async function resolveUniqueName(
   project: ProjectConfig,
   configPath: string | undefined,
 ): Promise<string> {
-  const list = await invoke<CcProject[]>('cc_connect_list_projects', {
-    configPath: configPath || undefined,
-  });
+  const list = await listCcConnectProjects(configPath);
   const existingNames = new Set(list.map((p) => p.name));
   if (!existingNames.has(project.name)) return project.name;
   return `${project.name}_${shortHashSuffix(project.id)}`;
@@ -56,9 +47,7 @@ async function resolveUniqueName(
 /** 刷新一次 cc-connect status(写入 store)。import/移除 后调用加快 UI 响应,无需等 5s 轮询。 */
 async function refreshStatus(configPath: string | undefined): Promise<void> {
   try {
-    const status = await invoke<CcConnectStatus>('cc_connect_probe', {
-      configPath: configPath || undefined,
-    });
+    const status = await probeCcConnect(configPath);
     useAppStore.getState().setCcConnectStatus(status);
   } catch {
     // 静默(下一次 5s 轮询会恢复)
@@ -69,13 +58,9 @@ async function writeProjectLinks(
   patch: (current: Record<string, string>) => Record<string, string>,
 ): Promise<AppConfig> {
   const cfg = useAppStore.getState().config;
-  const currentCc = cfg.ccConnect ?? DEFAULT_CC_CONNECT_CONFIG;
+  const currentCc = normalizeCcConnectConfig(cfg.ccConnect);
   const newLinks = patch(currentCc.projectLinks ?? {});
-  const newCc: CcConnectConfig = { ...currentCc, projectLinks: newLinks };
-  const newConfig: AppConfig = { ...cfg, ccConnect: newCc };
-  useAppStore.getState().setConfig(newConfig);
-  await invoke('save_config', { config: newConfig });
-  return newConfig;
+  return saveCcConnectConfigPatch({ projectLinks: newLinks });
 }
 
 /**
@@ -88,7 +73,7 @@ async function writeProjectLinks(
  */
 export async function importProjectToCcConnect(project: ProjectConfig): Promise<boolean> {
   const cfg = useAppStore.getState().config;
-  const cc = cfg.ccConnect ?? DEFAULT_CC_CONNECT_CONFIG;
+  const cc = normalizeCcConnectConfig(cfg.ccConnect);
 
   const ok = await showConfirm(
     t('ccConnectImport.importTitle'),
@@ -107,10 +92,7 @@ export async function importProjectToCcConnect(project: ProjectConfig): Promise<
       workDir: project.path,
       agentType: 'claudecode',
     };
-    const result = await invoke<ImportProjectResult>('cc_connect_import_project', {
-      req,
-      configPath: cc.configPath || undefined,
-    });
+    const result = await importCcConnectProject(req, cc.configPath);
     if (result.tomlWritten) {
       await writeProjectLinks((links) => ({ ...links, [project.id]: result.name }));
       await refreshStatus(cc.configPath);
@@ -148,7 +130,7 @@ export async function importProjectToCcConnect(project: ProjectConfig): Promise<
 export async function importProjectsToCcConnect(projects: ProjectConfig[]): Promise<boolean> {
   if (projects.length === 0) return false;
   const cfg = useAppStore.getState().config;
-  const cc = cfg.ccConnect ?? DEFAULT_CC_CONNECT_CONFIG;
+  const cc = normalizeCcConnectConfig(cfg.ccConnect);
 
   const MAX_LIST = 15;
   const names = projects.map((p) => `· ${p.name}`);
@@ -168,9 +150,7 @@ export async function importProjectsToCcConnect(projects: ProjectConfig[]): Prom
 
   try {
     // 拉现有列表,本批次内部 + 与现有项目统一去重
-    const list = await invoke<CcProject[]>('cc_connect_list_projects', {
-      configPath: cc.configPath || undefined,
-    });
+    const list = await listCcConnectProjects(cc.configPath);
     const used = new Set(list.map((p) => p.name));
     const reqs: ImportProjectRequest[] = [];
     const idToName: Record<string, string> = {};
@@ -184,10 +164,7 @@ export async function importProjectsToCcConnect(projects: ProjectConfig[]): Prom
       reqs.push({ name, workDir: p.path, agentType: 'claudecode' });
     }
 
-    const result = await invoke<BatchImportResult>('cc_connect_import_projects', {
-      reqs,
-      configPath: cc.configPath || undefined,
-    });
+    const result = await importCcConnectProjects(reqs, cc.configPath);
 
     if (result.tomlWritten) {
       // 一次写入所有 projectLinks(避免多次 save_config)
@@ -230,7 +207,7 @@ export async function importProjectsToCcConnect(projects: ProjectConfig[]): Prom
  */
 export async function unlinkProjectFromCcConnect(project: ProjectConfig): Promise<boolean> {
   const cfg = useAppStore.getState().config;
-  const cc = cfg.ccConnect ?? DEFAULT_CC_CONNECT_CONFIG;
+  const cc = normalizeCcConnectConfig(cfg.ccConnect);
   const linkedName = cc.projectLinks?.[project.id];
   if (!linkedName) {
     await showAlert(
@@ -248,10 +225,7 @@ export async function unlinkProjectFromCcConnect(project: ProjectConfig): Promis
 
   let restartWarning: string | null = null;
   try {
-    const result = await invoke<UnlinkProjectResult>('cc_connect_unlink_project', {
-      name: linkedName,
-      configPath: cc.configPath || undefined,
-    });
+    const result = await unlinkCcConnectProject(linkedName, cc.configPath);
     // 后端契约:deletedOk=true 即返 Ok,restartOk 失败时仅 toast 提示但仍清本地 link。
     if (!result.restartOk) {
       restartWarning = result.restartError ?? t('ccConnectImport.unknownError');

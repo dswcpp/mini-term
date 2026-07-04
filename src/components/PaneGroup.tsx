@@ -1,20 +1,27 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, genId } from '../store';
 import { TerminalInstance } from './TerminalInstance';
 import { StatusDot } from './StatusDot';
 import { MarkerList } from './MarkerList';
-import { showContextMenu } from '../utils/contextMenu';
-import { showConfirm, showPrompt } from '../utils/prompt';
+import { showContextMenu, type MenuEntry } from '../utils/contextMenu';
+import { showAlert, showConfirm, showPrompt } from '../utils/prompt';
 import { disposeTerminal } from '../utils/terminalCache';
 import { getProjectEnvs } from '../utils/projectEnv';
+import { formatError } from '../utils/appConfigPersistence';
+import { createTerminalPty, killPty, killPtyQuietly, resolveTerminalShell, setPtyEncoding } from '../utils/terminalApi';
+import {
+  TERMINAL_LAYOUT_PRESETS,
+  type TerminalLayoutPreset,
+} from '../utils/terminalLayoutPresets';
+import { normalizeTerminalEncoding, TERMINAL_ENCODING_OPTIONS } from '../utils/terminalEncoding';
 import { MOD_LABEL } from '../utils/platform';
 import { useT } from '../i18n';
-import type { SplitNode, PaneState, ShellConfig, AiMarker } from '../types';
+import type { SplitNode, PaneState, ShellConfig, AiMarker, TerminalEncoding } from '../types';
 
 const EMPTY_MARKERS: AiMarker[] = [];
 const hydratingPaneIds = new Set<string>();
+type LayoutActionId = TerminalLayoutPreset | 'split-horizontal' | 'split-vertical';
 
 function findPaneById(node: SplitNode, paneId: string): PaneState | null {
   if (node.type === 'leaf') {
@@ -31,17 +38,29 @@ interface Props {
   projectId: string;
   node: SplitNode & { type: 'leaf' };
   projectPath: string;
-  onSplit: (paneId: string, direction: 'horizontal' | 'vertical') => void;
+  onSplit: (paneId: string, direction: 'horizontal' | 'vertical') => void | Promise<void>;
+  onLayoutPreset: (paneId: string, preset: TerminalLayoutPreset) => void | Promise<void>;
   onClosePane: () => void;
   onUpdateNode: (updated: SplitNode) => void;
 }
 
-export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, onUpdateNode }: Props) {
+function LayoutPreviewIcon({ preset }: { preset: TerminalLayoutPreset }) {
+  const cellCount = preset === 'quad' ? 4 : 2;
+  return (
+    <span className={`layout-preview layout-preview--${preset}`} aria-hidden="true">
+      {Array.from({ length: cellCount }, (_, index) => <span key={index} />)}
+    </span>
+  );
+}
+
+export function PaneGroup({ projectId, node, projectPath, onSplit, onLayoutPreset, onClosePane, onUpdateNode }: Props) {
   const t = useT();
   const config = useAppStore((s) => s.config);
   const setPanePty = useAppStore((s) => s.setPanePty);
   const updatePaneStatusByPaneId = useAppStore((s) => s.updatePaneStatusByPaneId);
   const [headerHover, setHeaderHover] = useState(false);
+  const [hasPaneFocus, setHasPaneFocus] = useState(false);
+  const [pendingLayoutAction, setPendingLayoutAction] = useState<LayoutActionId | null>(null);
 
   const activePane = node.panes.find((p) => p.id === node.activePaneId) ?? node.panes[0];
 
@@ -49,20 +68,18 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
     if (!activePane || activePane.ptyId !== undefined || activePane.status === 'error') return;
     if (hydratingPaneIds.has(activePane.id)) return;
 
-    const shell = config.availableShells.find((s) => s.name === activePane.shellName)
-      ?? config.availableShells.find((s) => s.name === config.defaultShell)
-      ?? config.availableShells[0];
+    const shell = resolveTerminalShell(config, undefined, activePane.shellName);
     if (!shell) {
       updatePaneStatusByPaneId(projectId, activePane.id, 'error');
       return;
     }
 
     hydratingPaneIds.add(activePane.id);
-    invoke<number>('create_pty', {
-      shell: shell.command,
-      args: shell.args ?? [],
+    createTerminalPty({
+      shell,
       cwd: projectPath,
       envs: getProjectEnvs(projectId),
+      encoding: normalizeTerminalEncoding(activePane.terminalEncoding ?? config.terminalEncoding),
     })
       .then((ptyId) => {
         const ps = useAppStore.getState().projectStates.get(projectId);
@@ -72,7 +89,7 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
         if (pane && pane.ptyId === undefined) {
           setPanePty(projectId, activePane.id, ptyId);
         } else {
-          invoke('kill_pty', { ptyId }).catch(() => {});
+          killPtyQuietly(ptyId);
         }
       })
       .catch(() => updatePaneStatusByPaneId(projectId, activePane.id, 'error'))
@@ -84,8 +101,10 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
     activePane?.ptyId,
     activePane?.shellName,
     activePane?.status,
+    activePane?.terminalEncoding,
     config.availableShells,
     config.defaultShell,
+    config.terminalEncoding,
     projectId,
     projectPath,
     setPanePty,
@@ -93,21 +112,30 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
   ]);
 
   const handleNewTab = useCallback(async (selectedShell?: ShellConfig) => {
-    const shell = selectedShell
-      ?? config.availableShells.find((s) => s.name === config.defaultShell)
-      ?? config.availableShells[0];
-    if (!shell) return;
+    const shell = resolveTerminalShell(config, selectedShell);
+    if (!shell) {
+      await showAlert(t('paneGroup.startFailed'), t('paneGroup.noShellConfigured'));
+      return;
+    }
 
-    const ptyId = await invoke<number>('create_pty', {
-      shell: shell.command,
-      args: shell.args ?? [],
-      cwd: projectPath,
-      envs: getProjectEnvs(projectId),
-    });
+    let ptyId: number;
+    const encoding = normalizeTerminalEncoding(config.terminalEncoding);
+    try {
+      ptyId = await createTerminalPty({
+        shell,
+        cwd: projectPath,
+        envs: getProjectEnvs(projectId),
+        encoding,
+      });
+    } catch (error) {
+      await showAlert(t('paneGroup.startFailed'), formatError(error));
+      return;
+    }
 
     const newPane: PaneState = {
       id: genId(),
       shellName: shell.name,
+      terminalEncoding: encoding,
       status: 'idle',
       ptyId,
     };
@@ -117,7 +145,7 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
       panes: [...node.panes, newPane],
       activePaneId: newPane.id,
     });
-  }, [config, projectPath, node, onUpdateNode]);
+  }, [config, projectId, projectPath, node, onUpdateNode, t]);
 
   const handleNewTabClick = useCallback((e: React.MouseEvent) => {
     if (config.availableShells.length <= 1) {
@@ -149,7 +177,11 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
     if (!confirmed) return;
 
     if (pane.ptyId !== undefined) {
-      await invoke('kill_pty', { ptyId: pane.ptyId });
+      try {
+        await killPty(pane.ptyId);
+      } catch {
+        // The PTY may already have exited; UI cleanup should still proceed.
+      }
       disposeTerminal(pane.ptyId);
       useAppStore.getState().clearMarkersForPty(pane.ptyId);
     }
@@ -171,18 +203,48 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
     });
   }, [node, onClosePane, onUpdateNode]);
 
-  const handleRenameTab = useCallback(async (paneId: string) => {
-    const pane = node.panes.find((p) => p.id === paneId);
-    if (!pane) return;
-    const newTitle = await showPrompt(t('paneGroup.renameTerminal'), pane.customTitle || pane.shellName);
-    if (newTitle === null) return;
+  const updatePaneNickname = useCallback((paneId: string, customTitle?: string) => {
     onUpdateNode({
       ...node,
       panes: node.panes.map((p) =>
-        p.id === paneId ? { ...p, customTitle: newTitle.trim() || undefined } : p
+        p.id === paneId ? { ...p, customTitle } : p
       ),
     });
   }, [node, onUpdateNode]);
+
+  const handleRenamePane = useCallback(async (paneId: string) => {
+    const pane = node.panes.find((p) => p.id === paneId);
+    if (!pane) return;
+    const newTitle = await showPrompt(
+      t('paneGroup.renameTerminal'),
+      t('paneGroup.renamePlaceholder'),
+      pane.customTitle || pane.shellName,
+    );
+    if (newTitle === null) return;
+    updatePaneNickname(paneId, newTitle.trim() || undefined);
+  }, [node.panes, t, updatePaneNickname]);
+
+  const handleClearNickname = useCallback((paneId: string) => {
+    updatePaneNickname(paneId, undefined);
+  }, [updatePaneNickname]);
+
+  const updatePaneEncoding = useCallback(async (pane: PaneState, encoding: TerminalEncoding) => {
+    const normalized = normalizeTerminalEncoding(encoding);
+    if (pane.ptyId !== undefined) {
+      try {
+        await setPtyEncoding(pane.ptyId, normalized);
+      } catch (error) {
+        await showAlert(t('paneGroup.encodingUpdateFailed'), formatError(error));
+        return;
+      }
+    }
+    onUpdateNode({
+      ...node,
+      panes: node.panes.map((p) =>
+        p.id === pane.id ? { ...p, terminalEncoding: normalized } : p
+      ),
+    });
+  }, [node, onUpdateNode, t]);
 
   const handleSetActive = useCallback((paneId: string) => {
     if (paneId !== node.activePaneId) {
@@ -204,7 +266,11 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
 
     for (const pane of node.panes) {
       if (pane.ptyId !== undefined) {
-        await invoke('kill_pty', { ptyId: pane.ptyId });
+        try {
+          await killPty(pane.ptyId);
+        } catch {
+          // Continue closing the remaining panes even if one PTY is already gone.
+        }
         disposeTerminal(pane.ptyId);
         useAppStore.getState().clearMarkersForPty(pane.ptyId);
       }
@@ -248,10 +314,94 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
     updatePaneStatusByPaneId(projectId, activePane.id, 'idle');
   }, [activePane, projectId, updatePaneStatusByPaneId]);
 
+  const runLayoutAction = useCallback((actionId: LayoutActionId, action: () => void | Promise<void>) => {
+    if (pendingLayoutAction) return;
+    setPendingLayoutAction(actionId);
+    void Promise.resolve()
+      .then(action)
+      .catch(() => {})
+      .finally(() => {
+        setPendingLayoutAction((current) => (current === actionId ? null : current));
+      });
+  }, [pendingLayoutAction]);
+
+  const runSplitAction = useCallback((pane: PaneState, direction: 'horizontal' | 'vertical') => {
+    runLayoutAction(`split-${direction}`, () => onSplit(pane.id, direction));
+  }, [onSplit, runLayoutAction]);
+
+  const runPresetAction = useCallback((pane: PaneState, preset: TerminalLayoutPreset) => {
+    runLayoutAction(preset, () => onLayoutPreset(pane.id, preset));
+  }, [onLayoutPreset, runLayoutAction]);
+
+  const buildEncodingMenu = useCallback((pane: PaneState): MenuEntry[] => {
+    const currentEncoding = normalizeTerminalEncoding(pane.terminalEncoding ?? config.terminalEncoding);
+    return [
+      { header: t('paneGroup.encoding') },
+      ...TERMINAL_ENCODING_OPTIONS.map((option) => ({
+        icon: option.value === currentEncoding ? '✓' : '',
+        label: option.label,
+        onClick: () => {
+          void updatePaneEncoding(pane, option.value);
+        },
+      })),
+    ];
+  }, [config.terminalEncoding, t, updatePaneEncoding]);
+
+  const buildPaneActionsMenu = useCallback((pane: PaneState): MenuEntry[] => [
+      {
+        label: t('paneGroup.encoding'),
+        description: TERMINAL_ENCODING_OPTIONS.find(
+          (option) => option.value === normalizeTerminalEncoding(pane.terminalEncoding ?? config.terminalEncoding),
+        )?.label,
+        submenu: buildEncodingMenu(pane),
+      },
+      { separator: true },
+      { header: t('paneGroup.splitActions') },
+      {
+        icon: '┃',
+        label: t('paneGroup.splitRight'),
+        disabled: pendingLayoutAction !== null,
+        onClick: () => runSplitAction(pane, 'horizontal'),
+      },
+      {
+        icon: '━',
+        label: t('paneGroup.splitDown'),
+        disabled: pendingLayoutAction !== null,
+        onClick: () => runSplitAction(pane, 'vertical'),
+      },
+      { separator: true },
+      { header: t('paneGroup.gridPresets') },
+      ...TERMINAL_LAYOUT_PRESETS.map((definition) => ({
+        label: t(definition.labelKey),
+        preview: definition.preview,
+        description: t('paneGroup.gridPresetDescription', { count: definition.requiredPaneCount }),
+        disabled: pendingLayoutAction !== null,
+        onClick: () => runPresetAction(pane, definition.preset),
+      })),
+    ], [buildEncodingMenu, config.terminalEncoding, pendingLayoutAction, runPresetAction, runSplitAction, t]);
+
+  const showPaneActionsMenu = useCallback((x: number, y: number, pane: PaneState) => {
+    showContextMenu(x, y, buildPaneActionsMenu(pane));
+  }, [buildPaneActionsMenu]);
+
+  const handleLayoutMenu = useCallback((e: React.MouseEvent) => {
+    if (!activePane) return;
+    showPaneActionsMenu(e.clientX, e.clientY, activePane);
+  }, [activePane, showPaneActionsMenu]);
+
   if (!activePane) return null;
 
   return (
-    <div className="w-full h-full flex flex-col" data-pty-id={activePane.ptyId}>
+    <div
+      className={`terminal-pane-frame w-full h-full flex flex-col ${hasPaneFocus ? 'is-focused' : ''}`}
+      data-pty-id={activePane.ptyId}
+      data-layout-pending={pendingLayoutAction ? 'true' : 'false'}
+      onFocusCapture={() => setHasPaneFocus(true)}
+      onBlurCapture={(e) => {
+        const nextTarget = e.relatedTarget instanceof Node ? e.relatedTarget : null;
+        if (!nextTarget || !e.currentTarget.contains(nextTarget)) setHasPaneFocus(false);
+      }}
+    >
       {/* Tab bar */}
       <div
         data-panel-header
@@ -271,11 +421,21 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
                   : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]'
               }`}
               onClick={() => handleSetActive(pane.id)}
+              onDoubleClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void handleRenamePane(pane.id);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 showContextMenu(e.clientX, e.clientY, [
-                  { label: t('paneGroup.rename'), onClick: () => handleRenameTab(pane.id) },
+                  { label: t('paneGroup.rename'), onClick: () => handleRenamePane(pane.id) },
+                  ...(pane.customTitle
+                    ? [{ label: t('paneGroup.clearNickname'), onClick: () => handleClearNickname(pane.id) }]
+                    : []),
+                  { separator: true },
+                  ...buildPaneActionsMenu(pane),
                 ]);
               }}
             >
@@ -322,40 +482,64 @@ export function PaneGroup({ projectId, node, projectPath, onSplit, onClosePane, 
             </button>
           )}
           <div
-            className="flex items-center gap-0.5 transition-opacity duration-150"
-            style={{ opacity: headerHover ? 1 : 0 }}
+            className="pane-action-strip flex items-center gap-0.5 transition-opacity duration-150"
+            style={{ opacity: headerHover ? 1 : 0.55 }}
           >
-            <span
-              className="text-[var(--text-muted)] hover:text-[var(--accent)] cursor-pointer transition-colors px-0.5"
-              title="Split right"
-              onClick={() => onSplit(activePane.id, 'horizontal')}
+            <button
+              type="button"
+              className="pane-action-button"
+              title={t('paneGroup.layoutPresets')}
+              onClick={handleLayoutMenu}
+              disabled={pendingLayoutAction !== null}
+            >
+              {pendingLayoutAction ? <span className="pane-action-spinner" aria-hidden="true" /> : <LayoutPreviewIcon preset="quad" />}
+            </button>
+            <button
+              type="button"
+              className="pane-action-button"
+              title={t('paneGroup.splitRight')}
+              onClick={() => runSplitAction(activePane, 'horizontal')}
+              disabled={pendingLayoutAction !== null}
             >
               ┃
-            </span>
-            <span
-              className="text-[var(--text-muted)] hover:text-[var(--accent)] cursor-pointer transition-colors px-0.5"
-              title="Split down"
-              onClick={() => onSplit(activePane.id, 'vertical')}
+            </button>
+            <button
+              type="button"
+              className="pane-action-button"
+              title={t('paneGroup.splitDown')}
+              onClick={() => runSplitAction(activePane, 'vertical')}
+              disabled={pendingLayoutAction !== null}
             >
               ━
-            </span>
-            <span
-              className="text-[var(--text-muted)] hover:text-[var(--color-error)] cursor-pointer transition-colors pl-0.5"
-              title="Close pane"
+            </button>
+            <button
+              type="button"
+              className="pane-action-button pane-action-button--danger"
+              title={t('paneGroup.closePane')}
               onClick={handleClosePaneGroup}
+              disabled={pendingLayoutAction !== null}
             >
               ✕
-            </span>
+            </button>
           </div>
         </div>
       </div>
 
       {/* Active terminal */}
-      <div className="flex-1 overflow-hidden relative">
+      <div
+        className="flex-1 overflow-hidden relative"
+        onContextMenu={(e) => {
+          if (activePane.ptyId !== undefined) return;
+          e.preventDefault();
+          e.stopPropagation();
+          showPaneActionsMenu(e.clientX, e.clientY, activePane);
+        }}
+      >
         <div className="absolute inset-0">
           {activePane.ptyId !== undefined ? (
             <TerminalInstance
               ptyId={activePane.ptyId}
+              contextMenuExtraItems={buildPaneActionsMenu(activePane)}
             />
           ) : activePane.status === 'error' ? (
             <div className="h-full flex flex-col items-center justify-center gap-2 text-[var(--text-muted)] text-sm">

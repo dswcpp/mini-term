@@ -211,6 +211,7 @@ export function getTerminalTheme(terminalFollowTheme: boolean): typeof DARK_TERM
 }
 
 const cache = new Map<number, CachedEntry>();
+const lastResizeByPty = new Map<number, string>();
 
 const aiPtyIds = new Set<number>();
 
@@ -227,12 +228,15 @@ let globalPtyListenerInit = false;
 function ensureGlobalPtyOutputListener() {
   if (globalPtyListenerInit) return;
   globalPtyListenerInit = true;
-  listen<PtyOutputPayload>('pty-output', (event) => {
+  void listen<PtyOutputPayload>('pty-output', (event) => {
     const entry = cache.get(event.payload.ptyId);
-    if (entry) {
+    if (!entry) return;
+    try {
       entry.term.write(event.payload.data);
+    } catch (error) {
+      logTerminalRuntimeError('pty-output write failed', error);
     }
-  });
+  }).catch((error) => logTerminalRuntimeError('pty-output listener failed', error));
 }
 const enqueuePtyWrite = createPtyWriteQueue((ptyId, data, lineSnapshot) => {
   const payload = lineSnapshot === undefined
@@ -240,6 +244,48 @@ const enqueuePtyWrite = createPtyWriteQueue((ptyId, data, lineSnapshot) => {
     : { ptyId, data, lineSnapshot };
   return invoke('write_pty', payload);
 });
+
+function logTerminalRuntimeError(context: string, error: unknown): void {
+  // eslint-disable-next-line no-console
+  console.warn(`[terminal] ${context}`, error);
+}
+
+function refreshTerminalViewport(term: Terminal): void {
+  if (term.rows <= 0) return;
+  try {
+    term.refresh(0, term.rows - 1);
+  } catch (error) {
+    logTerminalRuntimeError('refresh failed', error);
+  }
+}
+
+async function sendPtyInput(
+  ptyId: number,
+  data: string,
+  lineSnapshot?: string,
+): Promise<void> {
+  try {
+    await enqueuePtyWrite(ptyId, data, lineSnapshot);
+  } catch (error) {
+    logTerminalRuntimeError('write_pty failed', error);
+  }
+}
+
+export function resizePtySafely(ptyId: number, cols: number, rows: number): void {
+  if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) return;
+  const resizeKey = `${cols}x${rows}`;
+  if (lastResizeByPty.get(ptyId) === resizeKey) return;
+  lastResizeByPty.set(ptyId, resizeKey);
+  void invoke('resize_pty', { ptyId, cols, rows })
+    .catch((error) => {
+      if (lastResizeByPty.get(ptyId) === resizeKey) {
+        lastResizeByPty.delete(ptyId);
+      }
+      if (cache.has(ptyId)) {
+        logTerminalRuntimeError('resize_pty failed', error);
+      }
+    });
+}
 
 const markerInstancesByPty = new Map<number, Map<number, IMarker>>();
 
@@ -360,18 +406,22 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
   // 事件也通过 triggerDataEvent 发出 CSI I/CSI O。这不是用户按键,如果也跟着
   // scrollToBottom,用户往上翻历史时一切焦点(点别处或切回来)就会被打回底部。
   const onDataDisp = term.onData((data) => {
-    const lineSnapshot = isStandaloneEnter(data)
-      ? getCurrentLineSnapshot(term)
-      : undefined;
-    if (data !== FOCUS_IN_SEQ && data !== FOCUS_OUT_SEQ) {
-      term.scrollToBottom();
+    try {
+      const lineSnapshot = isStandaloneEnter(data)
+        ? getCurrentLineSnapshot(term)
+        : undefined;
+      if (data !== FOCUS_IN_SEQ && data !== FOCUS_OUT_SEQ) {
+        term.scrollToBottom();
+      }
+      void sendPtyInput(ptyId, data, lineSnapshot);
+    } catch (error) {
+      logTerminalRuntimeError('input handling failed', error);
     }
-    void enqueuePtyWrite(ptyId, data, lineSnapshot);
   });
 
   // 终端 resize → 同步到 PTY
   const onResizeDisp = term.onResize(({ cols, rows }) => {
-    invoke('resize_pty', { ptyId, cols, rows });
+    resizePtySafely(ptyId, cols, rows);
   });
 
   // PTY 输出由全局单一监听器分发（避免 N 个终端各自监听导致的 O(N) 事件广播开销）
@@ -466,7 +516,7 @@ function refreshAllTerminalsForAtlasChange(reason: 'add' | 'remove'): void {
     });
   }
   for (const e of cache.values()) {
-    if (e.term.rows > 0) e.term.refresh(0, e.term.rows - 1);
+    refreshTerminalViewport(e.term);
   }
 }
 
@@ -497,19 +547,24 @@ export function clearAtlasForPty(ptyId: number): void {
 function loadWebgl(entry: CachedEntry): void {
   if (entry.webglLoaded) return;
   entry.webglLoaded = true;
+  let webgl: WebglAddon | undefined;
   try {
-    const webgl = new WebglAddon();
+    webgl = new WebglAddon();
     webgl.onContextLoss(() => {
-      webgl.dispose();
+      try { webgl?.dispose(); } catch { /* context already lost */ }
       entry.webglAddon = undefined;
-      entry.term.refresh(0, entry.term.rows - 1);
+      entry.webglLoaded = false;
+      refreshTerminalViewport(entry.term);
     });
     webgl.onAddTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('add'));
     webgl.onRemoveTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('remove'));
     entry.term.loadAddon(webgl);
     entry.webglAddon = webgl;
-  } catch {
+  } catch (error) {
+    try { webgl?.dispose(); } catch { /* load failed */ }
+    entry.webglAddon = undefined;
     entry.webglLoaded = false;
+    logTerminalRuntimeError('WebglAddon load failed', error);
   }
 }
 
@@ -535,7 +590,7 @@ export function reloadLigaturesForPty(ptyId: number): void {
   disposeLigatures(entry);
   loadLigaturesIfEnabled(entry);
   loadWebgl(entry);
-  entry.term.refresh(0, entry.term.rows - 1);
+  refreshTerminalViewport(entry.term);
 }
 
 /** 获取已缓存的终端（不创建新的） */
@@ -547,11 +602,16 @@ export function getCachedTerminal(ptyId: number): CachedTerminal | undefined {
 export function disposeTerminal(ptyId: number): void {
   const entry = cache.get(ptyId);
   if (!entry) return;
-  entry.wrapper.remove();
-  entry.cleanup();
   cache.delete(ptyId);
   aiPtyIds.delete(ptyId);
+  lastResizeByPty.delete(ptyId);
   clearMarkerInstances(ptyId);
+  entry.wrapper.remove();
+  try {
+    entry.cleanup();
+  } catch (error) {
+    logTerminalRuntimeError('dispose failed', error);
+  }
 }
 
 export function registerAiMarker(ptyId: number): IMarker | null {
@@ -606,24 +666,29 @@ export function updateAllTerminalThemes(terminalFollowTheme: boolean): void {
 }
 
 export function writePtyInput(ptyId: number, data: string): Promise<void> {
-  return enqueuePtyWrite(ptyId, data);
+  return sendPtyInput(ptyId, data);
 }
 
 /** 复制当前终端选中文本到系统剪贴板。无选中则不操作。返回是否有内容被复制。 */
 export async function copyTerminalSelection(ptyId: number): Promise<boolean> {
-  const cached = cache.get(ptyId);
-  if (!cached) return false;
-  const sel = cached.term.getSelection();
-  if (!sel) return false;
-  // 优先走 Webview 原生 Clipboard API(直接由 WebView 写系统剪贴板,
-  // 不经过 Tauri IPC 的 JSON 序列化),避免长文本经 IPC 被截断。
-  // 不可用时回退到 Tauri 插件 writeText。
   try {
-    await navigator.clipboard.writeText(sel);
-  } catch {
-    await writeText(sel);
+    const cached = cache.get(ptyId);
+    if (!cached) return false;
+    const sel = cached.term.getSelection();
+    if (!sel) return false;
+    // 优先走 Webview 原生 Clipboard API(直接由 WebView 写系统剪贴板,
+    // 不经过 Tauri IPC 的 JSON 序列化),避免长文本经 IPC 被截断。
+    // 不可用时回退到 Tauri 插件 writeText。
+    try {
+      await navigator.clipboard.writeText(sel);
+    } catch {
+      await writeText(sel);
+    }
+    return true;
+  } catch (error) {
+    logTerminalRuntimeError('copy failed', error);
+    return false;
   }
-  return true;
 }
 
 /** 检测剪贴板是否含图片（Tauri 插件 + 浏览器 Clipboard API 双重检测） */
@@ -655,40 +720,44 @@ function isLongText(text: string, lineThreshold: number, charThreshold: number):
  * - 否则直接粘贴文本
  */
 export async function pasteToTerminal(ptyId: number): Promise<void> {
-  if (await clipboardHasImage()) {
-    // 优先：Win32 API 读取图片保存为 temp PNG，粘贴文件路径
-    // 兼容 PinPix 等 arboard 无法读取的非标准剪贴板格式
-    try {
-      const path: string = await invoke('read_clipboard_image');
-      await enqueuePtyWrite(ptyId, `"${path}"`);
+  try {
+    if (await clipboardHasImage()) {
+      // 优先：Win32 API 读取图片保存为 temp PNG，粘贴文件路径
+      // 兼容 PinPix 等 arboard 无法读取的非标准剪贴板格式
+      try {
+        const path: string = await invoke('read_clipboard_image');
+        await sendPtyInput(ptyId, `"${path}"`);
+        return;
+      } catch { /* Win32 也读不到，回退 Alt+V */ }
+      // 回退：发送 Alt+V 转义序列让 AI 工具自行处理
+      await sendPtyInput(ptyId, '\x1bv');
       return;
-    } catch { /* Win32 也读不到，回退 Alt+V */ }
-    // 回退：发送 Alt+V 转义序列让 AI 工具自行处理
-    await enqueuePtyWrite(ptyId, '\x1bv');
-    return;
-  }
-  const text = await readText().catch(() => null);
-  if (!text) return;
+    }
+    const text = await readText().catch(() => null);
+    if (!text) return;
 
-  const cfg = useAppStore.getState().config;
-  const enabled = cfg.longPasteToFile ?? true;
-  const lineThreshold = cfg.longPasteLineThreshold ?? 10;
-  const charThreshold = cfg.longPasteCharThreshold ?? 2000;
+    const cfg = useAppStore.getState().config;
+    const enabled = cfg.longPasteToFile ?? true;
+    const lineThreshold = cfg.longPasteLineThreshold ?? 10;
+    const charThreshold = cfg.longPasteCharThreshold ?? 2000;
 
-  // 长文本：转存临时文件，粘贴路径；失败则回退到直接粘贴
-  if (enabled && isLongText(text, lineThreshold, charThreshold)) {
-    try {
-      const path: string = await invoke('save_clipboard_text', { text });
-      await enqueuePtyWrite(ptyId, `"${path}"`);
+    // 长文本：转存临时文件，粘贴路径；失败则回退到直接粘贴
+    if (enabled && isLongText(text, lineThreshold, charThreshold)) {
+      try {
+        const path: string = await invoke('save_clipboard_text', { text });
+        await sendPtyInput(ptyId, `"${path}"`);
+        return;
+      } catch { /* 写文件失败，回退到直接粘贴 */ }
+    }
+
+    const cached = getCachedTerminal(ptyId);
+    if (cached) {
+      cached.term.paste(text);
       return;
-    } catch { /* 写文件失败，回退到直接粘贴 */ }
-  }
+    }
 
-  const cached = getCachedTerminal(ptyId);
-  if (cached) {
-    cached.term.paste(text);
-    return;
+    await sendPtyInput(ptyId, text);
+  } catch (error) {
+    logTerminalRuntimeError('paste failed', error);
   }
-
-  await enqueuePtyWrite(ptyId, text);
 }

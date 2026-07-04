@@ -16,7 +16,7 @@
 - 后续任何 mini-term 写第三方工具配置文件且涉及表数组的场景
 
 不适用:单一 `[features]` / `[mcp_servers.<name>]` 这类 nested table,直接走
-`hook_registry.rs` / `ssh_mcp_registry.rs` 既有模式(`doc["features"]["codex_hooks"] = value(true)`)。
+`hook_registry.rs` / `ssh_mcp_registry.rs` 既有模式(`doc["features"]["hooks"] = value(true)`)。
 
 ## Signatures
 

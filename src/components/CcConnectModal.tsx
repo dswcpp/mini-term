@@ -7,24 +7,24 @@ import {
   importProjectsToCcConnect,
   unlinkProjectFromCcConnect,
 } from '../utils/ccConnectImport';
-import type { CcConnectConfig, CcConnectStatus, ProjectConfig } from '../types';
+import type { CcConnectConfig, ProjectConfig } from '../types';
 import { useT } from '../i18n';
+import {
+  normalizeCcConnectConfig,
+  saveCcConnectConfigPatch,
+} from '../utils/ccConnectConfig';
+import {
+  probeCcConnect,
+  resolveCcConnectConfigPath,
+  restartCcConnect,
+  startCcConnect,
+  stopCcConnect,
+} from '../utils/ccConnectApi';
 
 interface Props {
   open: boolean;
   onClose: () => void;
 }
-
-/** 未填写可执行文件时回退到 PATH 中的 cc-connect。 */
-const DEFAULT_EXE = 'cc-connect';
-
-const DEFAULT_CC_CONNECT_CONFIG: CcConnectConfig = {
-  exePath: '',
-  configPath: '',
-  autoStart: false,
-  extraArgs: [],
-  projectLinks: {},
-};
 
 /**
  * 「连接」弹窗 —— cc-connect 进程管理 + Web Dashboard 入口。
@@ -33,7 +33,7 @@ const DEFAULT_CC_CONNECT_CONFIG: CcConnectConfig = {
  * - 进程生命周期(启动 / 停止 / 重启 / 测试连接 / 编辑配置文件)
  * - 嵌入式 Web Dashboard 入口(running 时可点)
  * - 未填写可执行文件 / 配置路径时回退默认值
- *   (PATH 中的 cc-connect + ~/.cc-connect/config.toml),零配置即可使用
+ *   (内置 cc-connect 或 PATH + ~/.cc-connect/config.toml),零配置即可使用
  *
  * open=false 时整体不挂载(内容子组件持有所有 hook),关闭即停止 probe。
  */
@@ -45,12 +45,11 @@ export function CcConnectModal({ open, onClose }: Props) {
 function CcConnectModalContent({ onClose }: { onClose: () => void }) {
   const t = useT();
   const config = useAppStore((s) => s.config);
-  const setConfig = useAppStore((s) => s.setConfig);
   const ccStatus = useAppStore((s) => s.ccConnectStatus);
   const setCcConnectStatus = useAppStore((s) => s.setCcConnectStatus);
   const openCcDashboard = useAppStore((s) => s.openCcDashboard);
 
-  const cc = config.ccConnect ?? DEFAULT_CC_CONNECT_CONFIG;
+  const cc = normalizeCcConnectConfig(config.ccConnect);
   const [exePath, setExePath] = useState(cc.exePath);
   const [configPath, setConfigPath] = useState(cc.configPath);
   const [extraArgsInput, setExtraArgsInput] = useState((cc.extraArgs ?? []).join(' '));
@@ -67,12 +66,13 @@ function CcConnectModalContent({ onClose }: { onClose: () => void }) {
   }, [cc.exePath, cc.configPath, cc.extraArgs]);
 
   const saveCcConfig = useCallback(async (patch: Partial<CcConnectConfig>) => {
-    const current = useAppStore.getState().config.ccConnect ?? DEFAULT_CC_CONNECT_CONFIG;
-    const newCc = { ...current, ...patch };
-    const newConfig = { ...useAppStore.getState().config, ccConnect: newCc };
-    setConfig(newConfig);
-    await invoke('save_config', { config: newConfig });
-  }, [setConfig]);
+    try {
+      setResultMsg(null);
+      await saveCcConnectConfigPatch(patch);
+    } catch (e: unknown) {
+      setResultMsg({ kind: 'err', text: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
 
   // 用 ref 持有最新 configPath,避免 probe 因为 configPath 变化反复 rebuild
   // (否则用户每键入一个字符都会触发一次探活)
@@ -81,9 +81,7 @@ function CcConnectModalContent({ onClose }: { onClose: () => void }) {
 
   const probe = useCallback(async () => {
     try {
-      const status = await invoke<CcConnectStatus>('cc_connect_probe', {
-        configPath: configPathRef.current || undefined,
-      });
+      const status = await probeCcConnect(configPathRef.current);
       setCcConnectStatus(status);
       return status;
     } catch (e: unknown) {
@@ -144,13 +142,8 @@ function CcConnectModalContent({ onClose }: { onClose: () => void }) {
     setBusy('start');
     setResultMsg(null);
     try {
-      // 未填写时回退 PATH 中的 cc-connect,实现"零配置启动"
-      const exe = exePath.trim() || DEFAULT_EXE;
-      const pid = await invoke<number>('cc_connect_start', {
-        exePath: exe,
-        configPath: configPath || undefined,
-        extraArgs: cc.extraArgs ?? [],
-      });
+      // 未填写时交给后端解析默认 cc-connect(内置优先,PATH 兜底),实现"零配置启动"
+      const pid = await startCcConnect({ exePath, configPath, extraArgs: cc.extraArgs });
       setResultMsg({ kind: 'ok', text: t('ccConnectModal.startedOk', { pid }) });
       // 给进程 ~600ms 起监听端口,再拉状态
       setTimeout(() => { void probe(); }, 600);
@@ -165,7 +158,7 @@ function CcConnectModalContent({ onClose }: { onClose: () => void }) {
     setBusy('stop');
     setResultMsg(null);
     try {
-      await invoke('cc_connect_stop');
+      await stopCcConnect();
       setResultMsg({ kind: 'ok', text: t('ccConnectModal.stoppedOk') });
       setTimeout(() => { void probe(); }, 400);
     } catch (e: unknown) {
@@ -180,11 +173,7 @@ function CcConnectModalContent({ onClose }: { onClose: () => void }) {
     setResultMsg(null);
     try {
       // HTTP /restart 优先;失败回退 kill+spawn 时同样回退默认可执行文件
-      await invoke('cc_connect_restart', {
-        exePath: exePath.trim() || DEFAULT_EXE,
-        configPath: configPath || undefined,
-        extraArgs: cc.extraArgs ?? [],
-      });
+      await restartCcConnect({ exePath, configPath, extraArgs: cc.extraArgs });
       setResultMsg({ kind: 'ok', text: t('ccConnectModal.restartedOk') });
       setTimeout(() => { void probe(); }, 800);
     } catch (e: unknown) {
@@ -219,7 +208,7 @@ function CcConnectModalContent({ onClose }: { onClose: () => void }) {
     try {
       // 未填写时解析默认 ~/.cc-connect/config.toml 再打开,实现"零配置编辑"
       const trimmed = configPath.trim();
-      const target = trimmed || (await invoke<string>('cc_connect_config_path'));
+      const target = trimmed || (await resolveCcConnectConfigPath());
       await invoke('open_path_with_default_app', { path: target });
     } catch (e: unknown) {
       setResultMsg({ kind: 'err', text: e instanceof Error ? e.message : String(e) });

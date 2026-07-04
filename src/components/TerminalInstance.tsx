@@ -1,32 +1,36 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
-import { getOrCreateTerminal, getCachedTerminal, activateWebgl, getTerminalTheme, DARK_TERMINAL_THEME, writePtyInput, copyTerminalSelection, pasteToTerminal, resolveTerminalFontFamily, reloadLigaturesForPty, clearAtlasForPty } from '../utils/terminalCache';
+import { getCachedTerminal, getTerminalTheme, DARK_TERMINAL_THEME, writePtyInput, copyTerminalSelection, pasteToTerminal, resolveTerminalFontFamily, reloadLigaturesForPty } from '../utils/terminalCache';
 import { getResolvedTheme } from '../utils/themeManager';
 import { showContextMenu, type MenuEntry } from '../utils/contextMenu';
 import { isFileDragging, getFileDragPath } from '../utils/fileDragState';
+import { buildSshCommand } from '../utils/sshCommand';
+import { useTerminalMount } from '../hooks/useTerminalMount';
 import { useT, t } from '../i18n';
 import type { SshConnection } from '../types';
 import '@xterm/xterm/css/xterm.css';
 
 interface Props {
   ptyId: number;
+  contextMenuExtraItems?: MenuEntry[];
 }
 
-/**
- * 把 SSH 连接拼成 ssh 命令行。
- * identityPath 为解析后的私钥路径(可能是后端收紧权限的临时副本),
- * 未配置私钥时传 undefined。
- */
-function buildSshCommand(conn: SshConnection, identityPath: string | undefined): string {
-  const parts = ['ssh'];
-  if (conn.port && conn.port !== 22) parts.push('-p', String(conn.port));
-  const identity = identityPath?.trim();
-  // 反斜杠转正斜杠:Nushell/bash 等会把双引号内的 "\" 当转义符导致报错,
-  // 而 Windows OpenSSH 接受正斜杠路径,正斜杠在所有 shell 中都安全
-  if (identity) parts.push('-i', `"${identity.replace(/\\/g, '/')}"`);
-  parts.push(`${conn.user}@${conn.host}`);
-  return parts.join(' ');
+function logTerminalInstanceError(context: string, error: unknown): void {
+  // eslint-disable-next-line no-console
+  console.warn(`[terminal] ${context}`, error);
+}
+
+function focusTerminalSafely(ptyId: number): void {
+  try {
+    getCachedTerminal(ptyId)?.term.focus();
+  } catch (error) {
+    logTerminalInstanceError('focus failed', error);
+  }
+}
+
+function runTerminalAction(context: string, action: () => Promise<unknown>): void {
+  void action().catch((error) => logTerminalInstanceError(context, error));
 }
 
 /** 在指定终端中连接 SSH:有密码先注册自动填充,再写入 ssh 命令并回车 */
@@ -34,7 +38,8 @@ async function connectSsh(ptyId: number, conn: SshConnection): Promise<void> {
   if (conn.password) {
     try {
       await invoke('arm_ssh_autofill', { ptyId, password: conn.password });
-    } catch {
+    } catch (error) {
+      logTerminalInstanceError('ssh autofill arm failed', error);
       // 注册自动填充失败不阻断连接,用户可在终端手动输入密码
     }
   }
@@ -45,11 +50,20 @@ async function connectSsh(ptyId: number, conn: SshConnection): Promise<void> {
     try {
       identityPath = await invoke<string>('prepare_ssh_key', { identityFile: identityPath });
     } catch (e) {
-      console.error('准备 SSH 私钥临时副本失败,回退原始路径:', e);
+      logTerminalInstanceError('prepare ssh key failed, falling back to original path', e);
     }
   }
-  await writePtyInput(ptyId, `${buildSshCommand(conn, identityPath)}\r`);
-  getCachedTerminal(ptyId)?.term.focus();
+  let command: string;
+  try {
+    command = buildSshCommand(conn, identityPath);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await writePtyInput(ptyId, `# mini-term: invalid SSH connection target (${msg})\r`);
+    focusTerminalSafely(ptyId);
+    return;
+  }
+  await writePtyInput(ptyId, `${command}\r`);
+  focusTerminalSafely(ptyId);
 }
 
 /** 构建终端右键菜单的「SSH 连接」子菜单(按 group 分组) */
@@ -71,19 +85,23 @@ function buildSshSubmenu(connections: SshConnection[], ptyId: number): MenuEntry
       entries.push({ header: bucket.group ?? t('terminal.ungrouped') });
     }
     for (const conn of bucket.items) {
-      entries.push({ label: conn.name, onClick: () => void connectSsh(ptyId, conn) });
+      entries.push({
+        label: conn.name,
+        onClick: () => runTerminalAction('ssh connect failed', () => connectSsh(ptyId, conn)),
+      });
     }
   }
   return entries;
 }
 
-export function TerminalInstance({ ptyId }: Props) {
+export function TerminalInstance({ ptyId, contextMenuExtraItems = [] }: Props) {
   const t = useT();
   const containerRef = useRef<HTMLDivElement>(null);
   const [fileDrag, setFileDrag] = useState(false);
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
   const terminalFontFamily = useAppStore((s) => s.config.terminalFontFamily);
   const terminalLigatures = useAppStore((s) => s.config.terminalLigatures);
+  const terminalDepthUi = useAppStore((s) => s.config.terminalDepthUi ?? true);
   const terminalFollowTheme = useAppStore((s) => s.config.terminalFollowTheme);
   const sshConnections = useAppStore((s) => s.config.sshConnections);
 
@@ -93,100 +111,29 @@ export function TerminalInstance({ ptyId }: Props) {
     ? { '--bg-terminal': DARK_TERMINAL_THEME.background } as React.CSSProperties
     : undefined;
 
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const { term, fitAddon, wrapper } = getOrCreateTerminal(ptyId);
-
-    container.appendChild(wrapper);
-
-    // fit() 前记住滚动位置（appendChild 不触发 reflow，buffer 状态尚未改变）
-    const bufBefore = term.buffer.active;
-    const mountWasAtBottom = bufBefore.baseY + term.rows >= bufBefore.length;
-
-    requestAnimationFrame(() => {
-      if (container.clientWidth > 0 && container.clientHeight > 0) {
-        fitAddon.fit();
-        invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
-        term.refresh(0, term.rows - 1);
-        // split/remount 后视口可能停留在 buffer 顶部，滚回光标位置
-        if (mountWasAtBottom) term.scrollToBottom();
-        // 等 canvas 渲染器首帧合成上屏后再加载 WebGL，避免替换 canvas 时闪白
-        requestAnimationFrame(() => {
-          activateWebgl(ptyId);
-          // mount 后强制 clearTextureAtlas,见 spec/frontend/xterm-webgl-atlas-sharing.md
-          requestAnimationFrame(() => clearAtlasForPty(ptyId));
-        });
-      }
-    });
-
-    let rafId: number;
-    let settleId: ReturnType<typeof setTimeout>;
-    // 初始值用挂载前采样值，避免 ResizeObserver 首次回调时 fit 已改变 buffer 状态
-    let wasAtBottom = mountWasAtBottom;
-    let resizing = false;
-    const observer = new ResizeObserver(() => {
-      if (!resizing) {
-        const buf = term.buffer.active;
-        wasAtBottom = buf.baseY + term.rows >= buf.length;
-        resizing = true;
-      }
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          fitAddon.fit();
-        }
-      });
-      // resize 结束后做一次完整刷新，修复 reflow 残留的空白行/空格
-      clearTimeout(settleId);
-      settleId = setTimeout(() => {
-        resizing = false;
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          fitAddon.fit();
-          term.refresh(0, term.rows - 1);
-          // split/resize 后若用户原本在底部，确保视口跟随光标
-          if (wasAtBottom) term.scrollToBottom();
-        }
-      }, 150);
-    });
-    observer.observe(container);
-
-    const visibilityObserver = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) {
-        requestAnimationFrame(() => {
-          fitAddon.fit();
-          term.refresh(0, term.rows - 1);
-          // 可见性恢复时强制清 atlas 兜底 RenderService._isPaused 拦截期间的残留,
-          // 见 .trellis/spec/frontend/xterm-webgl-atlas-sharing.md 「未覆盖路径」章节
-          clearAtlasForPty(ptyId);
-        });
-      }
-    });
-    visibilityObserver.observe(container);
-
-    return () => {
-      cancelAnimationFrame(rafId);
-      clearTimeout(settleId);
-      observer.disconnect();
-      visibilityObserver.disconnect();
-      wrapper.remove();
-    };
-  }, [ptyId]);
+  useTerminalMount(ptyId, containerRef);
 
   useEffect(() => {
     const cached = getCachedTerminal(ptyId);
     if (cached && terminalFontSize) {
-      cached.term.options.fontSize = terminalFontSize;
-      cached.fitAddon.fit();
+      try {
+        cached.term.options.fontSize = terminalFontSize;
+        cached.fitAddon.fit();
+      } catch (error) {
+        logTerminalInstanceError('font size update failed', error);
+      }
     }
   }, [terminalFontSize, ptyId]);
 
   useEffect(() => {
     const cached = getCachedTerminal(ptyId);
     if (!cached) return;
-    cached.term.options.fontFamily = resolveTerminalFontFamily(terminalFontFamily);
-    cached.fitAddon.fit();
+    try {
+      cached.term.options.fontFamily = resolveTerminalFontFamily(terminalFontFamily);
+      cached.fitAddon.fit();
+    } catch (error) {
+      logTerminalInstanceError('font family update failed', error);
+    }
   }, [terminalFontFamily, ptyId]);
 
   // ligatures 开关切换 / 字体切换 → 重做 ligatures + WebGL atlas
@@ -200,7 +147,11 @@ export function TerminalInstance({ ptyId }: Props) {
       const cached = getCachedTerminal(ptyId);
       if (cached) {
         const { config } = useAppStore.getState();
-        cached.term.options.theme = getTerminalTheme(config.terminalFollowTheme ?? true);
+        try {
+          cached.term.options.theme = getTerminalTheme(config.terminalFollowTheme ?? true);
+        } catch (error) {
+          logTerminalInstanceError('theme update failed', error);
+        }
       }
     };
     window.addEventListener('theme-changed', handler);
@@ -231,25 +182,28 @@ export function TerminalInstance({ ptyId }: Props) {
     const path = getFileDragPath();
     if (path) {
       setFileDrag(false);
-      void writePtyInput(ptyId, `'${path}'`);
-      getCachedTerminal(ptyId)?.term.focus();
+      runTerminalAction('drop path insert failed', async () => {
+        await writePtyInput(ptyId, `'${path}'`);
+        focusTerminalSafely(ptyId);
+      });
     }
   }, [ptyId]);
 
   const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     const hasSelection = !!getCachedTerminal(ptyId)?.term.getSelection();
     const menu: MenuEntry[] = [
       {
         label: t('terminal.copy'),
         disabled: !hasSelection,
-        onClick: () => { void copyTerminalSelection(ptyId); },
+        onClick: () => runTerminalAction('copy failed', () => copyTerminalSelection(ptyId)),
       },
       {
         label: t('terminal.paste'),
         onClick: () => {
-          void pasteToTerminal(ptyId);
-          getCachedTerminal(ptyId)?.term.focus();
+          runTerminalAction('paste failed', () => pasteToTerminal(ptyId));
+          focusTerminalSafely(ptyId);
         },
       },
       { separator: true },
@@ -257,6 +211,9 @@ export function TerminalInstance({ ptyId }: Props) {
         ? { label: t('terminal.sshConnect'), submenu: buildSshSubmenu(sshConnections, ptyId) }
         : { label: t('terminal.sshConnectEmpty'), disabled: true },
     ];
+    if (contextMenuExtraItems.length > 0) {
+      menu.push({ separator: true }, ...contextMenuExtraItems);
+    }
     showContextMenu(e.clientX, e.clientY, menu);
   };
 
@@ -264,16 +221,18 @@ export function TerminalInstance({ ptyId }: Props) {
     <div className="w-full h-full flex flex-col">
       <div
         ref={dropZoneRef}
-        className="flex-1 relative bg-[var(--bg-terminal)]"
+        className={`${terminalDepthUi ? 'terminal-depth-shell' : ''} flex-1 relative bg-[var(--bg-terminal)]`}
         style={termStyle}
         data-terminal-drop
+        data-terminal-depth={terminalDepthUi ? 'enabled' : 'disabled'}
+        data-terminal-tone={forceDarkBg ? 'dark' : undefined}
         data-pty-id={ptyId}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onMouseUp={handleMouseUp}
         onContextMenu={handleContextMenu}
       >
-        <div ref={containerRef} className="absolute top-1.5 bottom-0 left-2.5 right-0 cursor-none" />
+        <div ref={containerRef} className={`${terminalDepthUi ? 'terminal-depth-content' : ''} absolute top-1.5 bottom-0 left-2.5 right-0 cursor-none`} />
 
         {fileDrag && (
           <div

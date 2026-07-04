@@ -1,9 +1,18 @@
 import { useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, genId, saveLayoutToConfig } from '../store';
 import { SplitLayout } from './SplitLayout';
 import { showContextMenu } from '../utils/contextMenu';
 import { getProjectEnvs } from '../utils/projectEnv';
+import { showAlert } from '../utils/prompt';
+import { formatError } from '../utils/appConfigPersistence';
+import { createTerminalPty, killPtyQuietly, resolveTerminalShell } from '../utils/terminalApi';
+import {
+  buildTerminalLayoutPreset,
+  collectPanesFromLayout,
+  getTerminalLayoutPresetPaneCount,
+  type TerminalLayoutPreset,
+} from '../utils/terminalLayoutPresets';
+import { normalizeTerminalEncoding } from '../utils/terminalEncoding';
 import { useT } from '../i18n';
 import type { TerminalTab, PaneState, SplitNode, ShellConfig } from '../types';
 
@@ -16,6 +25,17 @@ interface Props {
 function collectPaneIds(node: SplitNode): string[] {
   if (node.type === 'leaf') return node.panes.map((p) => p.id);
   return node.children.flatMap(collectPaneIds);
+}
+
+function hasPaneId(node: SplitNode, paneId: string): boolean {
+  if (node.type === 'leaf') return node.panes.some((pane) => pane.id === paneId);
+  return node.children.some((child) => hasPaneId(child, paneId));
+}
+
+function disposeUnattachedPanes(panes: PaneState[]): void {
+  panes.forEach((pane) => {
+    if (pane.ptyId !== undefined) killPtyQuietly(pane.ptyId);
+  });
 }
 
 function insertSplit(
@@ -52,20 +72,40 @@ export function TerminalArea({ projectId, projectPath }: Props) {
   const ps = projectStates.get(projectId);
   const activeTab = ps?.tabs.find((t) => t.id === ps.activeTabId);
 
+  const createPane = useCallback(async (selectedShell?: ShellConfig): Promise<PaneState | null> => {
+    const shell = resolveTerminalShell(config, selectedShell);
+    if (!shell) {
+      await showAlert(t('terminalArea.noShellConfiguredTitle'), t('terminalArea.noShellConfiguredMessage'));
+      return null;
+    }
+
+    let ptyId: number;
+    const encoding = normalizeTerminalEncoding(config.terminalEncoding);
+    try {
+      ptyId = await createTerminalPty({
+        shell,
+        cwd: projectPath,
+        envs: getProjectEnvs(projectId),
+        encoding,
+      });
+    } catch (error) {
+      await showAlert(t('terminalArea.createFailedTitle'), formatError(error));
+      return null;
+    }
+
+    return {
+      id: genId(),
+      shellName: shell.name,
+      terminalEncoding: encoding,
+      status: 'idle',
+      ptyId,
+    };
+  }, [projectId, projectPath, config, t]);
+
   const handleNewTab = useCallback(async (selectedShell?: ShellConfig) => {
-    const shell = selectedShell
-      ?? config.availableShells.find((s) => s.name === config.defaultShell)
-      ?? config.availableShells[0];
-    if (!shell) return;
+    const pane = await createPane(selectedShell);
+    if (!pane) return;
 
-    const ptyId = await invoke<number>('create_pty', {
-      shell: shell.command,
-      args: shell.args ?? [],
-      cwd: projectPath,
-      envs: getProjectEnvs(projectId),
-    });
-
-    const paneId = genId();
     const tabId = genId();
 
     const tab: TerminalTab = {
@@ -73,21 +113,20 @@ export function TerminalArea({ projectId, projectPath }: Props) {
       status: 'idle',
       splitLayout: {
         type: 'leaf',
-        panes: [{
-          id: paneId,
-          shellName: shell.name,
-          status: 'idle',
-          ptyId,
-        }],
-        activePaneId: paneId,
+        panes: [pane],
+        activePaneId: pane.id,
       },
     };
 
     addTab(projectId, tab);
     saveLayoutToConfig(projectId);
-  }, [projectId, projectPath, config, addTab]);
+  }, [projectId, addTab, createPane]);
 
   const handleNewTabClick = useCallback((e: React.MouseEvent) => {
+    if (config.availableShells.length <= 1) {
+      void handleNewTab();
+      return;
+    }
     showContextMenu(
       e.clientX,
       e.clientY,
@@ -101,23 +140,16 @@ export function TerminalArea({ projectId, projectPath }: Props) {
   const handleSplitPane = useCallback(
     async (paneId: string, direction: 'horizontal' | 'vertical') => {
       if (!ps || !activeTab) return;
-      const shell = config.availableShells.find((s) => s.name === config.defaultShell)
-        ?? config.availableShells[0];
-      if (!shell) return;
+      const targetTabId = activeTab.id;
+      const newPane = await createPane();
+      if (!newPane) return;
 
-      const ptyId = await invoke<number>('create_pty', {
-        shell: shell.command,
-        args: shell.args ?? [],
-        cwd: projectPath,
-        envs: getProjectEnvs(projectId),
-      });
-
-      const newPane: PaneState = {
-        id: genId(),
-        shellName: shell.name,
-        status: 'idle',
-        ptyId,
-      };
+      const currentPs = useAppStore.getState().projectStates.get(projectId);
+      const targetTab = currentPs?.tabs.find((tab) => tab.id === targetTabId);
+      if (!targetTab) {
+        disposeUnattachedPanes([newPane]);
+        return;
+      }
 
       const newLeaf: SplitNode = {
         type: 'leaf',
@@ -125,11 +157,58 @@ export function TerminalArea({ projectId, projectPath }: Props) {
         activePaneId: newPane.id,
       };
 
-      const newLayout = insertSplit(activeTab.splitLayout, paneId, direction, newLeaf);
-      updateTabLayout(projectId, activeTab.id, newLayout);
+      const newLayout = insertSplit(targetTab.splitLayout, paneId, direction, newLeaf);
+      if (!hasPaneId(newLayout, newPane.id)) {
+        disposeUnattachedPanes([newPane]);
+        return;
+      }
+
+      updateTabLayout(projectId, targetTab.id, newLayout);
       saveLayoutToConfig(projectId);
     },
-    [ps, activeTab, config, projectId, projectPath, updateTabLayout]
+    [ps, activeTab, projectId, updateTabLayout, createPane]
+  );
+
+  const handleLayoutPreset = useCallback(
+    async (activePaneId: string, preset: TerminalLayoutPreset) => {
+      if (!ps || !activeTab) return;
+      const targetTabId = activeTab.id;
+      const readTargetTab = () => (
+        useAppStore.getState().projectStates.get(projectId)?.tabs.find((tab) => tab.id === targetTabId)
+      );
+
+      const targetTab = readTargetTab();
+      if (!targetTab || !hasPaneId(targetTab.splitLayout, activePaneId)) return;
+
+      const panes = collectPanesFromLayout(targetTab.splitLayout);
+      const requiredPaneCount = getTerminalLayoutPresetPaneCount(preset);
+      const createdPanes: PaneState[] = [];
+
+      while (panes.length < requiredPaneCount) {
+        const pane = await createPane();
+        if (!pane) {
+          disposeUnattachedPanes(createdPanes);
+          return;
+        }
+        createdPanes.push(pane);
+        panes.push(pane);
+      }
+
+      const latestTargetTab = readTargetTab();
+      if (!latestTargetTab || !hasPaneId(latestTargetTab.splitLayout, activePaneId)) {
+        disposeUnattachedPanes(createdPanes);
+        return;
+      }
+
+      const latestPanes = [
+        ...collectPanesFromLayout(latestTargetTab.splitLayout),
+        ...createdPanes,
+      ];
+      const newLayout = buildTerminalLayoutPreset(preset, latestPanes, activePaneId);
+      updateTabLayout(projectId, latestTargetTab.id, newLayout);
+      saveLayoutToConfig(projectId);
+    },
+    [ps, activeTab, projectId, updateTabLayout, createPane],
   );
 
   // Called when an entire leaf (pane group) is closed.
@@ -184,6 +263,7 @@ export function TerminalArea({ projectId, projectPath }: Props) {
               node={activeTab.splitLayout}
               projectPath={projectPath}
               onSplit={handleSplitPane}
+              onLayoutPreset={handleLayoutPreset}
               onCloseLeaf={handleCloseLeaf}
               onUpdateNode={handleUpdateNode}
               onLayoutChange={handleLayoutChange}

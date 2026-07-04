@@ -137,6 +137,32 @@ visibilityObserver.observe(container);
 2. `_clearModel(true)` 清 `RenderModel.lineLengths` + GlyphRenderer vertex buffer 全 fill(0)
 3. `_requestRedrawViewport()` fire `_onRequestRedraw({start:0, end:rows-1})` → RenderService.refreshRows(0, rows-1, isRedrawOnly=true) → 下一帧 _updateModel(0, rows-1) 全 viewport 重写
 
+### Implementation boundary:`useTerminalMount`
+
+`TerminalInstance` 不应内联维护 xterm mount / fit / observer / WebGL activation 链路。该生命周期统一放在 `src/hooks/useTerminalMount.ts`,并遵守:
+
+- mount 后的顺序必须保持 `fit + refresh` → `activateWebgl(ptyId)` → `clearAtlasForPty(ptyId)`;
+- 可见性恢复必须执行 `fit + refresh` 并调用 `clearAtlasForPty(ptyId)`;
+- 所有 `requestAnimationFrame`、`setTimeout`、`ResizeObserver`、`IntersectionObserver` 都必须在 unmount cleanup 中取消或断开;
+- resize 高频路径只保留最新一帧 fit,结束后再做一次完整 refresh。
+
+### Runtime hardening
+
+Terminal runtime paths must not leak unhandled errors into the React/Tauri event loop:
+
+- `resize_pty` calls go through `resizePtySafely`, which ignores invalid sizes, deduplicates unchanged grids, and catches backend rejection;
+- PTY input writes from xterm `onData`, paste, drag/drop, and context-menu actions must resolve even if the backend PTY has already exited;
+- `term.write`, `fitAddon.fit`, `term.refresh`, WebGL activation, and `clearTextureAtlas` must be guarded where they can race with pane close/unmount;
+- WebGL context loss must reset `webglLoaded` so future mount/config changes can try to re-activate WebGL instead of leaving a stale loaded flag.
+
+### Visual shell
+
+Terminal visual effects such as the depth UI must stay on the React wrapper (`terminal-depth-shell`) and CSS pseudo-elements. They must not mutate the xterm internal DOM, canvas, renderer, or addon lifecycle.
+
+- Pseudo-elements must use `pointer-events: none` so drag/drop, selection, context menu, and xterm input remain unaffected.
+- The visual shell must be removable via config (`terminalDepthUi`) without changing `useTerminalMount` behavior or terminal sizing.
+- Do not add transforms to the xterm wrapper/content; transforms can affect WebGL canvas rasterization and fit measurements.
+
 ### Wrong vs Correct
 
 #### Wrong(v0.4.18:9bb05e4 only)

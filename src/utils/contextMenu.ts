@@ -1,5 +1,10 @@
+import type { TerminalLayoutPreset } from './terminalLayoutPresets';
+
 export interface MenuItem {
   label: string;
+  icon?: string;
+  preview?: TerminalLayoutPreset;
+  description?: string;
   danger?: boolean;
   disabled?: boolean;
   onClick?: () => void;
@@ -70,6 +75,7 @@ export function showContextMenu(x: number, y: number, items: MenuEntry[]) {
   const buildMenu = (entries: MenuEntry[], isRoot: boolean): HTMLElement => {
     const menu = document.createElement('div');
     menu.className = 'fixed ctx-menu text-xs';
+    menu.setAttribute('role', 'menu');
     menu.style.visibility = 'hidden';
 
     entries.forEach((entry) => {
@@ -82,6 +88,7 @@ export function showContextMenu(x: number, y: number, items: MenuEntry[]) {
       if ('header' in entry) {
         const head = document.createElement('div');
         head.className = 'ctx-menu-header';
+        head.setAttribute('role', 'presentation');
         head.textContent = entry.header;
         menu.appendChild(head);
         return;
@@ -92,7 +99,41 @@ export function showContextMenu(x: number, y: number, items: MenuEntry[]) {
       if (entry.disabled) classes.push('disabled');
       if (entry.submenu) classes.push('has-submenu');
       item.className = classes.join(' ');
-      item.textContent = entry.label;
+      item.setAttribute('role', 'menuitem');
+      if (entry.disabled) item.setAttribute('aria-disabled', 'true');
+
+      const content = document.createElement('span');
+      content.className = 'ctx-menu-item-content';
+
+      if (entry.preview) {
+        const preview = document.createElement('span');
+        preview.className = `ctx-menu-preview ctx-menu-preview--${entry.preview}`;
+        const cellCount = entry.preview === 'quad' ? 4 : 2;
+        for (let i = 0; i < cellCount; i++) {
+          preview.appendChild(document.createElement('span'));
+        }
+        content.appendChild(preview);
+      } else if (entry.icon) {
+        const icon = document.createElement('span');
+        icon.className = 'ctx-menu-icon';
+        icon.textContent = entry.icon;
+        content.appendChild(icon);
+      }
+
+      const text = document.createElement('span');
+      text.className = 'ctx-menu-text';
+      const label = document.createElement('span');
+      label.className = 'ctx-menu-label';
+      label.textContent = entry.label;
+      text.appendChild(label);
+      if (entry.description) {
+        const description = document.createElement('span');
+        description.className = 'ctx-menu-description';
+        description.textContent = entry.description;
+        text.appendChild(description);
+      }
+      content.appendChild(text);
+      item.appendChild(content);
 
       if (entry.submenu && !entry.disabled) {
         const sub = entry.submenu;

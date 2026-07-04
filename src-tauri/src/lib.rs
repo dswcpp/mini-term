@@ -12,6 +12,7 @@ mod pty;
 mod search;
 mod ssh;
 mod ssh_mcp_registry;
+mod terminal_log;
 mod window_theme;
 mod wsl_distros;
 
@@ -21,7 +22,57 @@ use tauri::Manager;
 extern "system" {
     fn ReleaseCapture() -> i32;
     fn GetAsyncKeyState(v_key: i32) -> i16;
+    fn GetWindowLongW(hwnd: *mut std::ffi::c_void, n_index: i32) -> i32;
+    fn SetWindowLongW(hwnd: *mut std::ffi::c_void, n_index: i32, new_long: i32) -> i32;
+    fn SetWindowPos(
+        hwnd: *mut std::ffi::c_void,
+        hwnd_insert_after: *mut std::ffi::c_void,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> i32;
 }
+
+#[cfg(windows)]
+fn disable_native_window_frame(window: &tauri::WebviewWindow) {
+    let Ok(hwnd) = window.hwnd() else {
+        eprintln!("[setup] native window decorations fallback failed: missing HWND");
+        return;
+    };
+
+    const GWL_STYLE: i32 = -16;
+    const WS_CAPTION: i32 = 0x00C00000;
+    const WS_SYSMENU: i32 = 0x00080000;
+    const WS_MINIMIZEBOX: i32 = 0x00020000;
+    const WS_MAXIMIZEBOX: i32 = 0x00010000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    unsafe {
+        let hwnd = hwnd.0;
+        let style = GetWindowLongW(hwnd, GWL_STYLE);
+        let next_style = style & !(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+        if next_style != style {
+            SetWindowLongW(hwnd, GWL_STYLE, next_style);
+            let _ = SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn disable_native_window_frame(_window: &tauri::WebviewWindow) {}
 
 #[cfg(windows)]
 const VK_LBUTTON: i32 = 0x01;
@@ -38,6 +89,13 @@ pub fn run() {
         .manage(search::SearchManager::new())
         .manage(cc_connect::CcConnectManager::new())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.set_decorations(false) {
+                    eprintln!("[setup] disable native window decorations failed: {}", e);
+                }
+                disable_native_window_frame(&window);
+            }
+
             // identifier 从 com.tauri-app.tauri-app 切换为 com.mini-term.app 后,
             // 第一次启动时把旧 app_data_dir 下的 config.json 拷到新目录,
             // 必须发生在任何 read_config 之前。
@@ -87,6 +145,7 @@ pub fn run() {
             config::save_config,
             pty::create_pty,
             pty::write_pty,
+            pty::set_pty_encoding,
             pty::resize_pty,
             pty::kill_pty,
             pty::arm_ssh_autofill,
@@ -106,6 +165,15 @@ pub fn run() {
             wsl_distros::list_wsl_distros,
             git::get_git_status,
             git::get_git_diff,
+            git::discover_vcs_repos,
+            git::get_vcs_status,
+            git::get_vcs_changes_status,
+            git::get_vcs_diff,
+            git::vcs_commit,
+            git::vcs_stage,
+            git::vcs_stage_all,
+            git::vcs_update,
+            git::vcs_discard_file,
             git::discover_git_repos,
             git::get_git_log,
             git::get_repo_branches,

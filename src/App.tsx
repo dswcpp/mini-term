@@ -1,13 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Allotment } from 'allotment';
-import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { ask } from '@tauri-apps/plugin-dialog';
 import { useAppStore, restoreLayout, flushLayoutToConfig, initExpandedDirs, flushExpandedDirsToConfig, flushProjectToConfig, persistConfig } from './store';
 import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
+import { OverviewPanel } from './components/OverviewPanel';
 import { FileTree } from './components/FileTree';
 import { GitHistory } from './components/GitHistory';
 import { ActivityBar } from './components/ActivityBar';
@@ -22,22 +21,18 @@ import { useAiSubmitMarker } from './hooks/useAiSubmitMarker';
 import { useMarkerHotkeys } from './hooks/useMarkerHotkeys';
 import { useExternalFileDrop } from './hooks/useExternalFileDrop';
 import { useCcConnectProbe } from './hooks/useCcConnectProbe';
+import { useWorkspaceOverview } from './hooks/useWorkspaceOverview';
 import { checkForUpdate, type ReleaseInfo } from './utils/updateChecker';
 import { applyTheme } from './utils/themeManager';
 import { applyUiFontFamily } from './utils/fontManager';
 import { markAiPty, updateAllTerminalThemes } from './utils/terminalCache';
 import { includeActiveProject } from './utils/projectKeepAlive';
+import { normalizeCcConnectConfig } from './utils/ccConnectConfig';
+import { probeCcConnect, startCcConnect } from './utils/ccConnectApi';
+import { loadConfig, saveConfig } from './utils/configApi';
+import { showConfirm } from './utils/prompt';
 import { useT } from './i18n';
-import type { AppConfig, PtyStatusChangePayload, PtyExitPayload, PaneStatus, CcConnectStatus, CcConnectConfig } from './types';
-
-/** cc-connect 未保存配置时,「连接」弹窗 / Dashboard 打开期间仍以默认路径探活的占位配置。 */
-const EMPTY_CC_CONFIG: CcConnectConfig = {
-  exePath: '',
-  configPath: '',
-  autoStart: false,
-  extraArgs: [],
-  projectLinks: {},
-};
+import type { PtyStatusChangePayload, PtyExitPayload, PaneStatus } from './types';
 
 export function App() {
   const t = useT();
@@ -59,8 +54,15 @@ export function App() {
   const searchModalOpen = useAppStore((s) => s.searchModalOpen);
   const setSearchModalOpen = useAppStore((s) => s.setSearchModalOpen);
 
+  const openSettings = useCallback(() => {
+    setConfigPage(undefined);
+    setConfigOpen(true);
+  }, []);
+  const openSsh = useCallback(() => setSshOpen(true), []);
+  const openCcConnect = useCallback(() => setCcConnectOpen(true), []);
+
   useEffect(() => {
-    invoke<AppConfig>('load_config').then((cfg) => {
+    loadConfig().then((cfg) => {
       setConfig(cfg);
       // 应用 UI 字体大小
       if (cfg.uiFontSize) {
@@ -109,25 +111,20 @@ export function App() {
       showWindow();
 
       // cc-connect autoStart:首次 probe 发现未运行时尝试 spawn(勾选了 autoStart 即可,
-      // 未填写可执行文件时回退 PATH 中的 cc-connect)
-      const ccCfg = cfg.ccConnect;
+      // 未填写可执行文件时由后端优先使用内置 sidecar,找不到再回退 PATH 中的 cc-connect)
+      const ccCfg = cfg.ccConnect ? normalizeCcConnectConfig(cfg.ccConnect) : undefined;
       if (ccCfg?.autoStart) {
-        const autoExe = ccCfg.exePath?.trim() || 'cc-connect';
-        invoke<CcConnectStatus>('cc_connect_probe', {
-          configPath: ccCfg.configPath || undefined,
-        }).then((status) => {
+        probeCcConnect(ccCfg.configPath).then((status) => {
           useAppStore.getState().setCcConnectStatus(status);
           if (!status.running) {
-            return invoke<number>('cc_connect_start', {
-              exePath: autoExe,
-              configPath: ccCfg.configPath || undefined,
-              extraArgs: ccCfg.extraArgs ?? [],
+            return startCcConnect({
+              exePath: ccCfg.exePath,
+              configPath: ccCfg.configPath,
+              extraArgs: ccCfg.extraArgs,
             }).then(() => {
               // spawn 后等 ~600ms 让 cc-connect 起监听端口再重新 probe
               setTimeout(() => {
-                invoke<CcConnectStatus>('cc_connect_probe', {
-                  configPath: ccCfg.configPath || undefined,
-                })
+                probeCcConnect(ccCfg.configPath)
                   .then((s) => useAppStore.getState().setCcConnectStatus(s))
                   .catch(() => {});
               }, 600);
@@ -144,8 +141,9 @@ export function App() {
   // 未配置则以默认 ~/.cc-connect/config.toml 探活 —— 这样零配置下也能识别 cc-connect 运行态,
   // 让项目列表的"导入到 cc-connect"右键菜单在 running 时直接可用。
   // 无 cc-connect 的用户:探活只是一次快速失败的文件读(不产生 HTTP),UI 也不展示任何状态。
-  const ccProbeConfig = config.ccConnect ?? EMPTY_CC_CONFIG;
+  const ccProbeConfig = normalizeCcConnectConfig(config.ccConnect);
   useCcConnectProbe(configLoaded ? ccProbeConfig : undefined);
+  useWorkspaceOverview(configLoaded);
 
   // 阻止浏览器默认的文件拖放行为（防止导航到拖入的文件）
   useEffect(() => {
@@ -244,7 +242,7 @@ export function App() {
     const appWindow = getCurrentWindow();
     const unlisten = appWindow.onCloseRequested(async (event) => {
       event.preventDefault();
-      const confirmed = await ask(t('app.closeConfirm.message'), { title: t('app.closeConfirm.title'), kind: 'warning' });
+      const confirmed = await showConfirm(t('app.closeConfirm.title'), t('app.closeConfirm.message'));
       if (!confirmed) return;
       const { projectStates, activeProjectId: currentActive, config: currentConfig } = useAppStore.getState();
       for (const projectId of projectStates.keys()) {
@@ -279,7 +277,7 @@ export function App() {
   }, [activeProjectId, config.projects]);
 
   // 派生：左栏/中栏是否可见
-  const leftColumnVisible = config.projectsVisible || config.sessionsVisible;
+  const leftColumnVisible = config.overviewVisible || config.projectsVisible || config.sessionsVisible;
   const middleColumnVisible = config.filesVisible || config.gitVisible;
   const terminalProjectIds = includeActiveProject(mountedProjectIds, activeProjectId);
 
@@ -291,7 +289,7 @@ export function App() {
       const cfg = useAppStore.getState().config;
       const newConfig = { ...cfg, layoutSizes: sizes };
       setConfig(newConfig);
-      invoke('save_config', { config: newConfig });
+      void saveConfig(newConfig);
     }, 500);
   }, [setConfig]);
 
@@ -302,20 +300,35 @@ export function App() {
       const cfg = useAppStore.getState().config;
       const newConfig = { ...cfg, middleColumnSizes: sizes };
       setConfig(newConfig);
-      invoke('save_config', { config: newConfig });
+      void saveConfig(newConfig);
     }, 500);
   }, [setConfig]);
 
+  const handleMinimizeWindow = useCallback(() => {
+    void getCurrentWindow().minimize().catch(() => {});
+  }, []);
+
+  const handleToggleMaximizeWindow = useCallback(() => {
+    void getCurrentWindow().toggleMaximize().catch(() => {});
+  }, []);
+
+  const handleCloseWindow = useCallback(() => {
+    void getCurrentWindow().close().catch(() => {});
+  }, []);
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-4 px-4 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
+      <div className="flex items-center gap-4 pl-4 pr-0 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
         onMouseDown={(e) => {
           // 用 Tauri API 拖拽替代 -webkit-app-region: drag，
           // 避免 WebView2 内部拖拽模态循环导致外部截图工具触发输入锁定
-          if (e.button === 0 && !(e.target as HTMLElement).closest('[data-no-drag]')) {
-            e.preventDefault();
-            getCurrentWindow().startDragging();
+          if (e.button !== 0 || (e.target as HTMLElement).closest('[data-no-drag]')) return;
+          e.preventDefault();
+          if (e.detail === 2) {
+            void getCurrentWindow().toggleMaximize().catch(() => {});
+            return;
           }
+          void getCurrentWindow().startDragging().catch(() => {});
         }}>
         <span className="font-semibold tracking-wide text-[var(--accent)] text-sm" style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}>
           MINI-TERM
@@ -333,27 +346,66 @@ export function App() {
             {t('app.update.badge', { version: updateInfo.version })}
           </span>
         )}
-        <div className="w-px h-3.5 bg-[var(--border-default)]" />
-        <div className="flex items-center gap-3 text-[var(--text-muted)]" data-no-drag>
-          <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150" onClick={() => { setConfigPage(undefined); setConfigOpen(true); }}>{t('app.menu.settings')}</span>
-          <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150" onClick={() => setSshOpen(true)}>SSH</span>
-          <span className="cursor-pointer hover:text-[var(--text-primary)] transition-colors duration-150" onClick={() => setCcConnectOpen(true)}>{t('app.menu.connect')}</span>
-        </div>
         <div className="flex-1" />
+        <div className="flex items-stretch self-stretch" data-no-drag>
+          <button
+            type="button"
+            className="w-11 flex items-center justify-center text-base leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)] transition-colors"
+            onClick={handleMinimizeWindow}
+            title={t('app.windowControls.minimize')}
+            aria-label={t('app.windowControls.minimize')}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="w-11 flex items-center justify-center text-sm leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)] transition-colors"
+            onClick={handleToggleMaximizeWindow}
+            title={t('app.windowControls.maximizeRestore')}
+            aria-label={t('app.windowControls.maximizeRestore')}
+          >
+            □
+          </button>
+          <button
+            type="button"
+            className="w-11 flex items-center justify-center text-base leading-none text-[var(--text-muted)] hover:text-[var(--color-error)] hover:bg-[var(--color-error-muted)] transition-colors"
+            onClick={handleCloseWindow}
+            title={t('app.windowControls.close')}
+            aria-label={t('app.windowControls.close')}
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-hidden flex">
         {/* Activity Bar — 常驻最左侧 */}
-        {configLoaded && <ActivityBar />}
+        {configLoaded && (
+          <ActivityBar
+            settingsActive={configOpen}
+            sshActive={sshOpen}
+            connectActive={ccConnectOpen}
+            onOpenSettings={openSettings}
+            onOpenSsh={openSsh}
+            onOpenConnect={openCcConnect}
+          />
+        )}
 
         {/* 主内容区域 — Allotment 可拖拽 */}
         {configLoaded ? <Allotment
           defaultSizes={config.layoutSizes ?? [200, 280, 1000]}
           onChange={saveLayoutSizes}
         >
-          {/* 左栏：Projects + Sessions */}
-          <Allotment.Pane minSize={140} maxSize={350} visible={leftColumnVisible}>
-            <ProjectList />
+          {/* 左栏：Overview + Projects + Sessions */}
+          <Allotment.Pane minSize={180} maxSize={440} visible={leftColumnVisible}>
+            <Allotment vertical defaultSizes={[220, 360]}>
+              <Allotment.Pane minSize={150} visible={config.overviewVisible}>
+                <OverviewPanel />
+              </Allotment.Pane>
+              <Allotment.Pane minSize={120} visible={config.projectsVisible || config.sessionsVisible}>
+                <ProjectList />
+              </Allotment.Pane>
+            </Allotment>
           </Allotment.Pane>
 
           {/* 中栏：FileTree + Git */}

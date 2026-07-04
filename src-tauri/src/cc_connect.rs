@@ -22,6 +22,9 @@ use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
 const DEFAULT_PORT: u16 = 9820;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_AGENT_TYPE: &str = "claudecode";
+const DEFAULT_EXE_NAME: &str = "cc-connect";
+#[cfg(windows)]
+const DEFAULT_WINDOWS_EXE_FILE_NAME: &str = "cc-connect.exe";
 
 /// 占位平台:cc-connect 的 config.validate() 强制每个 [[projects]] 至少有一个 [[projects.platforms]],
 /// 否则冷启动直接 os.Exit(1)("config: projects[N] needs at least one [[projects.platforms]]")。
@@ -248,6 +251,49 @@ fn make_project_table(name: &str, work_dir: &str, agent_type: &str) -> Table {
     new_proj
 }
 
+fn normalize_requested_exe(exe_path: &str) -> &str {
+    let trimmed = exe_path.trim();
+    if trimmed.is_empty() {
+        DEFAULT_EXE_NAME
+    } else {
+        trimmed
+    }
+}
+
+fn is_default_cc_connect_exe(exe_path: &str) -> bool {
+    let exe = normalize_requested_exe(exe_path);
+    #[cfg(windows)]
+    {
+        exe.eq_ignore_ascii_case(DEFAULT_EXE_NAME)
+            || exe.eq_ignore_ascii_case(DEFAULT_WINDOWS_EXE_FILE_NAME)
+    }
+    #[cfg(not(windows))]
+    {
+        exe == DEFAULT_EXE_NAME
+    }
+}
+
+#[cfg(windows)]
+fn bundled_cc_connect_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join(DEFAULT_WINDOWS_EXE_FILE_NAME);
+    candidate.is_file().then_some(candidate)
+}
+
+fn select_cc_connect_exe(exe_path: &str) -> String {
+    let requested = normalize_requested_exe(exe_path);
+
+    #[cfg(windows)]
+    if is_default_cc_connect_exe(requested) {
+        if let Some(path) = bundled_cc_connect_path() {
+            return path.to_string_lossy().to_string();
+        }
+    }
+
+    requested.to_string()
+}
+
 /// Windows: 像终端一样按 PATH × PATHEXT 解析可执行文件,弥补 `Command::new` 解析裸名
 /// 只补 `.exe`、不读 `PATHEXT` 的缺陷(cc-connect 常以 npm 脚本壳安装:cc-connect.cmd / .ps1,
 /// 无原生 .exe,会触发 program not found)。返回 (program, prefix_args):
@@ -365,6 +411,10 @@ pub async fn cc_connect_probe(
     state: tauri::State<'_, CcConnectManager>,
     config_path: Option<String>,
 ) -> Result<CcConnectStatus, String> {
+    let has_explicit_config_path = config_path
+        .as_deref()
+        .map(|p| !p.trim().is_empty())
+        .unwrap_or(false);
     let path = match resolve_config_path(config_path.as_deref()) {
         Ok(p) => p,
         Err(e) => {
@@ -377,6 +427,15 @@ pub async fn cc_connect_probe(
             });
         }
     };
+    if !has_explicit_config_path && !path.exists() {
+        return Ok(CcConnectStatus {
+            running: false,
+            port: DEFAULT_PORT,
+            version: None,
+            own_pid: state.own_pid(),
+            diagnostic: None,
+        });
+    }
     let (token, port) = match read_token_port(&path) {
         Ok(v) => v,
         Err(e) => {
@@ -443,13 +502,17 @@ pub fn cc_connect_start(
         }
         *guard = None;
     }
+    // 默认路径优先使用随 mini-term 打包、位于主程序同目录的 Windows sidecar;
+    // 找不到内置副本时再回退 PATH 中的 cc-connect。
+    let launch_exe = select_cc_connect_exe(&exe_path);
+
     // Windows 下 exe_path 可能是 npm 脚本壳(cc-connect.cmd / .ps1)或裸名,Command::new 解析裸名
     // 只补 .exe 会 program not found;这里按 PATH × PATHEXT 像终端一样解析,.ps1 包一层 powershell。
     #[cfg(windows)]
-    let (program, prefix_args) = resolve_windows_program(&exe_path)
-        .map_err(|e| format!("启动 cc-connect 失败 ({}): {}", exe_path, e))?;
+    let (program, prefix_args) = resolve_windows_program(&launch_exe)
+        .map_err(|e| format!("启动 cc-connect 失败 ({}): {}", launch_exe, e))?;
     #[cfg(not(windows))]
-    let (program, prefix_args): (String, Vec<String>) = (exe_path.clone(), Vec::new());
+    let (program, prefix_args): (String, Vec<String>) = (launch_exe.clone(), Vec::new());
 
     let mut cmd = Command::new(&program);
     for a in &prefix_args {
@@ -476,7 +539,7 @@ pub fn cc_connect_start(
     }
     let child = cmd
         .spawn()
-        .map_err(|e| format!("启动 cc-connect 失败 ({}): {}", exe_path, e))?;
+        .map_err(|e| format!("启动 cc-connect 失败 ({}): {}", launch_exe, e))?;
     let pid = child.id();
     *guard = Some(child);
     Ok(pid)
@@ -553,10 +616,7 @@ pub fn cc_connect_list_projects(config_path: Option<String>) -> Result<Vec<CcPro
         if name.is_empty() {
             continue;
         }
-        let work_dir = p
-            .get("work_dir")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let work_dir = p.get("work_dir").and_then(|v| v.as_str()).map(String::from);
         let agent_type = p
             .get("agent_type")
             .and_then(|v| v.as_str())
@@ -601,7 +661,9 @@ pub fn cc_connect_import_project(
         return Err(format!("cc-connect 已存在同名项目 \"{}\"", req.name));
     }
 
-    let agent_type = req.agent_type.unwrap_or_else(|| DEFAULT_AGENT_TYPE.to_string());
+    let agent_type = req
+        .agent_type
+        .unwrap_or_else(|| DEFAULT_AGENT_TYPE.to_string());
     projects.push(make_project_table(&req.name, &req.work_dir, &agent_type));
 
     crate::fs::atomic_write(&path, doc.to_string().as_bytes())
@@ -703,10 +765,11 @@ pub fn cc_connect_unlink_project(
     // DELETE 已成功 → 同 import 一样,restart 即使失败也返 Ok,
     // 让前端仍删本地 projectLinks 摆脱 broken 红 icon,只 toast 提示重启 cc-connect。
     let restart_url = build_api_url(port, "/api/v1/restart");
-    let (restart_ok, restart_error) = match http_post_json(&restart_url, &token, &serde_json::json!({})) {
-        Ok(_) => (true, None),
-        Err(e) => (false, Some(e)),
-    };
+    let (restart_ok, restart_error) =
+        match http_post_json(&restart_url, &token, &serde_json::json!({})) {
+            Ok(_) => (true, None),
+            Err(e) => (false, Some(e)),
+        };
     Ok(UnlinkProjectResult {
         name,
         deleted_ok: true,
@@ -729,6 +792,16 @@ mod tests {
     fn url_encode_special() {
         assert_eq!(urlencode("foo bar"), "foo%20bar");
         assert_eq!(urlencode("a/b"), "a%2Fb");
+    }
+
+    #[test]
+    fn default_cc_connect_exe_detection() {
+        assert!(is_default_cc_connect_exe(""));
+        assert!(is_default_cc_connect_exe("  cc-connect  "));
+        #[cfg(windows)]
+        assert!(is_default_cc_connect_exe("CC-CONNECT.EXE"));
+        assert!(!is_default_cc_connect_exe("C:\\tools\\cc-connect.exe"));
+        assert!(!is_default_cc_connect_exe("custom-cc-connect"));
     }
 
     #[test]
@@ -766,9 +839,7 @@ type = "claudecode"
         let projects = reparsed["projects"].as_array_of_tables().unwrap();
         assert_eq!(projects.len(), 2);
         let imported = projects.get(1).unwrap();
-        let work_dir = imported["agent"]["options"]["work_dir"]
-            .as_str()
-            .unwrap();
+        let work_dir = imported["agent"]["options"]["work_dir"].as_str().unwrap();
         assert_eq!(work_dir, "D:\\Git\\mini-term");
     }
 
@@ -823,7 +894,10 @@ name = "dup"
         let p0 = platforms.get(0).unwrap();
         assert_eq!(p0["type"].as_str().unwrap(), "telegram");
         let token = p0["options"]["token"].as_str().unwrap();
-        assert!(!token.is_empty(), "占位 token 必须非空(空串会让 telegram 工厂 os.Exit)");
+        assert!(
+            !token.is_empty(),
+            "占位 token 必须非空(空串会让 telegram 工厂 os.Exit)"
+        );
 
         // round-trip:序列化后重新解析仍能读到平台 type
         let mut doc = DocumentMut::new();
@@ -831,11 +905,17 @@ name = "dup"
         arr.push(t);
         doc["projects"] = Item::ArrayOfTables(arr);
         let reparsed: DocumentMut = doc.to_string().parse().unwrap();
-        let ptype = reparsed["projects"].as_array_of_tables().unwrap()
-            .get(0).unwrap()["platforms"]
-            .as_array_of_tables().unwrap()
-            .get(0).unwrap()["type"]
-            .as_str().unwrap();
+        let ptype = reparsed["projects"]
+            .as_array_of_tables()
+            .unwrap()
+            .get(0)
+            .unwrap()["platforms"]
+            .as_array_of_tables()
+            .unwrap()
+            .get(0)
+            .unwrap()["type"]
+            .as_str()
+            .unwrap();
         assert_eq!(ptype, "telegram");
     }
 }

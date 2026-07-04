@@ -1,14 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ask, message } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore, isExpanded, toggleExpandedDir } from '../store';
 import { useTauriEvent } from '../hooks/useTauriEvent';
 import { showContextMenu } from '../utils/contextMenu';
-import { showPrompt } from '../utils/prompt';
+import { showAlert, showConfirm, showPrompt } from '../utils/prompt';
 import { isAiPty } from '../utils/terminalCache';
 import { MOD_LABEL } from '../utils/platform';
+import { getVcsStatus } from '../utils/vcsApi';
+import { saveConfig } from '../utils/configApi';
 import { DiffModal } from './DiffModal';
 import { FileViewerModal } from './FileViewerModal';
 import { initFileDrag } from '../utils/fileDragState';
@@ -138,22 +139,23 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
                 await invoke('rename_entry', { projectRoot, oldPath: entry.path, newName: newName.trim() });
                 loadChildren();
               } catch (err) {
-                console.error('重命名失败:', err);
-                await message(t('fileTree.dialog.renameFailedMessage', { error: String(err) }), { title: t('fileTree.dialog.renameFailedTitle'), kind: 'error' });
+                await showAlert(
+                  t('fileTree.dialog.renameFailedTitle'),
+                  t('fileTree.dialog.renameFailedMessage', { error: String(err) }),
+                );
               }
             },
           });
           items.push({
             label: t('fileTree.menu.delete'),
             onClick: async () => {
-              const confirmed = await ask(
+              const confirmed = await showConfirm(
+                entry.isDir ? t('fileTree.dialog.deleteFolderTitle') : t('fileTree.dialog.deleteFileTitle'),
                 entry.isDir
                   ? t('fileTree.dialog.deleteConfirmFolder', { name: entry.name })
                   : t('fileTree.dialog.deleteConfirmFile', { name: entry.name }),
                 {
-                  title: entry.isDir ? t('fileTree.dialog.deleteFolderTitle') : t('fileTree.dialog.deleteFileTitle'),
-                  kind: 'warning',
-                  okLabel: t('fileTree.dialog.deleteOk'),
+                  confirmLabel: t('fileTree.dialog.deleteOk'),
                   cancelLabel: t('fileTree.dialog.deleteCancel'),
                 },
               );
@@ -161,8 +163,10 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
               try {
                 await invoke('delete_entry', { projectRoot, path: entry.path });
               } catch (err) {
-                console.error('删除失败:', err);
-                await message(t('fileTree.dialog.deleteFailedMessage', { error: String(err) }), { title: t('fileTree.dialog.deleteFailedTitle'), kind: 'error' });
+                await showAlert(
+                  t('fileTree.dialog.deleteFailedTitle'),
+                  t('fileTree.dialog.deleteFailedMessage', { error: String(err) }),
+                );
               }
             },
           });
@@ -285,9 +289,9 @@ export function FileTree() {
   const handleOpenInEditor = useCallback(async (editorName?: string) => {
     if (!project) return;
     if (!config.editors.length) {
-      await message(
+      await showAlert(
+        t('fileTree.dialog.noEditorTitle'),
         t('fileTree.dialog.noEditorMessage'),
-        { title: t('fileTree.dialog.noEditorTitle'), kind: 'warning' },
       );
       return;
     }
@@ -298,15 +302,14 @@ export function FileTree() {
       });
     } catch (err) {
       const detail = typeof err === 'string' ? err : String(err);
-      console.error('打开编辑器失败:', err);
-      await message(detail, { title: t('fileTree.dialog.openEditorFailedTitle'), kind: 'error' });
+      await showAlert(t('fileTree.dialog.openEditorFailedTitle'), detail);
     }
   }, [project, config.editors, t]);
 
   const handleSwitchAndOpen = useCallback((editorName: string) => {
     const newConfig = { ...config, defaultEditor: editorName };
     useAppStore.getState().setConfig(newConfig);
-    invoke('save_config', { config: newConfig });
+    void saveConfig(newConfig);
     handleOpenInEditor(editorName);
   }, [config, handleOpenInEditor]);
 
@@ -328,7 +331,7 @@ export function FileTree() {
 
   const loadGitStatus = useCallback(() => {
     if (!project) return;
-    invoke<GitFileStatus[]>('get_git_status', { projectPath: project.path })
+    getVcsStatus(project.path)
       .then((statuses) => {
         const map = new Map<string, GitFileStatus>();
         for (const s of statuses) map.set(s.path, s);
@@ -395,7 +398,7 @@ export function FileTree() {
     setDiffTarget(null);
     setViewFilePath(null);
     const listPromise = invoke<FileEntry[]>('list_directory', { projectRoot: projectPath, path: projectPath });
-    const statusPromise = invoke<GitFileStatus[]>('get_git_status', { projectPath }).catch(() => [] as GitFileStatus[]);
+    const statusPromise = getVcsStatus(projectPath).catch(() => [] as GitFileStatus[]);
     Promise.all([listPromise, statusPromise]).then(([entries, statuses]) => {
       if (cancelled) return;
       const map = new Map<string, GitFileStatus>();

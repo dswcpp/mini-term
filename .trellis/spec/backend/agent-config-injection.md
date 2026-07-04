@@ -50,6 +50,35 @@ doc["mcp_servers"]["mini-term-ssh"]["command"] = toml_edit::value(path);
 
 **附注**：`toml_edit` 对含反斜杠的 Windows 路径会自动选用 TOML literal string（单引号 `'C:\...\x.exe'`），免转义且正确 —— 不要再手动转义成 `\\`。
 
+## Gotcha：Codex hooks feature flag 已从 `codex_hooks` 迁移到 `hooks`
+
+Codex 新版本会对旧字段发出警告：
+
+```text
+[features].codex_hooks is deprecated. Use [features].hooks instead.
+```
+
+mini-term 写 `~/.codex/config.toml` 时必须：
+
+1. 设置 `[features].hooks = true`
+2. 删除自己过去写入的 `[features].codex_hooks`
+3. 手动配置片段也展示 `hooks = true`
+
+正确写法：
+
+```rust
+doc["features"]["hooks"] = toml_edit::value(true);
+if let Some(features) = doc["features"].as_table_mut() {
+    features.remove("codex_hooks");
+}
+```
+
+不要再写：
+
+```rust
+doc["features"]["codex_hooks"] = toml_edit::value(true);
+```
+
 ---
 
 ## Wrong vs Correct

@@ -1113,10 +1113,10 @@ mod tests {
 
     #[test]
     fn path_style_normalize_uses_matching_semantics() {
+        assert_eq!(PathStyle::Windows.normalize("D:/Git/Foo/"), r"d:\git\foo");
         assert_eq!(
-            PathStyle::Windows.normalize("D:/Git/Foo/"),
-            r"d:\git\foo"
+            PathStyle::Unix.normalize("/mnt/d/Git/Foo/"),
+            "/mnt/d/git/foo"
         );
-        assert_eq!(PathStyle::Unix.normalize("/mnt/d/Git/Foo/"), "/mnt/d/git/foo");
     }
 }

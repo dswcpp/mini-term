@@ -83,7 +83,8 @@ cors_origins = ["*"]
 
 | 条件 | 处理 |
 |---|---|
-| config.toml 缺失 | `probe` 返 `{ running: false, diagnostic: "无法定位配置目录" }` |
+| 默认 config.toml 缺失 | `probe` 返 `{ running: false, diagnostic: None }`，避免未配置用户看到红色错误 |
+| 显式 config.toml 路径缺失 | `probe` 返 `{ running: false, diagnostic: Some("读取 ... 失败") }` |
 | [management] 段缺失 / token 为空 | 同上,diagnostic 提示跑 `cc-connect web` |
 | HTTP 端口不通 | `probe` 返 `{ running: false, port, diagnostic: "GET ... 失败" }`,前端状态点变灰 |
 | 项目名重复 | `cc_connect_import_project` 检 list + toml 双重防重;冲突加 8 字符 hash 后缀 |

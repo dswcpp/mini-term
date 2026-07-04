@@ -146,3 +146,52 @@ try {
   console.error(e);  // user thinks save succeeded; store and disk diverge
 }
 ```
+
+### Convention: cc-connect frontend boundary
+
+**What**: cc-connect frontend code is split into two thin utility layers:
+
+1. `src/utils/ccConnectConfig.ts` owns frontend defaults, path normalization, and
+   optimistic `save_config` with rollback for `config.ccConnect`.
+2. `src/utils/ccConnectApi.ts` owns all `cc_connect_*` Tauri command names and
+   payload shapes.
+
+**Why**: cc-connect spans App startup, polling hooks, modals, Dashboard iframe,
+project import utilities, and Rust commands. Letting each caller hand-roll
+`configPath || undefined`, default executable fallback, or `invoke('cc_connect_*')`
+duplicates cross-layer contracts and makes future command signature changes risky.
+
+**Rules**:
+
+- Components and hooks call `probeCcConnect`, `startCcConnect`, etc. from
+  `ccConnectApi.ts`; they should not invoke `cc_connect_*` commands directly.
+- Code that needs default `CcConnectConfig` uses `normalizeCcConnectConfig`.
+- Code that persists `config.ccConnect` uses `saveCcConnectConfigPatch`, so failed
+  disk writes roll back the store.
+- UI components decide when to show messages; utility functions own only data
+  normalization and command boundaries.
+
+### Convention: Workspace Overview derived snapshot
+
+**What**: Cross-project summary data lives in `store.workspaceOverview` as a
+derived runtime snapshot, not as persisted config. The snapshot is refreshed by
+`useWorkspaceOverview` on app load, every 60 seconds, when the Overview panel is
+opened, and through the panel refresh button.
+
+**Why**: Overview data aggregates multiple volatile sources: project runtime
+state, terminal pane status, Git status, cc-connect remote project list, and
+notifications. Persisting it would make stale data look authoritative on next
+launch.
+
+**Rules**:
+
+- Build the snapshot through `buildWorkspaceOverviewSnapshot` in
+  `src/utils/workspaceOverview.ts`; UI components should not reimplement
+  cross-project aggregation.
+- Use `refreshWorkspaceOverview` from `src/hooks/useWorkspaceOverview.ts` for
+  manual refreshes so the in-flight guard prevents overlapping Git / cc-connect
+  requests.
+- Git and cc-connect failures should degrade the affected project or summary
+  section, not fail the whole Overview panel.
+- `config.overviewVisible` is the only persisted field for the feature; the
+  actual snapshot remains runtime-only.

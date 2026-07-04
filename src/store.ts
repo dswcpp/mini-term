@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
 import type {
   AppConfig,
@@ -17,6 +16,7 @@ import type {
   AiMarker,
   AiUserSubmitPayload,
   CcConnectStatus,
+  WorkspaceOverviewState,
 } from './types';
 import { restoreSavedProjectLayout } from './utils/layoutRestore';
 import { playNotificationSound } from './utils/notificationSound';
@@ -30,6 +30,8 @@ import {
   migrateToTree,
 } from './utils/projectTree';
 import { clearProjectCache } from './utils/projectDataCache';
+import { saveConfig } from './utils/configApi';
+import { DEFAULT_TERMINAL_ENCODING, normalizeTerminalEncoding } from './utils/terminalEncoding';
 
 // 生成唯一 ID
 let idCounter = 0;
@@ -117,7 +119,14 @@ function updatePaneById(
 // 序列化 SplitNode 树（剥离运行时数据）
 function serializeSplitNode(node: SplitNode): SavedSplitNode {
   if (node.type === 'leaf') {
-    return { type: 'leaf', panes: node.panes.map((p) => ({ shellName: p.shellName })) };
+    return {
+      type: 'leaf',
+      panes: node.panes.map((p) => ({
+        shellName: p.shellName,
+        customTitle: p.customTitle,
+        terminalEncoding: normalizeTerminalEncoding(p.terminalEncoding),
+      })),
+    };
   }
   return {
     type: 'split',
@@ -152,6 +161,27 @@ export function restoreLayout(
 
 // 每个项目的展开目录集合（运行时状态）
 const expandedDirsMap = new Map<string, Set<string>>();
+
+export const EMPTY_WORKSPACE_OVERVIEW: WorkspaceOverviewState = {
+  refreshStatus: 'idle',
+  totals: {
+    projectCount: 0,
+    openTabCount: 0,
+    paneCount: 0,
+    aiWorkingCount: 0,
+    gitChangedProjectCount: 0,
+    gitChangeCount: 0,
+    notificationCount: 0,
+  },
+  projects: [],
+  ccConnect: {
+    running: false,
+    port: 9820,
+    linkedProjectCount: 0,
+    missingLinkCount: 0,
+    remoteListLoaded: false,
+  },
+};
 
 export function initExpandedDirs(projectId: string, dirs: string[]) {
   expandedDirsMap.set(projectId, new Set(dirs));
@@ -192,7 +222,7 @@ function applyExpandedDirsToStore(projectId: string) {
 
 function doSaveExpandedDirs(projectId: string) {
   applyExpandedDirsToStore(projectId);
-  invoke('save_config', { config: useAppStore.getState().config });
+  void saveConfig(useAppStore.getState().config);
 }
 
 function saveExpandedDirsToConfig(projectId: string) {
@@ -232,7 +262,7 @@ function applyLayoutToStore(projectId: string) {
 
 function doSaveLayout(projectId: string) {
   applyLayoutToStore(projectId);
-  invoke('save_config', { config: useAppStore.getState().config });
+  void saveConfig(useAppStore.getState().config);
 }
 
 export function saveLayoutToConfig(projectId: string) {
@@ -282,7 +312,7 @@ export function flushProjectToConfig(projectId: string) {
 
 /** 将当前 store 中的 config 写入磁盘（返回 Promise） */
 export function persistConfig() {
-  return invoke('save_config', { config: useAppStore.getState().config });
+  return saveConfig(useAppStore.getState().config);
 }
 
 function ensureTree(config: AppConfig): AppConfig {
@@ -330,7 +360,7 @@ interface AppStore {
   dismissNotification: (id: string) => void;
 
   // 面板显隐
-  togglePanel: (panel: 'projects' | 'sessions' | 'files' | 'git') => void;
+  togglePanel: (panel: 'overview' | 'projects' | 'sessions' | 'files' | 'git') => void;
 
   // 分组
   createGroup: (name: string, parentGroupId?: string) => void;
@@ -352,6 +382,11 @@ interface AppStore {
   ccDashboardDeepLink: string;
   openCcDashboard: (deepLink?: string) => void;
   closeCcDashboard: () => void;
+
+  // 工作区总览(后台 60s 刷新 + 面板打开即时刷新)
+  workspaceOverview: WorkspaceOverviewState;
+  setWorkspaceOverview: (overview: WorkspaceOverviewState) => void;
+  patchWorkspaceOverview: (patch: Partial<WorkspaceOverviewState>) => void;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -362,6 +397,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
     uiFontSize: 13,
     terminalFontSize: 14,
     terminalLigatures: false,
+    terminalEncoding: DEFAULT_TERMINAL_ENCODING,
+    terminalDepthUi: true,
+    settingsModalSize: undefined,
     theme: 'auto',
     skin: 'none',
     terminalFollowTheme: true,
@@ -377,6 +415,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     sessionsVisible: true,
     filesVisible: true,
     gitVisible: true,
+    overviewVisible: false,
     hookEnabled: false,
     smartCopyPaste: false,
     sshConnections: [],
@@ -397,6 +436,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
   ccDashboardDeepLink: '',
   openCcDashboard: (deepLink) => set({ ccDashboardOpen: true, ccDashboardDeepLink: deepLink ?? '' }),
   closeCcDashboard: () => set({ ccDashboardOpen: false }),
+
+  workspaceOverview: EMPTY_WORKSPACE_OVERVIEW,
+  setWorkspaceOverview: (overview) => set({ workspaceOverview: overview }),
+  patchWorkspaceOverview: (patch) => set((state) => ({
+    workspaceOverview: { ...state.workspaceOverview, ...patch },
+  })),
 
   setActiveProject: (id) =>
     set((state) => {
@@ -742,6 +787,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   togglePanel: (panel) =>
     set((state) => {
       const visibleKeys = {
+        overview: 'overviewVisible',
         projects: 'projectsVisible',
         sessions: 'sessionsVisible',
         files: 'filesVisible',
@@ -749,7 +795,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       } as const;
       const key = visibleKeys[panel];
       const newConfig = { ...state.config, [key]: !state.config[key] };
-      invoke('save_config', { config: newConfig }).catch(() => {});
+      saveConfig(newConfig).catch(() => {});
       return { config: newConfig };
     }),
 

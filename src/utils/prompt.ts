@@ -1,11 +1,49 @@
 import { t } from "../i18n";
 
+interface ConfirmOptions {
+  confirmLabel?: string;
+  cancelLabel?: string;
+}
+
+let promptId = 0;
+const promptStack: HTMLDivElement[] = [];
+
+function configureDialog(dialog: HTMLDivElement, titleEl: HTMLDivElement): void {
+  const titleId = `prompt-title-${++promptId}`;
+  titleEl.id = titleId;
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', titleId);
+}
+
+function restoreFocus(previousFocus: Element | null): void {
+  if (previousFocus instanceof HTMLElement && document.contains(previousFocus)) {
+    previousFocus.focus();
+  }
+}
+
+function mountPromptOverlay(overlay: HTMLDivElement): void {
+  promptStack.push(overlay);
+  document.body.appendChild(overlay);
+}
+
+function unmountPromptOverlay(overlay: HTMLDivElement): void {
+  const idx = promptStack.lastIndexOf(overlay);
+  if (idx >= 0) promptStack.splice(idx, 1);
+  overlay.remove();
+}
+
+function isTopPromptOverlay(overlay: HTMLDivElement): boolean {
+  return promptStack[promptStack.length - 1] === overlay;
+}
+
 /**
  * 自定义 confirm 弹窗，替代 window.confirm
  * 返回 Promise<boolean>
  */
-export function showConfirm(title: string, message: string): Promise<boolean> {
+export function showConfirm(title: string, message: string, options: ConfirmOptions = {}): Promise<boolean> {
   return new Promise((resolve) => {
+    const previousFocus = document.activeElement;
     const overlay = document.createElement('div');
     overlay.className = 'prompt-overlay';
 
@@ -15,6 +53,7 @@ export function showConfirm(title: string, message: string): Promise<boolean> {
     const titleEl = document.createElement('div');
     titleEl.className = 'prompt-title';
     titleEl.textContent = title;
+    configureDialog(dialog, titleEl);
     dialog.appendChild(titleEl);
 
     const msgEl = document.createElement('div');
@@ -27,32 +66,47 @@ export function showConfirm(title: string, message: string): Promise<boolean> {
 
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'prompt-btn prompt-btn-cancel';
-    cancelBtn.textContent = t("prompt.cancel");
+    cancelBtn.textContent = options.cancelLabel ?? t("prompt.cancel");
 
     const confirmBtn = document.createElement('button');
     confirmBtn.className = 'prompt-btn prompt-btn-confirm';
-    confirmBtn.textContent = t("prompt.confirm");
+    confirmBtn.textContent = options.confirmLabel ?? t("prompt.confirm");
 
     buttons.appendChild(cancelBtn);
     buttons.appendChild(confirmBtn);
     dialog.appendChild(buttons);
     overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
+    mountPromptOverlay(overlay);
 
     confirmBtn.focus();
 
+    let settled = false;
+
     const cleanup = (value: boolean) => {
-      overlay.remove();
+      if (settled) return;
+      settled = true;
+      document.removeEventListener('keydown', keydownHandler);
+      unmountPromptOverlay(overlay);
+      restoreFocus(previousFocus);
       resolve(value);
+    };
+
+    const keydownHandler = (e: KeyboardEvent) => {
+      if (!isTopPromptOverlay(overlay)) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        cleanup(true);
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cleanup(false);
+      }
     };
 
     confirmBtn.onclick = () => cleanup(true);
     cancelBtn.onclick = () => cleanup(false);
     overlay.onclick = (e) => { if (e.target === overlay) cleanup(false); };
-    document.addEventListener('keydown', function handler(e) {
-      if (e.key === 'Enter') { cleanup(true); document.removeEventListener('keydown', handler); }
-      if (e.key === 'Escape') { cleanup(false); document.removeEventListener('keydown', handler); }
-    });
+    document.addEventListener('keydown', keydownHandler);
   });
 }
 
@@ -62,6 +116,7 @@ export function showConfirm(title: string, message: string): Promise<boolean> {
  */
 export function showAlert(title: string, message: string): Promise<void> {
   return new Promise((resolve) => {
+    const previousFocus = document.activeElement;
     const overlay = document.createElement('div');
     overlay.className = 'prompt-overlay';
 
@@ -71,6 +126,7 @@ export function showAlert(title: string, message: string): Promise<void> {
     const titleEl = document.createElement('div');
     titleEl.className = 'prompt-title';
     titleEl.textContent = title;
+    configureDialog(dialog, titleEl);
     dialog.appendChild(titleEl);
 
     const msgEl = document.createElement('div');
@@ -88,23 +144,32 @@ export function showAlert(title: string, message: string): Promise<void> {
     buttons.appendChild(okBtn);
     dialog.appendChild(buttons);
     overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
+    mountPromptOverlay(overlay);
 
     okBtn.focus();
 
+    let settled = false;
+
     const cleanup = () => {
-      overlay.remove();
+      if (settled) return;
+      settled = true;
+      document.removeEventListener('keydown', keydownHandler);
+      unmountPromptOverlay(overlay);
+      restoreFocus(previousFocus);
       resolve();
+    };
+
+    const keydownHandler = (e: KeyboardEvent) => {
+      if (!isTopPromptOverlay(overlay)) return;
+      if (e.key === 'Enter' || e.key === 'Escape') {
+        e.preventDefault();
+        cleanup();
+      }
     };
 
     okBtn.onclick = cleanup;
     overlay.onclick = (e) => { if (e.target === overlay) cleanup(); };
-    document.addEventListener('keydown', function handler(e) {
-      if (e.key === 'Enter' || e.key === 'Escape') {
-        cleanup();
-        document.removeEventListener('keydown', handler);
-      }
-    });
+    document.addEventListener('keydown', keydownHandler);
   });
 }
 
@@ -114,6 +179,7 @@ export function showAlert(title: string, message: string): Promise<void> {
  */
 export function showPrompt(title: string, placeholder?: string, defaultValue?: string): Promise<string | null> {
   return new Promise((resolve) => {
+    const previousFocus = document.activeElement;
     // 遮罩层
     const overlay = document.createElement('div');
     overlay.className = 'prompt-overlay';
@@ -126,6 +192,7 @@ export function showPrompt(title: string, placeholder?: string, defaultValue?: s
     const titleEl = document.createElement('div');
     titleEl.className = 'prompt-title';
     titleEl.textContent = title;
+    configureDialog(dialog, titleEl);
     dialog.appendChild(titleEl);
 
     // 输入框
@@ -154,12 +221,17 @@ export function showPrompt(title: string, placeholder?: string, defaultValue?: s
     buttons.appendChild(confirmBtn);
     dialog.appendChild(buttons);
     overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
+    mountPromptOverlay(overlay);
 
     input.focus();
 
+    let settled = false;
+
     const cleanup = (value: string | null) => {
-      overlay.remove();
+      if (settled) return;
+      settled = true;
+      unmountPromptOverlay(overlay);
+      restoreFocus(previousFocus);
       resolve(value);
     };
 
@@ -167,8 +239,15 @@ export function showPrompt(title: string, placeholder?: string, defaultValue?: s
     cancelBtn.onclick = () => cleanup(null);
     overlay.onclick = (e) => { if (e.target === overlay) cleanup(null); };
     input.onkeydown = (e) => {
-      if (e.key === 'Enter') cleanup(input.value || null);
-      if (e.key === 'Escape') cleanup(null);
+      if (!isTopPromptOverlay(overlay)) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        cleanup(input.value || null);
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cleanup(null);
+      }
     };
   });
 }

@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useAppStore, genId } from '../store';
 import { useT } from '../i18n';
+import { saveConfig } from '../utils/configApi';
+import { validateSshConnectionTarget, type SshCommandValidation } from '../utils/sshCommand';
 import type { SshConnection } from '../types';
 
 interface Props {
@@ -15,6 +16,30 @@ const INPUT_CLASS =
 
 function emptyConnection(): SshConnection {
   return { id: '', name: '', host: '', port: 22, user: '' };
+}
+
+function parsePortInput(port: string): number {
+  if (!port.trim()) return 22;
+  const parsed = Number(port);
+  return Number.isInteger(parsed) ? parsed : NaN;
+}
+
+function validationMessage(t: ReturnType<typeof useT>, validation: SshCommandValidation): string | null {
+  if (validation.ok) return null;
+  switch (validation.reason) {
+    case 'missing-user':
+      return t('sshModal.validation.missingUser');
+    case 'missing-host':
+      return t('sshModal.validation.missingHost');
+    case 'invalid-user':
+      return t('sshModal.validation.invalidUser');
+    case 'invalid-host':
+      return t('sshModal.validation.invalidHost');
+    case 'invalid-port':
+      return t('sshModal.validation.invalidPort');
+    default:
+      return t('sshModal.validation.invalidTarget');
+  }
 }
 
 /** user@host:port 摘要（端口为 22 时省略） */
@@ -60,16 +85,22 @@ function SshConnectionForm({
     if (typeof selected === 'string' && selected.trim()) setIdentityFile(selected);
   }, [t]);
 
-  const canSave = !!(name.trim() && host.trim() && user.trim());
+  const parsedPort = parsePortInput(port);
+  const targetValidation = validateSshConnectionTarget({
+    user,
+    host,
+    port: parsedPort,
+  });
+  const targetValidationMessage = validationMessage(t, targetValidation);
+  const canSave = !!(name.trim() && targetValidation.ok);
 
   const handleSave = () => {
     if (!canSave) return;
-    const parsedPort = parseInt(port, 10);
     onSave({
       id: initial.id || genId(),
       name: name.trim(),
       host: host.trim(),
-      port: Number.isFinite(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : 22,
+      port: parsedPort,
       user: user.trim(),
       password: password ? password : undefined,
       identityFile: identityFile.trim() || undefined,
@@ -118,6 +149,9 @@ function SshConnectionForm({
           placeholder={t('sshModal.userPlaceholder')}
         />
       </Field>
+      {targetValidationMessage && (
+        <div className="text-xs text-[var(--color-error)]">{targetValidationMessage}</div>
+      )}
       <Field
         label={t('sshModal.passwordLabel')}
         hint={t('sshModal.passwordHint')}
@@ -232,7 +266,7 @@ export function SshModal({ open, onClose }: Props) {
     async (next: SshConnection[]) => {
       const newConfig = { ...useAppStore.getState().config, sshConnections: next };
       setConfig(newConfig);
-      await invoke('save_config', { config: newConfig });
+      await saveConfig(newConfig);
     },
     [setConfig],
   );
@@ -340,6 +374,9 @@ export function SshModal({ open, onClose }: Props) {
 
           <div className="pt-1 text-sm text-[var(--text-muted)]">
             {t('sshModal.footerHint')}
+          </div>
+          <div className="text-xs text-[var(--text-muted)] leading-5">
+            {t('sshModal.sftpHint')}
           </div>
         </div>
       </div>
