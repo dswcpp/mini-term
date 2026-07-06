@@ -1,14 +1,9 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
-import { openUrl } from '@tauri-apps/plugin-opener';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeRaw from 'rehype-raw';
 import type { FileContentResult } from '../types';
-import { openExternalUrl } from '../utils/externalLink';
 import { useT } from '../i18n';
+import { MarkdownPreview } from './MarkdownPreview';
 
 interface FileViewerModalProps {
   open: boolean;
@@ -29,62 +24,6 @@ function isImageFile(path: string) {
 function isHtmlFile(path: string) {
   return /\.html?$/i.test(path);
 }
-
-/** 把 Markdown 里的相对/绝对本地链接解析成规范化的绝对路径（正斜杠、去掉 ./ 与 ..） */
-function resolveLocalHref(currentFile: string, href: string): string | null {
-  let raw = href.split('#')[0].split('?')[0].trim();
-  if (!raw) return null;
-  try { raw = decodeURI(raw); } catch { /* 保留原值 */ }
-  raw = raw.replace(/\\/g, '/');
-  const curr = currentFile.replace(/\\/g, '/');
-  const dir = curr.slice(0, curr.lastIndexOf('/'));
-  const isWinAbs = /^[a-zA-Z]:\//.test(raw);
-  const isPosixAbs = raw.startsWith('/');
-  const base = isWinAbs || isPosixAbs ? raw : `${dir}/${raw}`;
-  const out: string[] = [];
-  for (const seg of base.split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') { out.pop(); continue; }
-    out.push(seg);
-  }
-  if (isPosixAbs && !/^[a-zA-Z]:$/.test(out[0] ?? '')) return '/' + out.join('/');
-  return out.join('/');
-}
-
-/** 提取 React 子节点的纯文本（用于给标题生成锚点 id） */
-function nodeText(node: ReactNode): string {
-  if (node == null || node === false || node === true) return '';
-  if (typeof node === 'string' || typeof node === 'number') return String(node);
-  if (Array.isArray(node)) return node.map(nodeText).join('');
-  if (typeof node === 'object' && 'props' in node) {
-    return nodeText((node as { props?: { children?: ReactNode } }).props?.children);
-  }
-  return '';
-}
-
-/** GitHub 风格 slug：小写、空格转连字符、保留中文与字母数字 */
-function slugify(text: string): string {
-  return text
-    .trim()
-    .toLowerCase()
-    .replace(/[^\w一-龥\s-]/g, '')
-    .replace(/\s+/g, '-');
-}
-
-/** 给标题加上锚点 id，使文档内 [文字](#标题) 链接可以滚动定位 */
-function makeHeading(Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') {
-  return function Heading({ node: _node, children, ...props }: { node?: unknown; children?: ReactNode }) {
-    return <Tag id={slugify(nodeText(children))} {...props}>{children}</Tag>;
-  };
-}
-const headingComponents = {
-  h1: makeHeading('h1'),
-  h2: makeHeading('h2'),
-  h3: makeHeading('h3'),
-  h4: makeHeading('h4'),
-  h5: makeHeading('h5'),
-  h6: makeHeading('h6'),
-};
 
 export function FileViewerModal({ open, onClose, filePath, projectRoot, highlightLine }: FileViewerModalProps) {
   const t = useT();
@@ -112,13 +51,6 @@ export function FileViewerModal({ open, onClose, filePath, projectRoot, highligh
     );
   }, [isHtml, result?.content, currentPath]);
 
-  const resolveImgSrc = useCallback((src: string | undefined) => {
-    if (!src || /^(https?:|data:|blob:)/i.test(src)) return src;
-    const normalized = currentPath.replace(/\\/g, '/');
-    const fileDir = normalized.substring(0, normalized.lastIndexOf('/'));
-    return convertFileSrc(fileDir + '/' + src);
-  }, [currentPath]);
-
   // 跳转到链接目标文件，记录历史以支持返回
   // 用两次独立 setState（而非在 updater 里嵌套 setState），避免 StrictMode 下
   // updater 被二次调用导致 history 重复入栈。
@@ -133,34 +65,6 @@ export function FileViewerModal({ open, onClose, filePath, projectRoot, highligh
     setCurrentPath(history[history.length - 1]);
     setHistory((h) => h.slice(0, -1));
   }, [history]);
-
-  // 拦截 Markdown 内的 <a> 点击：先 preventDefault 避免整个程序重载
-  const handleLinkClick = useCallback((e: ReactMouseEvent<HTMLAnchorElement>) => {
-    e.preventDefault();
-    const href = e.currentTarget.getAttribute('href');
-    if (!href) return;
-    // http(s) 外链：弹确认后系统浏览器打开
-    if (/^https?:\/\//i.test(href)) {
-      void openExternalUrl(href);
-      return;
-    }
-    // 文档内锚点：在当前预览里滚动到对应标题
-    if (href.startsWith('#')) {
-      let id = href.slice(1);
-      try { id = decodeURIComponent(id); } catch { /* 保留原值 */ }
-      const el = contentRef.current?.querySelector(`[id="${CSS.escape(id)}"]`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      return;
-    }
-    // mailto:/tel: 等非 http 协议（排除 Windows 盘符 X:\ 形式）：交给系统处理
-    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href) && !/^[a-zA-Z]:[\\/]/.test(href)) {
-      openUrl(href).catch((err) => console.error('打开链接失败:', err));
-      return;
-    }
-    // 本地文件链接：解析为绝对路径后在预览内打开
-    const target = resolveLocalHref(currentPath, href);
-    if (target) navigateTo(target);
-  }, [currentPath, navigateTo]);
 
   // 非图片文件时读取文本内容
   useEffect(() => {
@@ -309,23 +213,12 @@ export function FileViewerModal({ open, onClose, filePath, projectRoot, highligh
               sandbox="allow-same-origin"
             />
           ) : !isImg && result && !result.isBinary && !result.tooLarge && isMd && preview ? (
-            <div className="md-preview p-6 max-w-[860px] mx-auto">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                rehypePlugins={[rehypeRaw]}
-                components={{
-                  ...headingComponents,
-                  img: ({ src, alt, ...props }) => (
-                    <img src={resolveImgSrc(src)} alt={alt ?? ''} {...props} />
-                  ),
-                  a: ({ href, children, ...props }) => (
-                    <a href={href} onClick={handleLinkClick} {...props}>{children}</a>
-                  ),
-                }}
-              >
-                {result.content}
-              </ReactMarkdown>
-            </div>
+            <MarkdownPreview
+              content={result.content}
+              currentPath={currentPath}
+              onNavigateLocal={navigateTo}
+              contentRef={contentRef}
+            />
           ) : !isImg && result && !result.isBinary && !result.tooLarge && (
             <div className="font-mono text-sm leading-6">
               {result.content.split('\n').map((line, i) => (

@@ -12,7 +12,9 @@ mod pty;
 mod search;
 mod ssh;
 mod ssh_mcp_registry;
+mod svn;
 mod terminal_log;
+mod vcs;
 mod window_theme;
 mod wsl_distros;
 
@@ -157,6 +159,7 @@ pub fn run() {
             fs::create_directory,
             fs::read_file_content,
             fs::rename_entry,
+            fs::move_entry,
             fs::delete_entry,
             fs::filter_directories,
             ai_sessions::get_ai_sessions,
@@ -165,15 +168,15 @@ pub fn run() {
             wsl_distros::list_wsl_distros,
             git::get_git_status,
             git::get_git_diff,
-            git::discover_vcs_repos,
-            git::get_vcs_status,
-            git::get_vcs_changes_status,
-            git::get_vcs_diff,
-            git::vcs_commit,
-            git::vcs_stage,
-            git::vcs_stage_all,
-            git::vcs_update,
-            git::vcs_discard_file,
+            vcs::discover_vcs_repos,
+            vcs::get_vcs_status,
+            vcs::get_vcs_changes_status,
+            vcs::get_vcs_diff,
+            vcs::vcs_commit,
+            vcs::vcs_stage,
+            vcs::vcs_stage_all,
+            vcs::vcs_update,
+            vcs::vcs_discard_file,
             git::discover_git_repos,
             git::get_git_log,
             git::get_repo_branches,

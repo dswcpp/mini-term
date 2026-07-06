@@ -11,7 +11,7 @@ commands.
 
 ### 2. Signatures
 
-Backend commands exposed by `src-tauri/src/git.rs`:
+Backend commands exposed by `src-tauri/src/vcs.rs`:
 
 ```rust
 discover_vcs_repos(project_path: String) -> Result<Vec<VcsRepoInfo>, String>
@@ -40,6 +40,13 @@ export interface VcsRepoInfo {
 ### 3. Contracts
 
 - `VcsKind` is serialized as camelCase enum variants: `git` / `svn`.
+- Backend code is split by responsibility:
+  - `src-tauri/src/git.rs`: Git-only discovery, status, diff, staging,
+    history, commit, pull, and push.
+  - `src-tauri/src/svn.rs`: SVN CLI execution, working-copy discovery,
+    status parsing, diff, add/delete scheduling, and revert support.
+  - `src-tauri/src/vcs.rs`: shared VCS data types, common diff helpers,
+    discovery constants, process helpers, and `vcs_*` compatibility commands.
 - Git keeps the existing libgit2-backed behavior, including staging, unstaging,
   history, branch labels, pull, and push.
 - SVN support is CLI-backed through `svn.exe` / `svn` on `PATH`.

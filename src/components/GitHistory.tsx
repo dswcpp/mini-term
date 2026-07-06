@@ -80,6 +80,14 @@ export function GitHistory() {
 
   const selectedRepoInfo = repos.find((r) => r.path === selectedRepo);
   const gitRepos = repos.filter((repo) => repo.vcsKind === 'git');
+  const hasGitRepos = gitRepos.length > 0;
+  const hasSvnRepos = repos.some((repo) => repo.vcsKind === 'svn');
+
+  useEffect(() => {
+    if (activeTab === 'history' && !hasGitRepos && hasSvnRepos) {
+      setActiveTab('changes');
+    }
+  }, [activeTab, hasGitRepos, hasSvnRepos]);
 
   if (!project) {
     return (

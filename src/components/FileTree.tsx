@@ -12,7 +12,7 @@ import { getVcsStatus } from '../utils/vcsApi';
 import { saveConfig } from '../utils/configApi';
 import { DiffModal } from './DiffModal';
 import { FileViewerModal } from './FileViewerModal';
-import { initFileDrag } from '../utils/fileDragState';
+import { getFileDragPath, initFileDrag, isFileDragging } from '../utils/fileDragState';
 import { getFileTreeCache, setFileTreeCache } from '../utils/projectDataCache';
 import { useT } from '../i18n';
 import type { FileEntry, FsChangePayload, GitFileStatus, PtyOutputPayload } from '../types';
@@ -26,6 +26,8 @@ interface TreeNodeProps {
   onViewFile: (path: string) => void;
 }
 
+const MOVE_AUTO_EXPAND_DELAY_MS = 650;
+
 function getRelativePath(targetPath: string, rootPath: string) {
   const normalize = (value: string) => value.replace(/[\\/]+/g, '/').replace(/\/$/, '');
   const normalizedRoot = normalize(rootPath);
@@ -38,6 +40,30 @@ function getRelativePath(targetPath: string, rootPath: string) {
   return normalizedTarget.slice(normalizedRoot.length + 1).replace(/\//g, sep);
 }
 
+function normalizeTreePath(value: string): string {
+  return value.replace(/[\\/]+/g, '/').replace(/\/+$/, '');
+}
+
+function parentTreePath(value: string): string {
+  const normalized = normalizeTreePath(value);
+  const index = normalized.lastIndexOf('/');
+  return index <= 0 ? '' : normalized.slice(0, index);
+}
+
+function canMoveToDirectory(sourcePath: string, targetDir: string): boolean {
+  const source = normalizeTreePath(sourcePath);
+  const target = normalizeTreePath(targetDir);
+  if (!source || !target) return false;
+  if (source === target) return false;
+  if (parentTreePath(source) === target) return false;
+  if (target.startsWith(`${source}/`)) return false;
+  return true;
+}
+
+function dispatchFileTreeRefresh(): void {
+  window.dispatchEvent(new CustomEvent('file-tree-refresh'));
+}
+
 function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewFile }: TreeNodeProps) {
   const t = useT();
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -45,6 +71,8 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     activeProjectId ? isExpanded(activeProjectId, entry.path) : false
   );
   const [children, setChildren] = useState<FileEntry[]>([]);
+  const [moveDropActive, setMoveDropActive] = useState(false);
+  const autoExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadChildren = useCallback(async () => {
     const entries = await invoke<FileEntry[]>('list_directory', {
@@ -53,6 +81,13 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     });
     setChildren(entries);
   }, [entry.path, projectRoot]);
+
+  const clearAutoExpandTimer = useCallback(() => {
+    if (autoExpandTimerRef.current) {
+      clearTimeout(autoExpandTimerRef.current);
+      autoExpandTimerRef.current = null;
+    }
+  }, []);
 
   // 恢复时(初始即展开)加载一次子节点
   useEffect(() => {
@@ -71,6 +106,10 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
       invoke('unwatch_directory', { path: entry.path }).catch(() => {});
     };
   }, [expanded, entry.isDir, entry.path, projectRoot]);
+
+  useEffect(() => {
+    return () => clearAutoExpandTimer();
+  }, [clearAutoExpandTimer]);
 
   const handleToggle = useCallback(async () => {
     if (!entry.isDir) {
@@ -95,13 +134,66 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     }
   }, [expanded, entry.path, loadChildren]));
 
+  useEffect(() => {
+    const handler = () => {
+      if (expanded) loadChildren();
+    };
+    window.addEventListener('file-tree-refresh', handler);
+    return () => window.removeEventListener('file-tree-refresh', handler);
+  }, [expanded, loadChildren]);
+
+  const handleMoveHover = useCallback(() => {
+    const sourcePath = getFileDragPath();
+    const canDrop = !!sourcePath && entry.isDir && canMoveToDirectory(sourcePath, entry.path);
+    if (isFileDragging() && canDrop) {
+      if (!moveDropActive) setMoveDropActive(true);
+      if (!expanded && !autoExpandTimerRef.current) {
+        autoExpandTimerRef.current = setTimeout(() => {
+          autoExpandTimerRef.current = null;
+          void loadChildren().then(() => {
+            setExpanded(true);
+            if (activeProjectId) {
+              toggleExpandedDir(activeProjectId, entry.path, true);
+            }
+          });
+        }, MOVE_AUTO_EXPAND_DELAY_MS);
+      }
+    } else if (moveDropActive) {
+      setMoveDropActive(false);
+      clearAutoExpandTimer();
+    }
+  }, [activeProjectId, clearAutoExpandTimer, entry.isDir, entry.path, expanded, loadChildren, moveDropActive]);
+
+  const handleMoveLeave = useCallback(() => {
+    if (moveDropActive) setMoveDropActive(false);
+    clearAutoExpandTimer();
+  }, [clearAutoExpandTimer, moveDropActive]);
+
+  const handleMoveDrop = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    const sourcePath = getFileDragPath();
+    if (sourcePath) e.stopPropagation();
+    clearAutoExpandTimer();
+    setMoveDropActive(false);
+    if (!sourcePath || !entry.isDir || !canMoveToDirectory(sourcePath, entry.path)) return;
+
+    try {
+      await invoke('move_entry', { projectRoot, sourcePath, targetDir: entry.path });
+      dispatchFileTreeRefresh();
+    } catch (err) {
+      await showAlert(
+        t('fileTree.dialog.moveFailedTitle'),
+        t('fileTree.dialog.moveFailedMessage', { error: String(err) }),
+      );
+    }
+  }, [clearAutoExpandTimer, entry.isDir, entry.path, projectRoot, t]);
+
   return (
     <div>
       <div
         data-file-item
         className={`flex items-center gap-1 py-[3px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 ${
           entry.ignored ? 'text-[var(--text-muted)] opacity-50' : entry.isDir ? 'text-[var(--color-folder)]' : 'text-[var(--color-file)]'
-        }`}
+        } ${moveDropActive ? 'bg-[var(--accent-subtle)] outline outline-1 outline-[var(--accent)]' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={handleToggle}
         onContextMenu={(e) => {
@@ -210,6 +302,9 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
         onMouseDown={(e) => {
           if (e.button === 0) initFileDrag(entry.path, e.clientX, e.clientY);
         }}
+        onMouseMove={handleMoveHover}
+        onMouseLeave={handleMoveLeave}
+        onMouseUp={handleMoveDrop}
       >
         {entry.isDir && (
           <span className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
@@ -323,6 +418,7 @@ export function FileTree() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [diffTarget, setDiffTarget] = useState<GitFileStatus | null>(null);
   const [viewFilePath, setViewFilePath] = useState<string | null>(null);
+  const [rootMoveDropActive, setRootMoveDropActive] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rootEntriesRef = useRef(rootEntries);
   rootEntriesRef.current = rootEntries;
@@ -437,6 +533,15 @@ export function FileTree() {
     }
   }, [project?.path, loadRootEntries]));
 
+  useEffect(() => {
+    const handler = () => {
+      loadRootEntries();
+      loadGitStatus();
+    };
+    window.addEventListener('file-tree-refresh', handler);
+    return () => window.removeEventListener('file-tree-refresh', handler);
+  }, [loadRootEntries, loadGitStatus]);
+
   useTauriEvent<FsChangePayload>('fs-change', useCallback((payload: FsChangePayload) => {
     if (project && payload.projectPath === project.path) {
       debouncedRefresh();
@@ -458,6 +563,41 @@ export function FileTree() {
   const handleViewFile = useCallback((path: string) => {
     setViewFilePath(path);
   }, []);
+
+  const isRootDropSurface = useCallback((target: EventTarget | null) => {
+    return target instanceof Element && !target.closest('[data-file-item]');
+  }, []);
+
+  const handleRootMoveHover = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const sourcePath = getFileDragPath();
+    const canDrop = !!project && !!sourcePath && isRootDropSurface(e.target) && canMoveToDirectory(sourcePath, project.path);
+    if (isFileDragging() && canDrop) {
+      if (!rootMoveDropActive) setRootMoveDropActive(true);
+    } else if (rootMoveDropActive) {
+      setRootMoveDropActive(false);
+    }
+  }, [isRootDropSurface, project?.path, rootMoveDropActive]);
+
+  const handleRootMoveLeave = useCallback(() => {
+    if (rootMoveDropActive) setRootMoveDropActive(false);
+  }, [rootMoveDropActive]);
+
+  const handleRootMoveDrop = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!project || !isRootDropSurface(e.target)) return;
+    const sourcePath = getFileDragPath();
+    setRootMoveDropActive(false);
+    if (!sourcePath || !canMoveToDirectory(sourcePath, project.path)) return;
+
+    try {
+      await invoke('move_entry', { projectRoot: project.path, sourcePath, targetDir: project.path });
+      dispatchFileTreeRefresh();
+    } catch (err) {
+      await showAlert(
+        t('fileTree.dialog.moveFailedTitle'),
+        t('fileTree.dialog.moveFailedMessage', { error: String(err) }),
+      );
+    }
+  }, [isRootDropSurface, project?.path, t]);
 
   const handleRootContextMenu = useCallback((e: React.MouseEvent) => {
     if (!project) return;
@@ -552,7 +692,15 @@ export function FileTree() {
           )}
         </div>
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto px-1" onContextMenu={handleRootContextMenu}>
+      <div
+        className={`flex-1 min-h-0 overflow-y-auto px-1 transition-colors ${
+          rootMoveDropActive ? 'bg-[var(--accent-subtle)] outline outline-1 outline-[var(--accent)] outline-offset-[-2px]' : ''
+        }`}
+        onContextMenu={handleRootContextMenu}
+        onMouseMove={handleRootMoveHover}
+        onMouseLeave={handleRootMoveLeave}
+        onMouseUp={handleRootMoveDrop}
+      >
         {loading && rootEntries.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-[var(--text-muted)] text-sm">
             {t('fileTree.empty.loading')}

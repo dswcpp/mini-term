@@ -1,4 +1,6 @@
-use encoding_rs::{CoderResult, Decoder, Encoding, BIG5, EUC_KR, GB18030, GBK, SHIFT_JIS, UTF_8, WINDOWS_1252};
+use encoding_rs::{
+    CoderResult, Decoder, Encoding, BIG5, EUC_KR, GB18030, GBK, SHIFT_JIS, UTF_8, WINDOWS_1252,
+};
 use mt_core::{parse_wsl_unc, scan_ssh_prompt, strip_ansi_codes, SshPromptScan};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -1167,10 +1169,22 @@ mod tests {
     #[test]
     fn terminal_encoding_label_aliases_normalize() {
         assert_eq!(TerminalEncoding::from_label(None), TerminalEncoding::Auto);
-        assert_eq!(TerminalEncoding::from_label(Some("UTF8")), TerminalEncoding::Utf8);
-        assert_eq!(TerminalEncoding::from_label(Some("gb2312")), TerminalEncoding::Gbk);
-        assert_eq!(TerminalEncoding::from_label(Some("cp932")), TerminalEncoding::ShiftJis);
-        assert_eq!(TerminalEncoding::from_label(Some("unknown")), TerminalEncoding::Auto);
+        assert_eq!(
+            TerminalEncoding::from_label(Some("UTF8")),
+            TerminalEncoding::Utf8
+        );
+        assert_eq!(
+            TerminalEncoding::from_label(Some("gb2312")),
+            TerminalEncoding::Gbk
+        );
+        assert_eq!(
+            TerminalEncoding::from_label(Some("cp932")),
+            TerminalEncoding::ShiftJis
+        );
+        assert_eq!(
+            TerminalEncoding::from_label(Some("unknown")),
+            TerminalEncoding::Auto
+        );
     }
 
     #[test]
