@@ -29,7 +29,7 @@ import {
   removeProjectFromTree,
   migrateToTree,
 } from './utils/projectTree';
-import { clearProjectCache } from './utils/projectDataCache';
+import { clearProjectCache, projectCacheKey } from './utils/projectDataCache';
 import { saveConfig } from './utils/configApi';
 import { DEFAULT_TERMINAL_ENCODING, normalizeTerminalEncoding } from './utils/terminalEncoding';
 
@@ -347,6 +347,14 @@ interface AppStore {
   setPanePty: (projectId: string, paneId: string, ptyId: number) => void;
   updatePaneStatusByPaneId: (projectId: string, paneId: string, status: PaneStatus) => void;
 
+  // 已退出的 PTY 集合（pty-exit 事件登记）。远程 pane 据此显示「连接已断开,点击重连」
+  // 覆盖层（远程 ssh 进程退出后 pane 不自动关闭,用户主动 exit 与异常断线不做区分）。
+  exitedPtyIds: Set<number>;
+  markPtyExited: (ptyId: number) => void;
+  clearPtyExited: (ptyId: number) => void;
+  /** 重连:清掉 pane 的 ptyId 并复位状态,PaneGroup 的懒创建 effect 会重新 create_pty */
+  resetPaneForReconnect: (projectId: string, paneId: string) => void;
+
   // AI 任务分段 marker
   markersByPty: Map<number, AiMarker[]>;
   addMarker: (payload: AiUserSubmitPayload, xtermMarkerId: number) => string;
@@ -361,6 +369,13 @@ interface AppStore {
 
   // 面板显隐
   togglePanel: (panel: 'overview' | 'projects' | 'sessions' | 'files' | 'git') => void;
+  /** 折叠/展开中间栏（Projects + Files），持久化到 config */
+  toggleMiddleColumn: () => void;
+
+  // 右侧悬浮抽屉（Sessions / Git）——运行时态,互斥单抽屉,不持久化开合(每次启动收起)
+  rightDrawer: 'sessions' | 'git' | null;
+  toggleRightDrawer: (panel: 'sessions' | 'git') => void;
+  closeRightDrawer: () => void;
 
   // 分组
   createGroup: (name: string, parentGroupId?: string) => void;
@@ -416,6 +431,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     filesVisible: true,
     gitVisible: true,
     overviewVisible: false,
+    middleColumnVisible: true,
     hookEnabled: false,
     smartCopyPaste: false,
     sshConnections: [],
@@ -428,6 +444,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   markersByPty: new Map(),
   searchModalOpen: false,
   setSearchModalOpen: (open) => set({ searchModalOpen: open }),
+
+  rightDrawer: null,
 
   ccConnectStatus: null,
   setCcConnectStatus: (status) => set({ ccConnectStatus: status }),
@@ -476,7 +494,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // 非纯状态副作用:清理运行时 Map / timer(不参与 zustand 状态)
       const removingProject = state.config.projects.find((p) => p.id === id);
       if (removingProject) {
-        clearProjectCache(removingProject.path);
+        // key 口径与 FileTree 一致:远程项目掺连接 id(见 projectCacheKey)
+        clearProjectCache(projectCacheKey(removingProject));
       }
       expandedDirsMap.delete(id);
       const timer = saveExpandedTimers.get(id);
@@ -699,6 +718,65 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return { projectStates: newStates };
     }),
 
+  exitedPtyIds: new Set<number>(),
+
+  markPtyExited: (ptyId) =>
+    set((state) => {
+      // 只登记仍被某个 pane 持有的 ptyId,并顺手清掉已不属于任何 pane 的旧登记:
+      // - pane 关闭后才到达的 pty-exit(kill_pty 触发)不登记,防 Set 无界增长;
+      // - 重连后旧 pty 的迟到 pty-exit 也因 pane 已换新 ptyId 而被拒,消除竞态残留。
+      const live = new Set<number>();
+      state.projectStates.forEach((ps) => {
+        for (const tab of ps.tabs) {
+          for (const id of collectPtyIds(tab.splitLayout)) live.add(id);
+        }
+      });
+      const next = new Set<number>();
+      state.exitedPtyIds.forEach((id) => {
+        if (live.has(id)) next.add(id);
+      });
+      if (live.has(ptyId)) next.add(ptyId);
+      // 集合内容未变则不触发订阅更新
+      if (next.size === state.exitedPtyIds.size) {
+        let same = true;
+        next.forEach((id) => {
+          if (!state.exitedPtyIds.has(id)) same = false;
+        });
+        if (same) return state;
+      }
+      return { exitedPtyIds: next };
+    }),
+
+  clearPtyExited: (ptyId) =>
+    set((state) => {
+      if (!state.exitedPtyIds.has(ptyId)) return state;
+      const next = new Set(state.exitedPtyIds);
+      next.delete(ptyId);
+      return { exitedPtyIds: next };
+    }),
+
+  resetPaneForReconnect: (projectId, paneId) =>
+    set((state) => {
+      const ps = state.projectStates.get(projectId);
+      if (!ps) return state;
+
+      let changed = false;
+      const tabs = ps.tabs.map((tab) => {
+        const splitLayout = updatePaneById(tab.splitLayout, paneId, (pane) => {
+          if (pane.ptyId === undefined && pane.status === 'idle') return pane;
+          return { ...pane, ptyId: undefined, status: 'idle' };
+        });
+        if (splitLayout === tab.splitLayout) return tab;
+        changed = true;
+        return { ...tab, splitLayout, status: getHighestStatus(splitLayout) };
+      });
+      if (!changed) return state;
+
+      const newStates = new Map(state.projectStates);
+      newStates.set(projectId, { ...ps, tabs });
+      return { projectStates: newStates };
+    }),
+
   updatePaneStatusByPaneId: (projectId, paneId, status) =>
     set((state) => {
       const ps = state.projectStates.get(projectId);
@@ -798,6 +876,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       saveConfig(newConfig).catch(() => {});
       return { config: newConfig };
     }),
+
+  toggleMiddleColumn: () =>
+    set((state) => {
+      const newConfig = { ...state.config, middleColumnVisible: !state.config.middleColumnVisible };
+      saveConfig(newConfig).catch(() => {});
+      return { config: newConfig };
+    }),
+
+  toggleRightDrawer: (panel) =>
+    set((state) => ({ rightDrawer: state.rightDrawer === panel ? null : panel })),
+
+  closeRightDrawer: () => set({ rightDrawer: null }),
 
   createGroup: (name, parentGroupId) =>
     set((state) => {

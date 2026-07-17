@@ -27,6 +27,8 @@ export const paneGroup = {
     noShellConfigured: "当前没有可用 Shell，请先到设置中配置 Shell。",
     retry: "重试",
     starting: "正在启动终端...",
+    remoteDisconnected: "连接已断开",
+    reconnect: "点击重连",
   },
   en: {
     closeAiTitle: "Close AI Session",
@@ -56,5 +58,7 @@ export const paneGroup = {
     noShellConfigured: "No shell is configured. Configure a shell in Settings first.",
     retry: "Retry",
     starting: "Starting terminal...",
+    remoteDisconnected: "Connection lost",
+    reconnect: "Click to reconnect",
   },
 } as const;

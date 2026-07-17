@@ -8,8 +8,8 @@ import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
 import { OverviewPanel } from './components/OverviewPanel';
 import { FileTree } from './components/FileTree';
-import { GitHistory } from './components/GitHistory';
 import { ActivityBar } from './components/ActivityBar';
+import { RightDrawer } from './components/RightDrawer';
 import { SettingsModal, type SettingsPage } from './components/SettingsModal';
 import { SshModal } from './components/SshModal';
 import { SearchModal } from './components/SearchModal';
@@ -173,12 +173,14 @@ export function App() {
     return () => window.removeEventListener('scroll', onScroll, true);
   }, []);
 
-  // Ctrl+Shift+F 打开/关闭搜索弹窗
+  // Ctrl+Shift+F 打开/关闭搜索弹窗(内容搜索是本地 ripgrep 链路,SSH 远程项目不支持)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
         e.preventDefault();
-        const { searchModalOpen: isOpen, setSearchModalOpen: setOpen } = useAppStore.getState();
+        const { searchModalOpen: isOpen, setSearchModalOpen: setOpen, config: cfg, activeProjectId: pid } = useAppStore.getState();
+        const activeProject = cfg.projects.find((p) => p.id === pid);
+        if (!isOpen && activeProject?.sshConnectionId) return; // 远程项目:不打开
         setOpen(!isOpen);
       }
     };
@@ -214,6 +216,9 @@ export function App() {
   }, [updatePaneStatusByPty]));
 
   useTauriEvent<PtyExitPayload>('pty-exit', useCallback((payload) => {
+    // 登记已退出的 PTY:远程项目 pane 据此叠加「连接已断开,点击重连」覆盖层
+    // (不区分用户主动 exit 与异常断线);本地 pane 不消费该集合,登记无副作用。
+    useAppStore.getState().markPtyExited(payload.ptyId);
     if (payload.exitCode !== 0) {
       updatePaneStatusByPty(payload.ptyId, 'error');
     }
@@ -276,9 +281,6 @@ export function App() {
     );
   }, [activeProjectId, config.projects]);
 
-  // 派生：左栏/中栏是否可见
-  const leftColumnVisible = config.overviewVisible || config.projectsVisible || config.sessionsVisible;
-  const middleColumnVisible = config.filesVisible || config.gitVisible;
   const terminalProjectIds = includeActiveProject(mountedProjectIds, activeProjectId);
 
   // 防抖保存布局尺寸
@@ -304,6 +306,14 @@ export function App() {
     }, 500);
   }, [setConfig]);
 
+  // 右侧抽屉宽度：拖拽结束时持久化一次
+  const persistRightDrawerWidth = useCallback((width: number) => {
+    const cfg = useAppStore.getState().config;
+    const newConfig = { ...cfg, rightDrawerWidth: width };
+    setConfig(newConfig);
+    void saveConfig(newConfig);
+  }, [setConfig]);
+
   const handleMinimizeWindow = useCallback(() => {
     void getCurrentWindow().minimize().catch(() => {});
   }, []);
@@ -318,7 +328,8 @@ export function App() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-4 pl-4 pr-0 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
+      <div
+        className="flex items-center gap-4 pl-4 pr-0 py-2 bg-[var(--bg-elevated)] border-b border-[var(--border-subtle)] text-xs select-none"
         onMouseDown={(e) => {
           // 用 Tauri API 拖拽替代 -webkit-app-region: drag，
           // 避免 WebView2 内部拖拽模态循环导致外部截图工具触发输入锁定
@@ -329,7 +340,8 @@ export function App() {
             return;
           }
           void getCurrentWindow().startDragging().catch(() => {});
-        }}>
+        }}
+      >
         <span className="font-semibold tracking-wide text-[var(--accent)] text-sm" style={{ fontFamily: "'DM Sans', sans-serif", letterSpacing: '0.05em' }}>
           MINI-TERM
         </span>
@@ -379,7 +391,6 @@ export function App() {
       </div>
 
       <div className="flex-1 overflow-hidden flex">
-        {/* Activity Bar — 常驻最左侧 */}
         {configLoaded && (
           <ActivityBar
             settingsActive={configOpen}
@@ -391,66 +402,64 @@ export function App() {
           />
         )}
 
-        {/* 主内容区域 — Allotment 可拖拽 */}
-        {configLoaded ? <Allotment
-          defaultSizes={config.layoutSizes ?? [200, 280, 1000]}
-          onChange={saveLayoutSizes}
-        >
-          {/* 左栏：Overview + Projects + Sessions */}
-          <Allotment.Pane minSize={180} maxSize={440} visible={leftColumnVisible}>
-            <Allotment vertical defaultSizes={[220, 360]}>
-              <Allotment.Pane minSize={150} visible={config.overviewVisible}>
-                <OverviewPanel />
-              </Allotment.Pane>
-              <Allotment.Pane minSize={120} visible={config.projectsVisible || config.sessionsVisible}>
-                <ProjectList />
-              </Allotment.Pane>
-            </Allotment>
-          </Allotment.Pane>
-
-          {/* 中栏：FileTree + Git */}
-          <Allotment.Pane minSize={100} visible={middleColumnVisible}>
+        {configLoaded ? (
+          <div className="relative flex-1 overflow-hidden">
             <Allotment
-              vertical
-              defaultSizes={config.middleColumnSizes ?? [300, 200]}
-              onChange={saveMiddleColumnSizes}
+              defaultSizes={config.layoutSizes?.length === 2 ? config.layoutSizes : [520, 1000]}
+              onChange={saveLayoutSizes}
             >
-              <Allotment.Pane minSize={150} visible={config.filesVisible}>
-                <FileTree />
+              <Allotment.Pane minSize={180} maxSize={600} visible={config.middleColumnVisible}>
+                <Allotment vertical defaultSizes={config.overviewVisible ? [220, 700] : undefined}>
+                  <Allotment.Pane minSize={150} visible={config.overviewVisible}>
+                    <OverviewPanel />
+                  </Allotment.Pane>
+                  <Allotment.Pane minSize={220}>
+                    <Allotment
+                      vertical
+                      defaultSizes={config.middleColumnSizes?.length === 2 ? config.middleColumnSizes : [320, 380]}
+                      onChange={saveMiddleColumnSizes}
+                    >
+                      <Allotment.Pane minSize={100}>
+                        <ProjectList />
+                      </Allotment.Pane>
+                      <Allotment.Pane minSize={120}>
+                        <FileTree />
+                      </Allotment.Pane>
+                    </Allotment>
+                  </Allotment.Pane>
+                </Allotment>
               </Allotment.Pane>
-              <Allotment.Pane minSize={36} visible={config.gitVisible}>
-                <GitHistory />
+
+              <Allotment.Pane>
+                <div className="relative h-full">
+                  {terminalProjectIds.map((projectId) => {
+                    const project = config.projects.find((p) => p.id === projectId);
+                    if (!project) return null;
+                    return (
+                      <div
+                        key={project.id}
+                        className="absolute inset-0"
+                        style={{ display: project.id === activeProjectId ? 'block' : 'none' }}
+                      >
+                        <TerminalArea projectId={project.id} projectPath={project.path} />
+                      </div>
+                    );
+                  })}
+                  {config.projects.length === 0 && (
+                    <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
+                      {t('app.emptyState')}
+                    </div>
+                  )}
+                </div>
               </Allotment.Pane>
             </Allotment>
-          </Allotment.Pane>
 
-          {/* 右栏：Terminal */}
-          <Allotment.Pane>
-            <div className="relative h-full">
-              {terminalProjectIds.map((projectId) => {
-                const project = config.projects.find((p) => p.id === projectId);
-                if (!project) return null;
-                return (
-                  <div
-                    key={project.id}
-                    className="absolute inset-0"
-                    style={{ display: project.id === activeProjectId ? 'block' : 'none' }}
-                  >
-                    <TerminalArea
-                      projectId={project.id}
-                      projectPath={project.path}
-                    />
-                  </div>
-                );
-              })}
-              {config.projects.length === 0 && (
-                <div className="h-full bg-[var(--bg-terminal)] flex items-center justify-center text-[var(--text-muted)] text-sm">
-                  {t('app.emptyState')}
-                </div>
-              )}
-            </div>
-          </Allotment.Pane>
-        </Allotment> : null}
+            <RightDrawer
+              initialWidth={config.rightDrawerWidth ?? 340}
+              onResizeEnd={persistRightDrawerWidth}
+            />
+          </div>
+        ) : null}
       </div>
       <SettingsModal open={configOpen} onClose={() => setConfigOpen(false)} initialPage={configPage} />
       <SshModal open={sshOpen} onClose={() => setSshOpen(false)} />

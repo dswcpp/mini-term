@@ -2,10 +2,9 @@ import { useCallback } from 'react';
 import { useAppStore, genId, saveLayoutToConfig } from '../store';
 import { SplitLayout } from './SplitLayout';
 import { showContextMenu } from '../utils/contextMenu';
-import { getProjectEnvs } from '../utils/projectEnv';
 import { showAlert } from '../utils/prompt';
 import { formatError } from '../utils/appConfigPersistence';
-import { createTerminalPty, killPtyQuietly, resolveTerminalShell } from '../utils/terminalApi';
+import { killPtyQuietly, resolveTerminalShell } from '../utils/terminalApi';
 import {
   buildTerminalLayoutPreset,
   collectPanesFromLayout,
@@ -13,6 +12,7 @@ import {
   type TerminalLayoutPreset,
 } from '../utils/terminalLayoutPresets';
 import { normalizeTerminalEncoding } from '../utils/terminalEncoding';
+import { createProjectPty, isRemoteProject, remotePaneLabel } from '../utils/remoteProject';
 import { useT } from '../i18n';
 import type { TerminalTab, PaneState, SplitNode, ShellConfig } from '../types';
 
@@ -71,36 +71,40 @@ export function TerminalArea({ projectId, projectPath }: Props) {
   const removeTab = useAppStore((s) => s.removeTab);
   const ps = projectStates.get(projectId);
   const activeTab = ps?.tabs.find((t) => t.id === ps.activeTabId);
+  // SSH 远程项目:新开 tab/分屏 pane 一律 spawn ssh 启动器(shell 选择无意义);
+  // 断链 / 缺 ssh 客户端时后端返回明确 Err,弹窗提示。
+  const project = config.projects.find((p) => p.id === projectId);
+  const remote = isRemoteProject(project);
 
   const createPane = useCallback(async (selectedShell?: ShellConfig): Promise<PaneState | null> => {
-    const shell = resolveTerminalShell(config, selectedShell);
-    if (!shell) {
+    if (!project) return null;
+
+    const shell = remote ? undefined : resolveTerminalShell(config, selectedShell);
+    if (!remote && !shell) {
       await showAlert(t('terminalArea.noShellConfiguredTitle'), t('terminalArea.noShellConfiguredMessage'));
       return null;
     }
 
-    let ptyId: number;
     const encoding = normalizeTerminalEncoding(config.terminalEncoding);
+    let ptyId: number;
     try {
-      ptyId = await createTerminalPty({
-        shell,
-        cwd: projectPath,
-        envs: getProjectEnvs(projectId),
-        encoding,
-      });
+      ptyId = await createProjectPty(project, shell, encoding);
     } catch (error) {
-      await showAlert(t('terminalArea.createFailedTitle'), formatError(error));
+      const title = remote
+        ? t('terminalArea.remoteConnectFailedTitle')
+        : t('terminalArea.createFailedTitle');
+      await showAlert(title, formatError(error));
       return null;
     }
 
     return {
       id: genId(),
-      shellName: shell.name,
+      shellName: remote ? remotePaneLabel(project) : shell!.name,
       terminalEncoding: encoding,
       status: 'idle',
       ptyId,
     };
-  }, [projectId, projectPath, config, t]);
+  }, [project, remote, config, t]);
 
   const handleNewTab = useCallback(async (selectedShell?: ShellConfig) => {
     const pane = await createPane(selectedShell);
@@ -123,7 +127,8 @@ export function TerminalArea({ projectId, projectPath }: Props) {
   }, [projectId, addTab, createPane]);
 
   const handleNewTabClick = useCallback((e: React.MouseEvent) => {
-    if (config.availableShells.length <= 1) {
+    // 远程项目固定使用 SSH 启动器；本地只有一个 shell 时直接创建。
+    if (remote || config.availableShells.length <= 1) {
       void handleNewTab();
       return;
     }
@@ -135,7 +140,7 @@ export function TerminalArea({ projectId, projectPath }: Props) {
         onClick: () => handleNewTab(shell),
       })),
     );
-  }, [config.availableShells, handleNewTab]);
+  }, [remote, config.availableShells, handleNewTab]);
 
   const handleSplitPane = useCallback(
     async (paneId: string, direction: 'horizontal' | 'vertical') => {

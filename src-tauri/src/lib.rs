@@ -9,6 +9,7 @@ mod hook_registry;
 mod hook_server;
 mod process_monitor;
 mod pty;
+mod remote_ssh;
 mod search;
 mod ssh;
 mod ssh_mcp_registry;
@@ -90,6 +91,7 @@ pub fn run() {
         .manage(fs::FsWatcherManager::new())
         .manage(search::SearchManager::new())
         .manage(cc_connect::CcConnectManager::new())
+        .manage(remote_ssh::RemoteSshState::new())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(e) = window.set_decorations(false) {
@@ -165,6 +167,10 @@ pub fn run() {
             ai_sessions::get_ai_sessions,
             ai_sessions::get_wsl_ai_sessions,
             ai_sessions::get_ai_session_content,
+            remote_ssh::ssh_remote_list_directory,
+            remote_ssh::ssh_remote_validate_dir,
+            remote_ssh::ssh_remote_ai_sessions,
+            remote_ssh::ssh_remote_ai_session_content,
             wsl_distros::list_wsl_distros,
             git::get_git_status,
             git::get_git_diff,
@@ -216,6 +222,16 @@ pub fn run() {
             cc_connect::cc_connect_import_projects,
             cc_connect::cc_connect_unlink_project,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // app 退出时优雅关掉远程 SSH 会话池(abort reaper + 并发 disconnect,
+            // 单 session 2s 超时),避免远端留 dangling session 只能等 TCP 超时回收。
+            // 对齐 mt-ssh-mcp sidecar 退出前 pool.shutdown() 的钩子。
+            if let tauri::RunEvent::Exit = event {
+                app_handle
+                    .state::<remote_ssh::RemoteSshState>()
+                    .shutdown_pool_blocking();
+            }
+        });
 }

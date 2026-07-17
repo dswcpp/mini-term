@@ -12,12 +12,12 @@ export function resolveTerminalShell(
   config: AppConfig,
   selectedShell?: ShellConfig,
   savedShellName?: string,
-): ShellConfig | null {
+): ShellConfig | undefined {
   return selectedShell
     ?? (savedShellName ? config.availableShells.find((shell) => shell.name === savedShellName) : undefined)
     ?? config.availableShells.find((shell) => shell.name === config.defaultShell)
     ?? config.availableShells[0]
-    ?? null;
+    ?? undefined;
 }
 
 export function createTerminalPty({

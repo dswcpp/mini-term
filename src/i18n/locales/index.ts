@@ -35,6 +35,7 @@ import { updateChecker } from './updateChecker';
 import { ccConnectImport } from './ccConnectImport';
 import { ccProbe } from './ccProbe';
 import { overview } from './overview';
+import { remoteProject } from './remoteProject';
 
 type Dict = Record<string, unknown>;
 
@@ -70,6 +71,7 @@ export const dicts: { zh: Dict; en: Dict } = {
     ccConnectImport: ccConnectImport.zh,
     ccProbe: ccProbe.zh,
     overview: overview.zh,
+    remoteProject: remoteProject.zh,
   },
   en: {
     app: app.en,
@@ -102,5 +104,6 @@ export const dicts: { zh: Dict; en: Dict } = {
     ccConnectImport: ccConnectImport.en,
     ccProbe: ccProbe.en,
     overview: overview.en,
+    remoteProject: remoteProject.en,
   },
 };
