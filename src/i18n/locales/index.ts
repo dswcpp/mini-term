@@ -7,8 +7,6 @@
  */
 import { app } from './app';
 import { settings } from './settings';
-import { ccConnectModal } from './ccConnectModal';
-import { ccDashboard } from './ccDashboard';
 import { projectList } from './projectList';
 import { fileTree } from './fileTree';
 import { sshModal } from './sshModal';
@@ -19,6 +17,7 @@ import { terminalArea } from './terminalArea';
 import { gitHistory } from './gitHistory';
 import { gitHistoryContent } from './gitHistoryContent';
 import { gitChanges } from './gitChanges';
+import { worktree } from './worktree';
 import { search } from './search';
 import { sessionList } from './sessionList';
 import { sessionViewer } from './sessionViewer';
@@ -32,10 +31,11 @@ import { time } from './time';
 import { prompt } from './prompt';
 import { externalLink } from './externalLink';
 import { updateChecker } from './updateChecker';
-import { ccConnectImport } from './ccConnectImport';
-import { ccProbe } from './ccProbe';
-import { overview } from './overview';
 import { remoteProject } from './remoteProject';
+import { mobileRelay } from './mobileRelay';
+import { panels } from './panels';
+import { terminalSearch } from './terminalSearch';
+import { projectSwitcher } from './projectSwitcher';
 
 type Dict = Record<string, unknown>;
 
@@ -43,8 +43,6 @@ export const dicts: { zh: Dict; en: Dict } = {
   zh: {
     app: app.zh,
     settings: settings.zh,
-    ccConnectModal: ccConnectModal.zh,
-    ccDashboard: ccDashboard.zh,
     projectList: projectList.zh,
     fileTree: fileTree.zh,
     sshModal: sshModal.zh,
@@ -55,6 +53,7 @@ export const dicts: { zh: Dict; en: Dict } = {
     gitHistory: gitHistory.zh,
     gitHistoryContent: gitHistoryContent.zh,
     gitChanges: gitChanges.zh,
+    worktree: worktree.zh,
     search: search.zh,
     sessionList: sessionList.zh,
     sessionViewer: sessionViewer.zh,
@@ -68,16 +67,15 @@ export const dicts: { zh: Dict; en: Dict } = {
     prompt: prompt.zh,
     externalLink: externalLink.zh,
     updateChecker: updateChecker.zh,
-    ccConnectImport: ccConnectImport.zh,
-    ccProbe: ccProbe.zh,
-    overview: overview.zh,
     remoteProject: remoteProject.zh,
+    mobileRelay: mobileRelay.zh,
+    panels: panels.zh,
+    terminalSearch: terminalSearch.zh,
+    projectSwitcher: projectSwitcher.zh,
   },
   en: {
     app: app.en,
     settings: settings.en,
-    ccConnectModal: ccConnectModal.en,
-    ccDashboard: ccDashboard.en,
     projectList: projectList.en,
     fileTree: fileTree.en,
     sshModal: sshModal.en,
@@ -88,6 +86,7 @@ export const dicts: { zh: Dict; en: Dict } = {
     gitHistory: gitHistory.en,
     gitHistoryContent: gitHistoryContent.en,
     gitChanges: gitChanges.en,
+    worktree: worktree.en,
     search: search.en,
     sessionList: sessionList.en,
     sessionViewer: sessionViewer.en,
@@ -101,9 +100,10 @@ export const dicts: { zh: Dict; en: Dict } = {
     prompt: prompt.en,
     externalLink: externalLink.en,
     updateChecker: updateChecker.en,
-    ccConnectImport: ccConnectImport.en,
-    ccProbe: ccProbe.en,
-    overview: overview.en,
     remoteProject: remoteProject.en,
+    mobileRelay: mobileRelay.en,
+    panels: panels.en,
+    terminalSearch: terminalSearch.en,
+    projectSwitcher: projectSwitcher.en,
   },
 };

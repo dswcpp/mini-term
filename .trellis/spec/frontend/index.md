@@ -22,9 +22,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
 | [xterm Ligatures + WebGL Order](./xterm-ligatures-with-webgl-order.md) | LigaturesAddon 必须先于 WebglAddon、热切换同步无 await、平台差异 | Filled |
 | [xterm.js WebGL TextureAtlas 跨实例共享](./xterm-webgl-atlas-sharing.md) | atlas page merge 后必须广播 `term.refresh` 唤醒 dormant 终端;否则多 AI 并发出现同形乱码 | Active |
-| [Fluent 2 + backdrop-filter Modal/iframe Portal Convention](./fluent2-portal-modal.md) | `[data-panel]` 的 `backdrop-filter` 形成 containing block,导致 `position: fixed` 全屏 modal/iframe 被拽进面板边界;统一走 `createPortal(node, document.body)` 规避(沿用 commit `e7316e5` 七 modal 修复范式) | Active |
-| [SSH Terminal Command Boundary](./ssh-terminal-command.md) | 终端右键 SSH 连接命令必须通过 `src/utils/sshCommand.ts` 集中构造与校验，禁止组件手拼 shell 命令 | Active |
-| [Dev Server Watch Boundary](./dev-server-watch-boundary.md) | Vite/Tailwind dev watchers must ignore AI runtime directories so Claude/Codex prompts inside Mini-Term terminals do not reload the WebView | Active |
+| [Fluent 2 + backdrop-filter Modal Portal Convention](./fluent2-portal-modal.md) | 复用当前 `Modal.tsx`，通过 `createPortal(node, document.body)` 脱离 containing block，并统一 overlay stack、清理与焦点契约 | Active |
 
 ---
 

@@ -26,6 +26,7 @@ dist-ssr
 # Brainstorm / temp files
 .superpowers
 .tmp-tests/
+.scratch/
 
 # Git worktrees
 .worktrees
@@ -35,3 +36,7 @@ dist-ssr
 # mini-term SSH MCP（本机相关配置，勿提交）
 .mcp.json
 .codex/
+
+# 构建时下载并校验的官方 ConPTY 包与 staging 产物
+src-tauri/.conpty-cache/
+src-tauri/resources/portable-conpty/

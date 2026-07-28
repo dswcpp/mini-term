@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { GitHistoryContent } from './GitHistoryContent';
 import { GitChanges } from './GitChanges';
+import { GitWorktreeModal } from './GitWorktreeModal';
 import { getGitHistoryCache, setGitHistoryCache } from '../utils/projectDataCache';
-import { discoverVcsRepos } from '../utils/vcsApi';
 import { useT } from '../i18n';
-import type { VcsRepoInfo } from '../types';
+import type { GitRepoInfo } from '../types';
 
 type GitTab = 'history' | 'changes';
 
@@ -20,7 +21,7 @@ export function GitHistory() {
   const [activeTab, setActiveTab] = useState<GitTab>('history');
 
   // 仓库选择器状态 — 提升到容器层，两个 tab 共享
-  const [repos, setRepos] = useState<VcsRepoInfo[]>(() => {
+  const [repos, setRepos] = useState<GitRepoInfo[]>(() => {
     return (project ? getGitHistoryCache(project.path) : undefined)?.repos ?? [];
   });
   const [selectedRepo, setSelectedRepo] = useState<string>(() => {
@@ -31,7 +32,7 @@ export function GitHistory() {
 
   const loadRepos = useCallback(() => {
     if (!project || isRemote) return;
-    discoverVcsRepos(project.path)
+    invoke<GitRepoInfo[]>('discover_git_repos', { projectPath: project.path })
       .then((r) => {
         setRepos(r);
         let nextRepo = '';
@@ -80,16 +81,10 @@ export function GitHistory() {
     setHistoryRefreshKey((k) => k + 1);
   }, []);
 
-  const selectedRepoInfo = repos.find((r) => r.path === selectedRepo);
-  const gitRepos = repos.filter((repo) => repo.vcsKind === 'git');
-  const hasGitRepos = gitRepos.length > 0;
-  const hasSvnRepos = repos.some((repo) => repo.vcsKind === 'svn');
+  // Worktree 管理弹窗(仓库行右键菜单进入);增删后刷新仓库列表
+  const [worktreeRepo, setWorktreeRepo] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (activeTab === 'history' && !hasGitRepos && hasSvnRepos) {
-      setActiveTab('changes');
-    }
-  }, [activeTab, hasGitRepos, hasSvnRepos]);
+  const selectedRepoInfo = repos.find((r) => r.path === selectedRepo);
 
   if (!project) {
     return (
@@ -121,7 +116,7 @@ export function GitHistory() {
             }`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab === 'history' ? 'History' : 'Changes'}
+            {tab === 'history' ? t('panels.history') : t('panels.changes')}
           </button>
         ))}
       </div>
@@ -135,7 +130,7 @@ export function GitHistory() {
           >
             <div className="flex items-center gap-1.5 min-w-0">
               <span
-                className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
+                className="text-base w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
                 style={{
                   transform: repoDropdownOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
                   display: 'inline-block',
@@ -144,14 +139,9 @@ export function GitHistory() {
                 &#9662;
               </span>
               <span className="truncate font-medium">{selectedRepoInfo?.name ?? t("gitHistory.selectRepo")}</span>
-              {selectedRepoInfo && (
-                <span className="shrink-0 text-[10px] leading-[16px] px-1.5 rounded font-mono uppercase text-[var(--text-muted)] bg-[var(--border-subtle)]">
-                  {selectedRepoInfo.vcsKind}
-                </span>
-              )}
               {selectedRepoInfo?.currentBranch && (
-                <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
-                  {selectedRepoInfo.currentBranch}
+                <span className="shrink-0 text-sm leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                  {selectedRepoInfo.isWorktree ? '⎇ ' : ''}{selectedRepoInfo.currentBranch}
                 </span>
               )}
             </div>
@@ -172,12 +162,9 @@ export function GitHistory() {
                   }}
                 >
                   <span className="truncate">{r.name}</span>
-                  <span className="shrink-0 text-[10px] leading-[16px] px-1.5 rounded font-mono uppercase text-[var(--text-muted)] bg-[var(--border-subtle)]">
-                    {r.vcsKind}
-                  </span>
                   {r.currentBranch && (
-                    <span className="shrink-0 text-[11px] leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
-                      {r.currentBranch}
+                    <span className="shrink-0 text-sm leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                      {r.isWorktree ? '⎇ ' : ''}{r.currentBranch}
                     </span>
                   )}
                 </div>
@@ -193,18 +180,24 @@ export function GitHistory() {
           <GitHistoryContent
             key={historyRefreshKey}
             projectPath={project.path}
-            repos={gitRepos}
+            repos={repos}
             refreshRepos={loadRepos}
+            onOpenWorktrees={setWorktreeRepo}
           />
         ) : (
           <GitChanges
             projectPath={project.path}
             repoPath={selectedRepo}
-            vcsKind={selectedRepoInfo?.vcsKind ?? 'git'}
             onCommitSuccess={onCommitSuccess}
           />
         )}
       </div>
+
+      <GitWorktreeModal
+        repoPath={worktreeRepo}
+        onClose={() => setWorktreeRepo(null)}
+        onChanged={loadRepos}
+      />
     </div>
   );
 }

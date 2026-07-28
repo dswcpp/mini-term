@@ -1,5 +1,5 @@
-//! 通过 Win32 剪贴板 API 读取非标准格式的图片数据，保存为 temp PNG 文件。
-//! 用于兜底 Tauri 插件 readImage 无法识别的截图工具（如 PinPix）。
+/// 通过 Win32 剪贴板 API 读取非标准格式的图片数据，保存为 temp PNG 文件。
+/// 用于兜底 Tauri 插件 readImage 无法识别的截图工具（如 PinPix）。
 
 #[cfg(windows)]
 mod win {
@@ -98,7 +98,7 @@ mod win {
 
         // 关键加固:全程 usize + checked 运算,并校验整块像素数据落在缓冲区内,
         // 杜绝声称维度远大于实际分配时的越界读 / 整数溢出。
-        let stride = ((width as usize) * (bit_count as usize)).div_ceil(32) * 4;
+        let stride = (((width as usize) * (bit_count as usize) + 31) / 32) * 4;
         let pixel_bytes = (height as usize)
             .checked_mul(stride)
             .ok_or("DIB 像素数据长度溢出")?;
@@ -270,7 +270,7 @@ mod win {
         fn parse_dib_accepts_valid_small_bitmap() {
             let (w, h) = (2i32, 2i32);
             let header = make_header(w, h, 32);
-            let stride = ((w as usize) * 32).div_ceil(32) * 4;
+            let stride = (((w as usize) * 32 + 31) / 32) * 4;
             let buf = buf_with_header(&header, HDR + stride * (h as usize));
             unsafe {
                 let img = parse_dib(buf.as_ptr(), buf.len()).expect("合法小图应解析成功");

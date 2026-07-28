@@ -99,7 +99,11 @@ mod tests {
     #[test]
     fn build_distro_list_filters_state_and_marks_default() {
         let entries = vec![
-            ("{aaa}".to_string(), Some("Ubuntu".to_string()), Some(1u32)),
+            (
+                "{aaa}".to_string(),
+                Some("Ubuntu".to_string()),
+                Some(1u32),
+            ),
             ("{bbb}".to_string(), Some("Debian".to_string()), Some(3)), // 卸载中 → 过滤
             ("{ccc}".to_string(), Some("Alpine".to_string()), None),    // 无 State → 视为已安装
         ];

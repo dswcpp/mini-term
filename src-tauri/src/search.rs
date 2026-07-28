@@ -45,11 +45,8 @@ struct SearchCompletePayload {
 #[derive(Clone)]
 pub struct SearchManager {
     // search_id → (project_root, cancel_flag)
-    active_searches: ActiveSearches,
+    active_searches: Arc<Mutex<HashMap<String, (String, Arc<AtomicBool>)>>>,
 }
-
-type ActiveSearchEntry = (String, Arc<AtomicBool>);
-type ActiveSearches = Arc<Mutex<HashMap<String, ActiveSearchEntry>>>;
 
 impl SearchManager {
     pub fn new() -> Self {
@@ -101,7 +98,7 @@ fn build_walker(root: &str) -> ignore::Walk {
     let mut builder = ignore::WalkBuilder::new(root);
     builder.hidden(false);
     builder.filter_entry(|entry| {
-        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
             let name = entry.file_name().to_str().unwrap_or("");
             !crate::fs::ALWAYS_IGNORE.contains(&name)
         } else {
@@ -253,7 +250,7 @@ fn search_filenames(
             Ok(e) => e,
             Err(_) => continue,
         };
-        if entry.file_type().is_none_or(|ft| ft.is_dir()) {
+        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
             continue;
         }
         let file_name = entry.file_name().to_string_lossy().to_string();
@@ -305,7 +302,7 @@ fn search_contents(
             Ok(e) => e,
             Err(_) => continue,
         };
-        if entry.file_type().is_none_or(|ft| ft.is_dir()) {
+        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
             continue;
         }
 
@@ -384,15 +381,16 @@ pub fn start_search(
         // 用 catch_unwind 兜底：即便搜索体内将来再出现 panic，也不会跳过下面的
         // finish()/remove()，否则前端永远收不到 search-complete、搜索框卡死在 loading，
         // 且 active_searches 残留。AssertUnwindSafe 是因为 batcher/AppHandle 跨越捕获边界。
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match search_mode {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match search_mode {
                 SearchMode::FileName => {
                     search_filenames(&project_root, &query, use_regex, &cancel, &mut batcher)
                 }
                 SearchMode::FileContent => {
                     search_contents(&project_root, &query, use_regex, &cancel, &mut batcher)
                 }
-            }));
+            }
+        }));
         if outcome.is_err() {
             eprintln!("[search] worker panicked during search {}", sid);
         }

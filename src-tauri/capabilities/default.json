@@ -5,13 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:window:allow-close",
-    "core:window:allow-minimize",
-    "core:window:allow-toggle-maximize",
-    "core:window:allow-start-dragging",
-    "core:window:allow-request-user-attention",
-    "core:window:allow-set-effects",
-    "core:window:allow-set-shadow",
     "opener:default",
     "dialog:default",
     "clipboard-manager:allow-read-text",
@@ -19,6 +12,7 @@
     "clipboard-manager:allow-write-text",
     "core:window:allow-destroy",
     "core:window:allow-request-user-attention",
-    "core:window:allow-show"
+    "core:window:allow-show",
+    "core:window:allow-set-title"
   ]
 }

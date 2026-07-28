@@ -57,22 +57,10 @@ pub struct AppConfig {
     pub terminal_font_family: Option<String>,
     #[serde(default)]
     pub terminal_ligatures: bool,
-    #[serde(default = "default_terminal_encoding")]
-    pub terminal_encoding: String,
-    #[serde(default = "default_true")]
-    pub terminal_depth_ui: bool,
-    #[serde(default)]
-    pub terminal_log_enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_log_path: Option<String>,
-    #[serde(default = "default_terminal_log_max_size_mb")]
-    pub terminal_log_max_size_mb: u64,
     #[serde(default)]
     pub layout_sizes: Option<Vec<f64>>,
     #[serde(default)]
     pub middle_column_sizes: Option<Vec<f64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settings_modal_size: Option<SettingsModalSize>,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_skin")]
@@ -102,16 +90,15 @@ pub struct AppConfig {
     pub long_paste_line_threshold: u32,
     #[serde(default = "default_long_paste_char_threshold")]
     pub long_paste_char_threshold: u32,
-    #[serde(default = "default_true")]
-    pub projects_visible: bool,
-    #[serde(default = "default_true")]
-    pub sessions_visible: bool,
-    #[serde(default = "default_true")]
-    pub files_visible: bool,
-    #[serde(default = "default_true")]
-    pub git_visible: bool,
-    #[serde(default)]
-    pub overview_visible: bool,
+    /// 远程项目粘贴落盘目录:剪贴板图片 / 长文本转存的临时文件经 SFTP 上传到这里，
+    /// 粘进终端的是远端路径（本地路径远端 agent 读不到）。
+    /// 相对路径 = 相对项目根（默认落项目内，agent 无需额外授权即可读）；
+    /// 也可填远端绝对路径（`/tmp/mini-term`）或 `~/xxx`。含 `..` 的写法会被拒绝。
+    #[serde(default = "default_remote_paste_dir")]
+    pub remote_paste_dir: String,
+    // NOTE: 曾有 projects_visible / sessions_visible / files_visible / git_visible
+    // 四个面板显隐开关，界面上没有任何入口消费（已被 middle_column_visible 与右侧
+    // 抽屉取代），随 UI 改版一并删除。旧 config.json 里残留的这些键会被 serde 忽略。
     #[serde(default = "default_true")]
     pub middle_column_visible: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,48 +111,84 @@ pub struct AppConfig {
     pub smart_copy_paste: bool,
     #[serde(default)]
     pub ssh_connections: Vec<SshConnection>,
-    /// cc-connect 集成配置(进程管理 + 项目导入关联 + dashboard 嵌入)。
-    /// 未配置时为 None;序列化时省略以保持老 config.json 干净。
+    /// 显式创建的 SSH 分组名（允许空分组存在）。连接上的 group 字段仍是归属的
+    /// 单一来源，此列表只补充「还没有连接的分组」；空 Vec 时序列化跳过。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ssh_groups: Vec<String>,
+    /// 移动端中转配置(docs/adr/0001)。None = 未启用;序列化时省略保持文件干净。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cc_connect: Option<CcConnectConfig>,
+    pub mobile_relay: Option<MobileRelayConfig>,
 }
 
+/// 移动端中转体系的持久化配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRelayConfig {
+    /// 中转服务器地址(如 wss://relay.example.com);空字符串 = 未配置、不建连。
+    #[serde(default)]
+    pub relay_url: String,
+    /// 桌面端接入密钥:必须与中转的 `MT_RELAY_DESKTOP_KEY` 一致,握手时携带。
+    /// 空字符串 = 未填,中转一律拒绝(fail-closed,见 ADR 0002)。
+    #[serde(default)]
+    pub desktop_key: String,
+    /// AI 启动器列表:移动端能发起哪些 agent 由此决定。
+    /// 命令与 shell 只存在于桌面端配置里,移动端只见 id 与展示名。
+    /// 旧配置缺该字段时填充预置两条(Claude / Codex),开箱即用。
+    #[serde(default = "default_launchers")]
+    pub launchers: Vec<AiLauncher>,
+}
+
+impl Default for MobileRelayConfig {
+    fn default() -> Self {
+        Self {
+            relay_url: String::new(),
+            desktop_key: String::new(),
+            launchers: default_launchers(),
+        }
+    }
+}
+
+/// 一条具名的"怎么起一个 AI 会话"。
+///
+/// 启动流程是:按 `shell` 建 pane(缺省用 `default_shell`)→ 把 `command` 连同回车
+/// 写入 PTY。AI 会话身份靠输入检测建立,所以命令必须走"敲进 shell"这条路。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SettingsModalSize {
-    pub width: f64,
-    pub height: f64,
+pub struct AiLauncher {
+    pub id: String,
+    /// 展示名(移动端弹层里看到的就是它)
+    pub name: String,
+    /// 引用 `available_shells` 里的条目名;None / 空 = 用 `default_shell`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    pub command: String,
 }
 
-/// cc-connect 集成的持久化配置。详见 .trellis/tasks/05-28-embed-cc-connect-panel/prd.md
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct CcConnectConfig {
-    /// cc-connect 可执行文件路径(空字符串 = 后端优先使用内置 sidecar,再回退 PATH)
-    #[serde(default)]
-    pub exe_path: String,
-    /// config.toml 路径(空字符串 = 用默认 ~/.cc-connect/config.toml)
-    #[serde(default)]
-    pub config_path: String,
-    /// mini-term 启动时自动 spawn cc-connect
-    #[serde(default)]
-    pub auto_start: bool,
-    /// 额外启动参数
-    #[serde(default)]
-    pub extra_args: Vec<String>,
-    /// mini-term project id → cc-connect project name 映射
-    #[serde(default)]
-    pub project_links: std::collections::HashMap<String, String>,
+/// 预置启动器:零配置直接可用。
+fn default_launchers() -> Vec<AiLauncher> {
+    vec![
+        AiLauncher {
+            id: "claude".into(),
+            name: "Claude".into(),
+            shell: None,
+            command: "claude".into(),
+        },
+        AiLauncher {
+            id: "codex".into(),
+            name: "Codex".into(),
+            shell: None,
+            command: "codex".into(),
+        },
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedPane {
     pub shell_name: String,
+    /// 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_encoding: Option<String>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +265,9 @@ pub struct ProjectConfig {
     /// 引用为单一来源、不内嵌连接快照——连接被删除时项目进入「断链」错误态。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_connection_id: Option<String>,
+    /// 子项目(worktree「设为项目」):有值 = 挂在该项目 id 下渲染,不在 projectTree 里
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,11 +315,10 @@ fn default_long_paste_line_threshold() -> u32 {
 fn default_long_paste_char_threshold() -> u32 {
     2000
 }
-fn default_terminal_log_max_size_mb() -> u64 {
-    10
-}
-fn default_terminal_encoding() -> String {
-    "auto".to_string()
+/// 默认落项目内的隐藏目录:agent 对项目目录天然有读权限，不像 `/tmp` 那样
+/// 会触发 Claude Code 的项目外路径确认。
+pub fn default_remote_paste_dir() -> String {
+    ".mini-term/pasted".into()
 }
 fn default_true() -> bool {
     true
@@ -313,14 +338,8 @@ impl Default for AppConfig {
             ui_font_family: None,
             terminal_font_family: None,
             terminal_ligatures: false,
-            terminal_encoding: default_terminal_encoding(),
-            terminal_depth_ui: true,
-            terminal_log_enabled: false,
-            terminal_log_path: None,
-            terminal_log_max_size_mb: default_terminal_log_max_size_mb(),
             layout_sizes: None,
             middle_column_sizes: None,
-            settings_modal_size: None,
             theme: default_theme(),
             skin: default_skin(),
             terminal_follow_theme: default_terminal_follow_theme(),
@@ -335,18 +354,15 @@ impl Default for AppConfig {
             long_paste_to_file: true,
             long_paste_line_threshold: default_long_paste_line_threshold(),
             long_paste_char_threshold: default_long_paste_char_threshold(),
-            projects_visible: true,
-            sessions_visible: true,
-            files_visible: true,
-            git_visible: true,
-            overview_visible: false,
+            remote_paste_dir: default_remote_paste_dir(),
             middle_column_visible: true,
             right_drawer_width: None,
             last_active_project_id: None,
             hook_enabled: false,
             smart_copy_paste: false,
             ssh_connections: vec![],
-            cc_connect: None,
+            ssh_groups: vec![],
+            mobile_relay: None,
         }
     }
 }
@@ -511,22 +527,6 @@ fn normalize_split_node(node: &mut SavedSplitNode) {
 }
 
 fn migrate_config(mut config: AppConfig) -> AppConfig {
-    if config.available_shells.is_empty() {
-        config.available_shells = default_shells();
-    }
-    if config.default_shell.trim().is_empty()
-        || !config
-            .available_shells
-            .iter()
-            .any(|shell| shell.name == config.default_shell)
-    {
-        config.default_shell = config
-            .available_shells
-            .first()
-            .map(|shell| shell.name.clone())
-            .unwrap_or_else(default_shell_name);
-    }
-
     // 迁移 vscodePath → editors
     if config.editors.is_empty() {
         if let Some(ref path) = config.vscode_path {
@@ -541,6 +541,13 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
         }
     }
     config.vscode_path = None;
+
+    // 移动端配置整块缺失(从未用过移动端)→ 补一份缺省,让「移动端」面板一打开
+    // 就有预置启动器可用。只补整块缺失的情况:`launchers: []` 是用户删光的有意
+    // 结果,不能被"好心"重新填上。
+    if config.mobile_relay.is_none() {
+        config.mobile_relay = Some(MobileRelayConfig::default());
+    }
 
     // 迁移 SavedSplitNode: pane → panes
     for project in config.projects.iter_mut() {
@@ -627,43 +634,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_modal_size_round_trip() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14,
-            "settingsModalSize": {"width": 900, "height": 620}
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.settings_modal_size,
-            Some(SettingsModalSize {
-                width: 900.0,
-                height: 620.0
-            })
-        );
-
-        let serialized = serde_json::to_string(&config).unwrap();
-        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(reparsed.settings_modal_size, config.settings_modal_size);
-    }
-
-    #[test]
-    fn settings_modal_size_absent_is_none() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(config.settings_modal_size.is_none());
-    }
-
-    #[test]
     fn font_family_round_trip() {
         let json = r#"{
             "projects": [],
@@ -728,109 +698,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_encoding_round_trip() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14,
-            "terminalEncoding": "gb18030"
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.terminal_encoding, "gb18030");
-
-        let serialized = serde_json::to_string(&config).unwrap();
-        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(reparsed.terminal_encoding, "gb18030");
-    }
-
-    #[test]
-    fn terminal_encoding_absent_defaults_auto() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.terminal_encoding, "auto");
-    }
-
-    #[test]
-    fn terminal_depth_ui_round_trip() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14,
-            "terminalDepthUi": false
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(!config.terminal_depth_ui);
-
-        let serialized = serde_json::to_string(&config).unwrap();
-        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
-        assert!(!reparsed.terminal_depth_ui);
-    }
-
-    #[test]
-    fn terminal_depth_ui_absent_defaults_true() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(config.terminal_depth_ui);
-    }
-
-    #[test]
-    fn terminal_log_config_round_trip() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14,
-            "terminalLogEnabled": true,
-            "terminalLogPath": "C:/logs/mini-term.log",
-            "terminalLogMaxSizeMb": 25
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(config.terminal_log_enabled);
-        assert_eq!(
-            config.terminal_log_path.as_deref(),
-            Some("C:/logs/mini-term.log")
-        );
-        assert_eq!(config.terminal_log_max_size_mb, 25);
-
-        let serialized = serde_json::to_string(&config).unwrap();
-        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
-        assert!(reparsed.terminal_log_enabled);
-        assert_eq!(reparsed.terminal_log_max_size_mb, 25);
-    }
-
-    #[test]
-    fn terminal_log_config_absent_uses_defaults() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "cmd",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(!config.terminal_log_enabled);
-        assert!(config.terminal_log_path.is_none());
-        assert_eq!(config.terminal_log_max_size_mb, 10);
-    }
-
-    #[test]
     fn old_config_without_layout_deserializes() {
         let json = r#"{
             "projects": [{"id": "1", "name": "test", "path": "/tmp"}],
@@ -860,39 +727,6 @@ mod tests {
     }
 
     #[test]
-    fn migrate_empty_shells_restores_platform_defaults() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "",
-            "availableShells": [],
-            "uiFontSize": 13,
-            "terminalFontSize": 14
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        let config = migrate_config(config);
-        assert!(!config.available_shells.is_empty());
-        assert!(!config.default_shell.is_empty());
-        assert!(config
-            .available_shells
-            .iter()
-            .any(|shell| shell.name == config.default_shell));
-    }
-
-    #[test]
-    fn migrate_invalid_default_shell_uses_first_available() {
-        let json = r#"{
-            "projects": [],
-            "defaultShell": "missing",
-            "availableShells": [{"name": "cmd", "command": "cmd"}],
-            "uiFontSize": 13,
-            "terminalFontSize": 14
-        }"#;
-        let config: AppConfig = serde_json::from_str(json).unwrap();
-        let config = migrate_config(config);
-        assert_eq!(config.default_shell, "cmd");
-    }
-
-    #[test]
     fn layout_round_trip() {
         let layout = SavedProjectLayout {
             tabs: vec![SavedTab {
@@ -904,16 +738,14 @@ mod tests {
                             pane: None,
                             panes: vec![SavedPane {
                                 shell_name: "cmd".into(),
-                                custom_title: Some("Build".into()),
-                                terminal_encoding: Some("gbk".into()),
+                                cwd: None,
                             }],
                         },
                         SavedSplitNode::Leaf {
                             pane: None,
                             panes: vec![SavedPane {
                                 shell_name: "powershell".into(),
-                                custom_title: None,
-                                terminal_encoding: None,
+                                cwd: None,
                             }],
                         },
                     ],
@@ -923,19 +755,9 @@ mod tests {
             active_tab_index: 0,
         };
         let json = serde_json::to_string(&layout).unwrap();
-        assert!(json.contains(r#""customTitle":"Build""#));
-        assert!(json.contains(r#""terminalEncoding":"gbk""#));
         let parsed: SavedProjectLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tabs.len(), 1);
         assert_eq!(parsed.active_tab_index, 0);
-        let SavedSplitNode::Split { children, .. } = &parsed.tabs[0].split_layout else {
-            panic!("expected split layout");
-        };
-        let SavedSplitNode::Leaf { panes, .. } = &children[0] else {
-            panic!("expected leaf layout");
-        };
-        assert_eq!(panes[0].custom_title.as_deref(), Some("Build"));
-        assert_eq!(panes[0].terminal_encoding.as_deref(), Some("gbk"));
     }
 
     #[test]
@@ -1095,10 +917,7 @@ mod tests {
             "terminalFontSize": 14
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            config.projects[0].ssh_connection_id.as_deref(),
-            Some("conn-1")
-        );
+        assert_eq!(config.projects[0].ssh_connection_id.as_deref(), Some("conn-1"));
         assert_eq!(config.projects[0].path, "/home/u/proj");
         // 旧配置无该字段 → None(向后兼容)
         assert!(config.projects[1].ssh_connection_id.is_none());
@@ -1112,9 +931,194 @@ mod tests {
             "本地项目不应序列化 sshConnectionId: {serialized}"
         );
         let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.projects[0].ssh_connection_id.as_deref(), Some("conn-1"));
+    }
+
+    #[test]
+    fn ssh_groups_round_trip_and_absent_default() {
+        // 显式分组列表:round-trip 保留顺序
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "sshGroups": ["内网", "客户A"]
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.ssh_groups, vec!["内网", "客户A"]);
+        let serialized = serde_json::to_string(&config).unwrap();
+        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.ssh_groups, vec!["内网", "客户A"]);
+
+        // 旧配置无该字段 → 空 Vec,且空时不序列化
+        let old: AppConfig = serde_json::from_str(
+            r#"{"projects":[],"defaultShell":"cmd","availableShells":[],"uiFontSize":13,"terminalFontSize":14}"#,
+        )
+        .unwrap();
+        assert!(old.ssh_groups.is_empty());
+        let serialized_old = serde_json::to_string(&old).unwrap();
+        assert!(
+            !serialized_old.contains("sshGroups"),
+            "空 sshGroups 不应序列化进 JSON: {serialized_old}"
+        );
+    }
+
+    #[test]
+    fn mobile_relay_round_trip_and_absent_default() {
+        // 有值:camelCase 字段名往返保留
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "mobileRelay": {"relayUrl": "wss://relay.example.com", "desktopKey": "s3cret"}
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let relay = config.mobile_relay.as_ref().unwrap();
+        assert_eq!(relay.relay_url, "wss://relay.example.com");
+        assert_eq!(relay.desktop_key, "s3cret");
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(
+            serialized.contains(r#""relayUrl":"wss://relay.example.com""#)
+                && serialized.contains(r#""desktopKey":"s3cret""#),
+            "{serialized}"
+        );
+        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        let relay = reparsed.mobile_relay.unwrap();
+        assert_eq!(relay.relay_url, "wss://relay.example.com");
+        assert_eq!(relay.desktop_key, "s3cret");
+
+        // 旧配置无该字段 → serde 层为 None,且 None 不序列化
+        let old: AppConfig = serde_json::from_str(
+            r#"{"projects":[],"defaultShell":"cmd","availableShells":[],"uiFontSize":13,"terminalFontSize":14}"#,
+        )
+        .unwrap();
+        assert!(old.mobile_relay.is_none());
+        let serialized_old = serde_json::to_string(&old).unwrap();
+        assert!(
+            !serialized_old.contains("mobileRelay"),
+            "serde 层未配置时不应序列化 mobileRelay: {serialized_old}"
+        );
+    }
+
+    #[test]
+    fn desktop_key_absent_defaults_to_empty_string() {
+        // v1 时代的 mobileRelay 块没有 desktopKey → 空串(= 未填,中转会拒),
+        // 不能因缺字段导致整个 config 解析失败
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "mobileRelay": {"relayUrl": "wss://relay.example.com"}
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.mobile_relay.unwrap().desktop_key, "");
+    }
+
+    #[test]
+    fn launchers_absent_gets_claude_and_codex_presets() {
+        // 旧 mobileRelay 块无 launchers 字段 → 预置两条
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "mobileRelay": {"relayUrl": "wss://relay.example.com"}
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let launchers = config.mobile_relay.unwrap().launchers;
+        assert_eq!(launchers.len(), 2);
+        assert_eq!(launchers[0].name, "Claude");
+        assert_eq!(launchers[0].command, "claude");
+        assert!(launchers[0].shell.is_none());
+        assert_eq!(launchers[1].name, "Codex");
+        assert_eq!(launchers[1].command, "codex");
+    }
+
+    #[test]
+    fn migration_fills_missing_mobile_relay_block_with_presets() {
+        // 整块 mobileRelay 缺失(从未用过移动端)→ 迁移补一份缺省,面板一打开就有启动器
+        let config: AppConfig = serde_json::from_str(
+            r#"{"projects":[],"defaultShell":"cmd","availableShells":[],"uiFontSize":13,"terminalFontSize":14}"#,
+        )
+        .unwrap();
+        let migrated = migrate_config(config);
+        let relay = migrated.mobile_relay.expect("迁移后应补上 mobileRelay");
+        assert_eq!(relay.launchers.len(), 2);
+        assert_eq!(relay.relay_url, "");
+        assert_eq!(relay.desktop_key, "");
+    }
+
+    #[test]
+    fn migration_keeps_deliberately_emptied_launcher_list() {
+        // 用户把启动器删光是有意结果,迁移不能"好心"把预置塞回去
+        let config: AppConfig = serde_json::from_str(
+            r#"{"projects":[],"defaultShell":"cmd","availableShells":[],"uiFontSize":13,
+                "terminalFontSize":14,"mobileRelay":{"relayUrl":"","desktopKey":"","launchers":[]}}"#,
+        )
+        .unwrap();
+        let migrated = migrate_config(config);
+        assert!(migrated.mobile_relay.unwrap().launchers.is_empty());
+    }
+
+    #[test]
+    fn launcher_round_trip_keeps_optional_shell() {
+        // shell 绑定("在 WSL bash 里跑 claude")与留空两种形态都要往返保真
+        let launchers = vec![
+            AiLauncher {
+                id: "l1".into(),
+                name: "Claude (WSL)".into(),
+                shell: Some("wsl-bash".into()),
+                command: "claude".into(),
+            },
+            AiLauncher {
+                id: "l2".into(),
+                name: "Codex".into(),
+                shell: None,
+                command: "codex --model gpt-5".into(),
+            },
+        ];
+        let json = serde_json::to_string(&launchers).unwrap();
+        assert!(json.contains(r#""shell":"wsl-bash""#), "{json}");
         assert_eq!(
-            reparsed.projects[0].ssh_connection_id.as_deref(),
-            Some("conn-1")
+            json.matches("shell").count(),
+            1,
+            "未绑定 shell 的启动器不应序列化该字段: {json}"
+        );
+        let parsed: Vec<AiLauncher> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, launchers);
+    }
+
+    #[test]
+    fn legacy_cc_connect_field_is_ignored_and_dropped_on_save() {
+        // cc-connect 集成已移除:带 ccConnect 字段的旧 config.json 必须静默加载
+        // (serde 默认忽略未知字段),且重新序列化后该字段消失(升级无感自动清除)。
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "ccConnect": {
+                "exePath": "C:\\tools\\cc-connect.exe",
+                "configPath": "",
+                "autoStart": true,
+                "extraArgs": ["--verbose"],
+                "projectLinks": {"p1": "proj-one"}
+            }
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.default_shell, "cmd");
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(
+            !serialized.contains("ccConnect"),
+            "保存后不应残留 ccConnect 字段: {serialized}"
         );
     }
 

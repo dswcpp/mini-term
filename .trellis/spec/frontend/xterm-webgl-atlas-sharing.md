@@ -1,242 +1,227 @@
-# xterm.js WebGL TextureAtlas 跨实例共享:atlas 变更后必须唤醒所有终端
+# xterm.js WebGL TextureAtlas 共享与 renderer 恢复契约
 
-> `@xterm/addon-webgl@0.19.0` 的 `TextureAtlas` 不是 per-terminal 的 —— `CharAtlasCache` 按 (fontFamily, fontSize, fontWeight, theme colors, devicePixelRatio, deviceCellWidth, deviceCellHeight, deviceMaxTextureSize) 命中后,多个 `Terminal` 实例**共享同一个 atlas + 内部 glyph 对象池**。atlas page merge / overflow page 创建时,会**原地改写**所有相关 glyph 的 `texturePage / texturePosition.x / texturePosition.y / sizeClipSpace` 字段。各 Terminal 的 `GlyphRenderer` GPU vertex buffer 仍引用旧值;只有被 xterm.js core 重新 schedule `renderRows` 的 renderer 才会经 `beginFrame → _clearModel(true) + _updateModel(0, rows-1)` 重写 buffer。**dormant 的 renderer**(无 PTY 输出、无光标移动、无选区变化)永远不消费这次变更,vertex buffer 保留错位坐标,渲染出 atlas 上其他位置的字形 —— 表现为多个终端同时出现"换字"型乱码(中文变拉丁字母组合,同字必同乱)。
+> 多个 `WebglAddon` 可能复用同一个 `TextureAtlas`，但每个终端拥有自己的 renderer
+> model 与 GPU vertex buffer。atlas page add/remove 或 glyph 坐标变化后，所有共享
+> 终端都需要重新调度渲染；终端 mount 或从不可见状态恢复时，只能重建**当前终端**的
+> renderer model，不能清空共享 atlas。
 
----
+## Scope / Trigger
 
-## Convention:加 WebglAddon 时必须挂 atlas 变更监听,广播 refresh 到所有 cache 内 terminal
+修改以下任一位置时必须核对本规范：
 
-`src/utils/terminalCache.ts` 是项目里**唯一**创建 `Terminal` 与 `WebglAddon` 的入口(经 `getOrCreateTerminal` 缓存 + `activateWebgl` / `loadWebgl` 激活)。在 `new WebglAddon()` 之后、`loadAddon(webgl)` 之前,必须挂两个监听:
+- `src/utils/terminalCache.ts` 中 WebGL addon 的创建、释放、atlas 监听或渲染恢复；
+- `src/components/TerminalInstance.tsx` 中 terminal mount、remount 或 visibility observer；
+- `@xterm/xterm` / `@xterm/addon-webgl` 升级；
+- WebGL context loss、分屏静置后乱码或重新挂载后的渲染问题。
 
-```ts
-function refreshAllTerminalsForAtlasChange(): void {
-  for (const e of cache.values()) {
-    if (e.term.rows > 0) e.term.refresh(0, e.term.rows - 1);
+## Current Signatures
+
+以下签名来自当前 v0.8.3 源码：
+
+```typescript
+// src/utils/terminalCache.ts
+function disposeWebgl(entry: CachedEntry): void;
+function refreshAllTerminalsForAtlasChange(reason: 'add' | 'remove'): void;
+export function resetRenderStateForPty(ptyId: number): void;
+export function activateWebgl(ptyId: number): void;
+```
+
+`resetRenderStateForPty` 对 cache entry 或 WebGL addon 不存在的情况必须安全 no-op。
+调用方不能访问 `CachedEntry`、renderer 私有字段或 addon 生命周期细节。
+
+## Contract 1：Atlas add/remove 必须广播到全部缓存终端
+
+每个新建的 `WebglAddon` 都必须监听两个 atlas canvas 事件，并将事件广播到 cache 中
+所有终端：
+
+```typescript
+function refreshAllTerminalsForAtlasChange(reason: 'add' | 'remove'): void {
+  for (const entry of cache.values()) {
+    if (entry.term.rows > 0) {
+      entry.term.refresh(0, entry.term.rows - 1);
+    }
   }
 }
 
-// 在 activateWebgl / loadWebgl 内:
 const webgl = new WebglAddon();
-webgl.onContextLoss(() => { /* ... */ });
-webgl.onAddTextureAtlasCanvas(refreshAllTerminalsForAtlasChange);     // ← 必加
-webgl.onRemoveTextureAtlasCanvas(refreshAllTerminalsForAtlasChange);  // ← 必加
+webgl.onAddTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('add'));
+webgl.onRemoveTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('remove'));
 entry.term.loadAddon(webgl);
 ```
 
-`term.refresh(start, end)` 仅是 dirty 标记 —— 让 xterm.js core 在下一帧 schedule `renderRows`,进而让 WebglRenderer 检查 `_glyphRenderer.beginFrame()`(即 atlas 的 `_requestClearModel`),触发完整重绘从最新 glyph 字段重写 vertex buffer。本身极轻量,对正在活跃渲染的终端无副作用(同帧 dirty 合并)。
+约束：
 
-### 触发场景
+- 不能只 refresh 触发事件的终端；共享 atlas 变化会使其他 renderer 的缓存坐标失效；
+- add 与 remove 都必须监听；不能假设只会新增 page；
+- `term.refresh` 是 atlas 事件路径的广播动作，不得在该路径改成逐终端清 atlas；
+- 不可见终端的 render service 可能暂停并延迟消费 refresh，因此仍需要可见性恢复契约。
 
-任何 WebglAddon 实例的 `onAddTextureAtlasCanvas` / `onRemoveTextureAtlasCanvas` 都来自被它持有的 atlas;因 atlas 是共享的,**任一终端触发的事件就代表所有共享终端的 vertex buffer 可能失效**。只需任一终端把事件接到广播函数即可(无需每个都接,但多接也无害)。
+## Contract 2：Mount / visibility 恢复只重建当前 renderer model
 
----
+### 调用顺序
+
+`src/components/TerminalInstance.tsx` 当前有两条恢复路径：
+
+1. **mount / remount**：完成 `fit + resize_pty + refresh` 后，在下一帧调用
+   `activateWebgl(ptyId)`，再下一帧调用 `resetRenderStateForPty(ptyId)`；
+2. **visibility 恢复**：intersection 进入可见状态后，在下一帧执行 `fit + refresh`，
+   随后调用 `resetRenderStateForPty(ptyId)`。
+
+这两条路径必须调用 `resetRenderStateForPty`，不能直接调用
+`webglAddon.clearTextureAtlas()`，也不能重新引入包装该调用的旧 helper。
+
+### `resetRenderStateForPty` 的调用方语义
+
+正常路径通过当前 addon 的 renderer 私有 `_clearModel(true)` 清空**当前 renderer**的
+RenderModel 与 vertex buffer，然后 refresh 当前终端整屏：
+
+```typescript
+export function resetRenderStateForPty(ptyId: number): void {
+  const entry = cache.get(ptyId);
+  if (!entry?.webglAddon) return;
+
+  const renderer = getCurrentRenderer(entry.webglAddon); // 说明性伪代码
+  renderer._clearModel(true);
+  entry.term.refresh(0, entry.term.rows - 1);
+}
+```
+
+`getCurrentRenderer` 不是当前导出 API，上述片段只说明边界。调用方唯一允许使用的接口是
+`resetRenderStateForPty(ptyId)`。
+
+禁止在恢复路径清共享 atlas，原因是 `clearTextureAtlas()` 会改变所有共享终端依赖的
+资源，却只同步当前 renderer；其他终端的 model / vertex buffer 仍可能指向旧坐标，且
+该清理不会可靠地产生本项目监听的 add/remove 广播。
+
+### 当前内部 fallback
+
+当前实现为兼容 addon 私有 `_clearModel` 字段变化，仍在该字段不存在时使用一次
+`clearTextureAtlas()` fallback，并记录 `clear-atlas-fallback`。这只是依赖升级失配时的
+最后兜底，不是 mount / visibility 的公共契约：
+
+- 调用方不得复制或直接触发 fallback；
+- 日志出现 `clear-atlas-fallback` 时，应立即核对 addon 私有 renderer 结构；
+- 升级验证必须确认正常路径仍命中 `clear-model`，而不是长期依赖 fallback。
+
+## Contract 3：Context loss 必须复位 entry 并允许重新激活
+
+`webglLoaded` 是 cache entry 的生命周期 guard。context loss 时如果只 dispose 回调中的
+局部 `webgl`，该 flag 会保持 `true`，后续 `activateWebgl` 将直接返回，终端无法重新
+尝试 WebGL。
+
+当前正确路径统一调用 `disposeWebgl(entry)`：
+
+```typescript
+function disposeWebgl(entry: CachedEntry): void {
+  if (entry.webglAddon) {
+    try { entry.webglAddon.dispose(); } catch { /* already disposed */ }
+    entry.webglAddon = undefined;
+  }
+  entry.webglLoaded = false;
+}
+
+webgl.onContextLoss(() => {
+  disposeWebgl(entry);
+  entry.term.refresh(0, entry.term.rows - 1);
+});
+```
+
+契约：
+
+- context loss 后 `webglAddon` 必须为空且 `webglLoaded === false`；
+- 当前终端立即 refresh，以安全降级到可用 renderer；
+- 回调内不递归创建 addon；之后再次进入 `activateWebgl(ptyId)` 时 guard 放行并重试；
+- `loadWebgl` 创建或加载失败的 catch 路径同样必须把 `webglLoaded` 复位为 `false`；
+- `disposeWebgl` 保持可重复调用，不因 addon 已 dispose 而抛出未处理异常。
+
+## Validation & Error Matrix
+
+| 现象 | 可能原因 | 必须检查 |
+|---|---|---|
+| 多个终端同时出现相同“换字”乱码 | atlas 变化只刷新事件源，其他 renderer 保留旧坐标 | add/remove 是否都广播全部 cache entry |
+| 隐藏终端恢复后仍乱码，resize 才恢复 | visibility 路径只有 refresh，没有重建当前 model | 是否调用 `resetRenderStateForPty` |
+| remount 一个终端后其他静置终端乱码 | 恢复路径调用了共享 `clearTextureAtlas()` | 删除直接清 atlas，改用 reset helper |
+| context loss 后永久停留在降级 renderer | 只 dispose 局部 addon，`webglLoaded` 仍为 true | 统一调用 `disposeWebgl(entry)` |
+| WebGL 首次加载失败后永不重试 | catch 未复位 loaded guard | catch 必须设置 `webglLoaded = false` |
+| 日志出现 `clear-atlas-fallback` | addon 私有 `_renderer._clearModel` 不再可用 | 视为升级不兼容，复核实现而非复制 fallback |
+| pane 已关闭时 reset 抛错 | helper 未处理 cache miss / disposed addon | cache miss 与 addon miss 必须安全 no-op |
+
+## Good / Base / Bad Cases
+
+- **Good**：atlas add/remove 广播 refresh；mount/visibility 只 reset 当前 renderer model；
+  context loss 经 `disposeWebgl` 清 addon 并复位 loaded flag。
+- **Base**：只依赖 atlas 广播；可见终端通常正常，但暂停期间未消费 refresh 的终端在
+  恢复后仍可能保留旧 model，因此不完整。
+- **Bad**：恢复当前终端时调用 `clearTextureAtlas`；只刷新事件源终端；context loss
+  只 dispose 局部变量而不清 `webglLoaded`。
 
 ## Wrong vs Correct
 
-### Wrong
+### Wrong：恢复时清共享 atlas
 
-```ts
-// 只挂 onContextLoss,不挂 atlas 变更监听
-function loadWebgl(entry: CachedEntry): void {
-  const webgl = new WebglAddon();
-  webgl.onContextLoss(() => {
-    webgl.dispose();
-    entry.term.refresh(0, entry.term.rows - 1);
-  });
-  entry.term.loadAddon(webgl);   // ← atlas page merge 后,本终端若 dormant 就持续乱码
-}
-```
-
-bug 表现:多 claude code 并发跑一段时间,**所有**终端同时出现**完全相同形状**的乱码(中文 → 拉丁字母组合),resize 单个终端可恢复但其他不恢复。
-
-### Correct
-
-```ts
-function loadWebgl(entry: CachedEntry): void {
-  const webgl = new WebglAddon();
-  webgl.onContextLoss(() => {
-    webgl.dispose();
-    entry.term.refresh(0, entry.term.rows - 1);
-  });
-  webgl.onAddTextureAtlasCanvas(refreshAllTerminalsForAtlasChange);     // ← 唤醒所有 dormant 终端
-  webgl.onRemoveTextureAtlasCanvas(refreshAllTerminalsForAtlasChange);
-  entry.term.loadAddon(webgl);
-}
-```
-
----
-
-## Common Mistake:以为每个终端有自己的 atlas
-
-### Symptom
-- 给单个终端测试时一切正常,跑多个 AI 终端(claude/codex)并发一段时间后所有终端同时显示乱码;
-- 乱码不是色块/雪花,而是"别的合法字形"(中文变成拉丁字母组合);
-- 同一字符多次出现的乱码完全一致;
-- resize 一个终端只修复一个。
-
-### Cause
-- 假设每个 `new Terminal()` 拥有独立的 WebGL 资源 —— **错**。
-- `acquireTextureAtlas`(`node_modules/@xterm/addon-webgl/src/CharAtlasCache.ts`)按配置全局命中,mini-term 所有终端的 fontFamily/fontSize/lineHeight/theme/DPR 均一致 → 100% 共享同一个 `TextureAtlas` 实例。
-- atlas page merge 时 `_mergePages` 与 `_deletePage`(`TextureAtlas.ts:207-244`)原地改 glyph 字段,但 GPU vertex buffer 是 per-renderer 的,不会自动同步。
-
-### Fix / Prevention
-- 在 `loadWebgl` 内挂 `onAddTextureAtlasCanvas` / `onRemoveTextureAtlasCanvas` → `refreshAllTerminalsForAtlasChange`(见上文 Convention);
-- **不要**用"给每个终端配不同 fontFamily 字符串绕过共享"作为修复 —— 内存 N 倍、首屏抖动、且 atlas 仍有上游 page merge 行为,治标不治本;
-- **不要**禁用 WebGL 退回 Canvas —— 分屏 + 高频 TUI 输出场景性能明显下降。
-
----
-
-## Gotcha:`_requestClearModel` 上游永不重置 + dormant renderer 漏唤醒
-
-> **Warning**: `@xterm/addon-webgl@0.19.0` 的 `TextureAtlas._requestClearModel` 一旦被置 true,在整个 addon 源码内**没有任何地方**赋回 false(grep `_requestClearModel\s*=` 仅 3 处:1 处 init=false、2 处 assign=true)。这意味着 atlas merge 后,所有 owner renderer 每帧都强制 `_clearModel(true) + _updateModel(0, rows-1)` —— 上游"过度保守但安全"的兜底,但前提是 renderer 必须被 xterm.js core 至少 schedule 一次 `renderRows`。AI 终端等待响应时长时间无 PTY 输出 → render loop dormant → 永远不消费 `_requestClearModel` → 持续乱码。
->
-> 本项目通过广播 `term.refresh(0, rows-1)` 强制 dirty 标记,补上上游遗漏的 dormant 唤醒。**不要假设 xterm.js core 会自己处理**。
-
----
-
-## 未覆盖路径:`RenderService._isPaused` 拦截 + 可见性恢复时的 partial update 残留
-
-> v0.4.18(9bb05e4)的 `term.refresh` 广播修复仍漏了一种场景:`@xterm/xterm@6.0.0` 的 `RenderService` 自带 IntersectionObserver 监视 `screenElement`,不可见(`intersectionRatio === 0` / `isIntersecting === false`)时 `_isPaused = true`,**refreshRows 直接 return 只设 `_needsFullRefresh = true`**(`node_modules/@xterm/xterm/src/browser/services/RenderService.ts:148-152`)。mini-term 切 tab 时 `TerminalArea` 只渲染 active tab,非 active tab 的 `wrapper.remove()` 让所有终端的 screenElement 脱离 DOM,触发 `_isPaused = true`。此期间 atlas 事件路径的 `term.refresh` 全部被吞掉。
->
-> 切回 tab 时 IntersectionObserver 自动 flush 一次 `refreshRows(0, rowCount - 1)`,但是 —— **此时 GlyphRenderer vertex buffer 中仍是 page merge 前的 glyph 旧坐标**。如果 RenderService 触发的是 partial 路径(`_updateModel(start, end)`,start≠0 或 end≠rows-1),漏改的行就持续乱码。具体表现:用户截图 `clip-1779957312528.png` 中部分行换字(中文/数字 → 拉丁字母)、相邻行正常,且**不会自行恢复,必须 resize / 切走再回来**才能修。
-
-### Convention:`TerminalInstance` 的 `visibilityObserver` + mount 后必须主动 `clearTextureAtlas`
-
-```ts
-// terminalCache.ts
-export function clearAtlasForPty(ptyId: number): void {
-  const entry = cache.get(ptyId);
-  if (!entry?.webglAddon) return;
-  entry.webglAddon.clearTextureAtlas();   // 清 atlas pages + _clearModel(true) + _requestRedrawViewport
-}
-
-// TerminalInstance.tsx:mount 路径
+```typescript
 requestAnimationFrame(() => {
-  // ... fit + refresh
-  requestAnimationFrame(() => {
-    activateWebgl(ptyId);
-    requestAnimationFrame(() => clearAtlasForPty(ptyId));   // ← 三层 rAF:webglAddon 就绪后第一帧
-  });
+  entry.webglAddon?.clearTextureAtlas();
 });
+```
 
-// TerminalInstance.tsx:可见性恢复路径
-const visibilityObserver = new IntersectionObserver((entries) => {
-  if (entries.some((e) => e.isIntersecting)) {
-    requestAnimationFrame(() => {
-      fitAddon.fit();
-      term.refresh(0, term.rows - 1);
-      clearAtlasForPty(ptyId);   // ← 切回 tab / 重新可见时强制清 atlas
-    });
-  }
+### Correct：只重建当前终端
+
+```typescript
+requestAnimationFrame(() => {
+  resetRenderStateForPty(ptyId);
 });
-visibilityObserver.observe(container);
 ```
 
-`clearTextureAtlas` 内部:
-1. `atlas.clearTexture()` 清空所有 page canvas + cacheMap + `page.version++` → 下次 render 时 GlyphRenderer.render(line 359-364)检测 version mismatch 自动重传 GPU texture
-2. `_clearModel(true)` 清 `RenderModel.lineLengths` + GlyphRenderer vertex buffer 全 fill(0)
-3. `_requestRedrawViewport()` fire `_onRequestRedraw({start:0, end:rows-1})` → RenderService.refreshRows(0, rows-1, isRedrawOnly=true) → 下一帧 _updateModel(0, rows-1) 全 viewport 重写
+### Wrong：context loss 留下 stale guard
 
-### Implementation boundary:`useTerminalMount`
-
-`TerminalInstance` 不应内联维护 xterm mount / fit / observer / WebGL activation 链路。该生命周期统一放在 `src/hooks/useTerminalMount.ts`,并遵守:
-
-- mount 后的顺序必须保持 `fit + refresh` → `activateWebgl(ptyId)` → `clearAtlasForPty(ptyId)`;
-- 可见性恢复必须执行 `fit + refresh` 并调用 `clearAtlasForPty(ptyId)`;
-- 所有 `requestAnimationFrame`、`setTimeout`、`ResizeObserver`、`IntersectionObserver` 都必须在 unmount cleanup 中取消或断开;
-- resize 高频路径只保留最新一帧 fit,结束后再做一次完整 refresh。
-
-### Runtime hardening
-
-Terminal runtime paths must not leak unhandled errors into the React/Tauri event loop:
-
-- `resize_pty` calls go through `resizePtySafely`, which ignores invalid sizes, deduplicates unchanged grids, and catches backend rejection;
-- PTY input writes from xterm `onData`, paste, drag/drop, and context-menu actions must resolve even if the backend PTY has already exited;
-- `term.write`, `fitAddon.fit`, `term.refresh`, WebGL activation, and `clearTextureAtlas` must be guarded where they can race with pane close/unmount;
-- WebGL context loss must reset `webglLoaded` so future mount/config changes can try to re-activate WebGL instead of leaving a stale loaded flag.
-
-### Visual shell
-
-Terminal visual effects such as the depth UI must stay on the React wrapper (`terminal-depth-shell`) and CSS pseudo-elements. They must not mutate the xterm internal DOM, canvas, renderer, or addon lifecycle.
-
-- Pseudo-elements must use `pointer-events: none` so drag/drop, selection, context menu, and xterm input remain unaffected.
-- The visual shell must be removable via config (`terminalDepthUi`) without changing `useTerminalMount` behavior or terminal sizing.
-- Do not add transforms to the xterm wrapper/content; transforms can affect WebGL canvas rasterization and fit measurements.
-
-### Wrong vs Correct
-
-#### Wrong(v0.4.18:9bb05e4 only)
-
-```ts
-// 仅在 atlas 事件路径广播 term.refresh,没有可见性恢复路径的兜底
-function loadWebgl(entry: CachedEntry): void {
-  const webgl = new WebglAddon();
-  webgl.onAddTextureAtlasCanvas(refreshAllTerminalsForAtlasChange);
-  webgl.onRemoveTextureAtlasCanvas(refreshAllTerminalsForAtlasChange);
-  entry.term.loadAddon(webgl);
-}
-// TerminalInstance visibilityObserver 内只调 term.refresh
+```typescript
+webgl.onContextLoss(() => {
+  webgl.dispose();
+  entry.term.refresh(0, entry.term.rows - 1);
+  // entry.webglLoaded 仍为 true，activateWebgl 无法重试。
+});
 ```
 
-bug 表现:切走 tab → atlas 在另一个 tab 发生 merge → 切回原 tab → 部分行乱码且不会自愈,必须 resize 才恢复。
+### Correct：统一释放 entry 状态
 
-#### Correct(v0.4.20+)
-
-```ts
-// 事件路径 + mount + 可见性恢复 三条路径都覆盖
-function loadWebgl(entry: CachedEntry): void {
-  const webgl = new WebglAddon();
-  webgl.onAddTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('add'));
-  webgl.onRemoveTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('remove'));
-  entry.term.loadAddon(webgl);
-}
-// + TerminalInstance.tsx mount/visibilityObserver 内调 clearAtlasForPty
+```typescript
+webgl.onContextLoss(() => {
+  disposeWebgl(entry);
+  entry.term.refresh(0, entry.term.rows - 1);
+});
 ```
 
-### 为什么事件路径不用 `clearTextureAtlas`
+## Tests Required
 
-`clearTextureAtlas` 把 `vertex buffer + lineLengths` 全 fill(0),下一帧 `GlyphRenderer.render`(line 348-353):
-```ts
-for (let y = 0; y < renderModel.lineLengths.length; y++) {
-  const sub = this._vertices.attributes.subarray(si, si + renderModel.lineLengths[y] * INDICES_PER_CELL);
-  // lineLengths[y]=0 → sub 长度=0 → 这一行画 0 个 cell
-}
-gl.drawElementsInstanced(...bufferLength / INDICES_PER_CELL = 0);   // ← 整屏空白
+1. **Atlas add/remove 广播**：构造多个 cache entry，触发任一 addon 的 add/remove，断言
+   所有 `rows > 0` 的终端均收到整屏 refresh；
+2. **Hidden → visible**：终端暂停期间触发 atlas 变化，恢复可见后断言调用
+   `resetRenderStateForPty`，且正常路径不调用 `clearTextureAtlas`；
+3. **Remount**：激活 WebGL 后才 reset 当前 model；其他共享终端不被 dispose 或清 atlas；
+4. **Context loss**：断言 addon 被 dispose、entry addon 清空、`webglLoaded=false`，并
+   refresh 当前终端；
+5. **重新激活**：context loss 后再次调用 `activateWebgl`，断言 guard 放行并尝试创建
+   新 addon；
+6. **Load failure**：构造 addon 加载异常，断言 `webglLoaded` 回到 false；
+7. **No-op**：cache entry 或 addon 已不存在时调用 reset，不抛异常；
+8. **多终端手工回归**：分屏运行多个高输出终端并切换可见性，确认无同步换字乱码。
+
+## Diagnostics / Upgrade Checklist
+
+诊断开关：
+
+```javascript
+localStorage.setItem('miniterm.atlasDebug', '1');
+localStorage.removeItem('miniterm.atlasDebug');
 ```
 
-可见终端会闪烁一帧。事件路径的可见终端用 `term.refresh` 同帧走 `_clearModel + _updateModel(0, rows-1)` 把 lineLengths 与 vertex buffer 同时写满,**无闪烁**。
+当前关键日志：
 
-mount / 可见性恢复路径本来就要重绘整屏,< 1 帧空白被 mount/切换动画掩盖,可接受。
+- `atlas-event`：add/remove 原因、cache 数量和各终端暂停状态；
+- `clear-model`：当前终端 renderer model 正常重建；
+- `clear-atlas-fallback`：私有 renderer API 失配告警。
 
----
-
-## 诊断开关:`localStorage.miniterm.atlasDebug`
-
-在浏览器 DevTools 控制台:
-```js
-localStorage.setItem('miniterm.atlasDebug', '1');   // 打开
-localStorage.removeItem('miniterm.atlasDebug');     // 关闭
-```
-
-打开后 `console.log` 输出:
-- `[atlasDebug] atlas-event` — atlas page add/remove 触发时,带 `reason / cacheSize / terminals[{ptyId, rows, isPaused}]`
-- `[atlasDebug] clear-atlas` — `clearAtlasForPty` 调用时,带 `ptyId / rows`
-
-用途:复现乱码场景时,观察:
-1. atlas 事件频次 / 是否真的有 add/remove 触发
-2. 触发时各终端的 `_isPaused` 状态(经反射读 `term._core._renderService._isPaused`,xterm.js 私有字段)
-3. cacheSize 与可见性的关系
-
-默认 OFF,不污染普通用户控制台。
-
----
-
-## 适用范围与升级注意
-
-- 锁定版本:`@xterm/xterm@6.0.0` + `@xterm/addon-webgl@0.19.0`(见 `package.json`)。
-- 升级 `@xterm/addon-webgl` 前需检查:
-  - `CharAtlasCache.ts` 是否仍是模块级 `charAtlasCache: ITextureAtlasCacheEntry[] = []` 全局缓存;
-  - `TextureAtlas.ts` 的 `_mergePages` / `_deletePage` 是否仍直接修改 glyph 字段(而非生成新 glyph 对象);
-  - `WebglRenderer.renderRows` 是否仍依赖 dirty schedule 触发 `beginFrame`;
-  - 若上游已修复 dormant renderer 漏唤醒(`_requestClearModel` 改为 per-renderer flag,或 atlas 主动通过 event 强制 schedule frame),可考虑去掉本项目的广播 refresh —— 但需要回归测试多 claude 并发场景。
-- 验收测试点(无自动化):分屏开 4 个终端各跑 `claude code`,持续对话 10 分钟以上,观察是否再现"所有终端同时乱码";切 tab 后切回的终端首屏是否正常。
+升级 xterm 或 WebGL addon 前必须复核：共享 atlas 缓存方式、add/remove 事件语义、
+renderer model 清理入口和 context-loss 生命周期。只有在源码与多终端回归共同证明契约
+变化后，才能调整广播或 reset 行为。

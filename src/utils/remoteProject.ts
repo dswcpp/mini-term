@@ -9,7 +9,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { getProjectEnvs } from './projectEnv';
-import type { ProjectConfig, ShellConfig, SshConnection, SshRemoteSpec, TerminalEncoding } from '../types';
+import type { ProjectConfig, ShellConfig, SshConnection, SshRemoteSpec } from '../types';
 
 /** 是否为 SSH 远程项目 */
 export function isRemoteProject(project: ProjectConfig | undefined | null): boolean {
@@ -36,11 +36,13 @@ export function remotePaneLabel(project: ProjectConfig): string {
  *   （shell/args/cwd 被后端忽略,envVars 不注入,密码 autofill 由后端 spawn 前预注册）;
  *   断链 / 本机缺 ssh 客户端时后端返回明确 Err,由调用方展示。
  * - 本地项目 → 按 shell 启动（行为与既有链路完全一致）。
+ *   `cwd` 覆盖仅对本地项目生效(worktree 终端在 worktree 目录起 shell);
+ *   远程项目的工作目录由 sshRemote.remotePath 决定,覆盖无意义。
  */
 export function createProjectPty(
   project: ProjectConfig,
   shell: ShellConfig | undefined,
-  encoding?: TerminalEncoding,
+  cwd?: string,
 ): Promise<number> {
   if (project.sshConnectionId) {
     const sshRemote: SshRemoteSpec = {
@@ -51,7 +53,6 @@ export function createProjectPty(
       shell: '',
       args: [],
       cwd: '',
-      ...(encoding ? { encoding } : {}),
       sshRemote,
     });
   }
@@ -61,8 +62,7 @@ export function createProjectPty(
   return invoke<number>('create_pty', {
     shell: shell.command,
     args: shell.args ?? [],
-    cwd: project.path,
+    cwd: cwd ?? project.path,
     envs: getProjectEnvs(project.id),
-    ...(encoding ? { encoding } : {}),
   });
 }

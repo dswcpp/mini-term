@@ -934,20 +934,6 @@ impl SshMcp {
                     Ok(Err(second_err)) => {
                         if second_err.is_transport() {
                             session2.mark_unhealthy(Duration::from_secs(30));
-                            append_transfer_audit_log(
-                                direction,
-                                &conn_name_for_audit,
-                                local_path,
-                                remote_path,
-                                None,
-                            );
-                            return Err(McpError::internal_error(
-                                format!(
-                                    "ssh {} failed after retry: {second_err}",
-                                    direction.as_str()
-                                ),
-                                None,
-                            ));
                         }
                         append_transfer_audit_log(
                             direction,
@@ -956,7 +942,7 @@ impl SshMcp {
                             remote_path,
                             None,
                         );
-                        return Err(McpError::invalid_params(
+                        return Err(McpError::internal_error(
                             format!("ssh {} failed after retry: {second_err}", direction.as_str()),
                             None,
                         ));
@@ -1066,10 +1052,7 @@ impl ServerHandler for SshMcp {
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(
             "mini-term SSH tools. Use ssh_list_connections to discover SSH connections \
-            that mini-term has shared with agents, ssh_exec to run remote commands, \
-            ssh_upload to copy a local file to a remote host over SFTP, and ssh_download \
-            to copy a remote file back to the local machine. Prefer ssh_upload/ssh_download \
-            for file transfer instead of base64-encoding through ssh_exec."
+            that mini-term has shared with agents, then ssh_exec to run commands on them."
                 .into(),
         );
         info
@@ -1130,21 +1113,6 @@ mod tests {
             identity_file: Some("/home/u/.ssh/id_rsa".into()),
             group: Some("内网".into()),
         }
-    }
-
-    // --- server instructions ---
-
-    #[tokio::test]
-    async fn server_instructions_advertise_sftp_tools() {
-        let server = SshMcp {
-            project_id: None,
-            pool: Arc::new(SshPool::new()),
-        };
-        let info = server.get_info();
-        let instructions = info.instructions.unwrap_or_default();
-        assert!(instructions.contains("ssh_upload"), "got: {instructions}");
-        assert!(instructions.contains("ssh_download"), "got: {instructions}");
-        assert!(instructions.contains("base64"), "got: {instructions}");
     }
 
     // --- parse_project_id ---

@@ -22,14 +22,8 @@ export interface AppConfig {
   uiFontFamily?: string;
   terminalFontFamily?: string;
   terminalLigatures?: boolean;
-  terminalEncoding: TerminalEncoding;
-  terminalDepthUi: boolean;
-  terminalLogEnabled?: boolean;
-  terminalLogPath?: string;
-  terminalLogMaxSizeMb?: number;
   layoutSizes?: number[];
   middleColumnSizes?: number[];
-  settingsModalSize?: SettingsModalSize;
   theme: 'auto' | 'light' | 'dark';
   skin: 'none' | 'blueprint' | 'fluent2';
   terminalFollowTheme: boolean;
@@ -43,11 +37,9 @@ export interface AppConfig {
   longPasteToFile: boolean;
   longPasteLineThreshold: number;
   longPasteCharThreshold: number;
-  projectsVisible: boolean;
-  sessionsVisible: boolean;
-  filesVisible: boolean;
-  gitVisible: boolean;
-  overviewVisible: boolean;
+  /** 远程项目粘贴落盘目录（剪贴板图片 / 长文本经 SFTP 上传的目标）。
+   *  相对路径 = 相对项目根（默认 `.mini-term/pasted`）；也可填远端绝对路径或 `~/xxx` */
+  remotePasteDir: string;
   /** 中间栏（Projects + Files）整体折叠开关 */
   middleColumnVisible: boolean;
   /** 右侧悬浮抽屉（Sessions / Git）宽度 */
@@ -56,86 +48,77 @@ export interface AppConfig {
   hookEnabled: boolean;
   smartCopyPaste: boolean;
   sshConnections: SshConnection[];
-  /** cc-connect 集成配置(进程管理 + 项目导入 + dashboard 嵌入),未配置时缺省 */
-  ccConnect?: CcConnectConfig;
+  /** 显式创建的 SSH 分组名（允许空分组）。连接的 group 字段仍是归属单一来源 */
+  sshGroups?: string[];
+  /** 移动端中转配置(docs/adr/0001),未配置时缺省 */
+  mobileRelay?: MobileRelayConfig;
 }
 
-export interface SettingsModalSize {
-  width: number;
-  height: number;
+/** 移动端中转体系的持久化配置。字段对齐后端 #[serde(rename_all = "camelCase")]. */
+export interface MobileRelayConfig {
+  /** 中转服务器地址(如 wss://relay.example.com),空字符串 = 未配置、不建连 */
+  relayUrl: string;
+  /** 桌面端接入密钥,须与中转的 MT_RELAY_DESKTOP_KEY 一致;空 = 未填,连不上 */
+  desktopKey?: string;
+  /** AI 启动器列表:决定手机能起哪些 agent;命令与 shell 只存在于这里 */
+  launchers?: AiLauncher[];
 }
 
-export interface CcConnectConfig {
-  /** cc-connect 可执行文件路径,空字符串 = 后端优先使用内置 sidecar,再回退 PATH */
-  exePath: string;
-  /** config.toml 路径,空字符串 = 默认 ~/.cc-connect/config.toml */
-  configPath: string;
-  /** mini-term 启动时自动 spawn cc-connect */
-  autoStart: boolean;
-  /** 额外启动参数 */
-  extraArgs: string[];
-  /** mini-term project id → cc-connect project name 映射 */
-  projectLinks: Record<string, string>;
-}
-
-/** cc_connect_probe 返回值。字段命名对齐后端 #[serde(rename_all = "camelCase")]. */
-export interface CcConnectStatus {
-  running: boolean;
-  port: number;
-  version?: string;
-  /** mini-term 自己 spawn 的 cc-connect PID,用户手动启动时为 undefined */
-  ownPid?: number;
-  /** 探活失败时的友好诊断信息(token 缺失 / 端口不通 / 配置文件不存在等) */
-  diagnostic?: string;
-}
-
-/** cc_connect_list_projects 返回的单条项目记录。 */
-export interface CcProject {
+/** 一条具名的「怎么起一个 AI 会话」。 */
+export interface AiLauncher {
+  id: string;
   name: string;
-  workDir?: string;
-  agentType?: string;
-  hasPlatform: boolean;
+  /** 引用 availableShells 里的条目名;缺省 = 用 defaultShell */
+  shell?: string;
+  command: string;
 }
 
-/** cc_connect_import_project 的请求载荷。 */
-export interface ImportProjectRequest {
-  name: string;
-  workDir: string;
-  agentType?: string;
+/** mobile-relay-status 事件 / mobile_relay_status 命令的载荷。 */
+export interface MobileRelayStatusPayload {
+  status:
+    | 'disconnected'
+    | 'connecting'
+    | 'connected'
+    | 'reconnecting'
+    | 'versionMismatch'
+    /** 密钥不匹配 */
+    | 'authFailed'
+    /** 中转未配置 MT_RELAY_DESKTOP_KEY(fail-closed) */
+    | 'keyNotConfigured';
+  /** versionMismatch 时携带,用于给出明确升级提示 */
+  expectedVersion?: number;
+  actualVersion?: number;
+  /** 移动端配对状态(中转推送);undefined = 尚未知悉(未连上中转) */
+  paired?: boolean;
 }
 
-/**
- * cc_connect_import_project 返回值。
- *
- * 后端在 toml 已写盘但 cc-connect restart 失败时不再返 Err,而是把 restartOk=false 编码到 result 里,
- * 让前端按 tomlWritten && !restartOk 仍然写入 projectLinks(避免"项目存在但未关联"半同步态)。
- */
-export interface ImportProjectResult {
-  name: string;
-  tomlWritten: boolean;
-  restartOk: boolean;
-  restartError?: string;
+/** mobile-rename-pane 事件载荷:移动端改会话名(标题已由后端收敛:去空白/控制字符/限长)。 */
+export interface MobileRenamePanePayload {
+  paneId: string;
+  /** 空串 = 清除自定义名,回落 shell 名 */
+  title: string;
 }
 
-/**
- * cc_connect_unlink_project 返回值。语义与 ImportProjectResult 对称:
- * deletedOk=true 但 restartOk=false 时,前端仍清理本地 projectLinks。
- */
-export interface UnlinkProjectResult {
-  name: string;
-  deletedOk: boolean;
-  restartOk: boolean;
-  restartError?: string;
+/** mobile-start-session 事件载荷:移动端发起的一次会话创建请求。 */
+export interface MobileStartSessionPayload {
+  requestId: string;
+  projectId: string;
+  launcherId: string;
+  /** 启动器展示名(通知文案用) */
+  launcherName: string;
+  /** 绑定的 shell 名;缺省 = 用默认 shell */
+  shellName?: string;
+  /** 要写入 PTY 的启动命令 */
+  command: string;
 }
 
-/** cc_connect_import_projects(批量导入)返回值:一次写盘 + 仅重启一次。 */
-export interface BatchImportResult {
-  imported: string[];
-  skipped: string[];
-  tomlWritten: boolean;
-  restartOk: boolean;
-  restartError?: string;
-}
+/** 发起会话失败原因,对齐后端 StartSessionFailReason 的 camelCase 串。 */
+export type StartSessionFailReason =
+  | 'desktopOffline'
+  | 'projectNotFound'
+  | 'launcherNotFound'
+  | 'notSupported'
+  | 'spawnFailed';
 
 export interface ProjectConfig {
   id: string;
@@ -155,6 +138,9 @@ export interface ProjectConfig {
   /** SSH 远程项目：有值 = 该项目指向远程机器上的目录（引用 sshConnections 里的连接 id）。
    *  此时 `path` 存远程 POSIX 绝对路径。连接被删除 → 项目进入「断链」错误态。 */
   sshConnectionId?: string;
+  /** 子项目(worktree「设为项目」)：有值 = 渲染在该父项目下方缩进一级,
+   *  且**不进 projectTree**(树里只有顶层项目与分组)。拖出/「脱离父项目」时清除并入树。 */
+  parentProjectId?: string;
 }
 
 export interface ProjectEnvVar {
@@ -169,16 +155,6 @@ export interface ShellConfig {
   command: string;
   args?: string[];
 }
-
-export type TerminalEncoding =
-  | 'auto'
-  | 'utf-8'
-  | 'gbk'
-  | 'gb18030'
-  | 'big5'
-  | 'shift_jis'
-  | 'euc-kr'
-  | 'windows-1252';
 
 export interface EditorConfig {
   name: string;
@@ -200,8 +176,8 @@ export interface SshConnection {
 
 export interface SavedPane {
   shellName: string;
-  customTitle?: string;
-  terminalEncoding?: TerminalEncoding;
+  /** 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd */
+  cwd?: string;
 }
 
 export type SavedSplitNode =
@@ -213,6 +189,15 @@ export interface SavedTab {
   splitLayout: SavedSplitNode;
 }
 
+/**
+ * 磁盘上的项目布局。
+ *
+ * `tabs` 是历史包袱:曾经有一层「项目级 tab」，但界面上从来没有切换入口，
+ * 那层运行时状态已删除（终端标签的唯一出口是 PaneGroup 的 tab 栏）。
+ * 磁盘格式保留原样是为了向后兼容 Rust 端 `SavedProjectLayout` 与旧 config.json —
+ * **写出时恒为单元素**；读取旧配置遇到多元素时，后续 tab 的 pane 会被合并进
+ * 第一棵布局树（见 layoutRestore.ts），不丢用户的终端。
+ */
 export interface SavedProjectLayout {
   tabs: SavedTab[];
   activeTabIndex: number;
@@ -224,8 +209,10 @@ export type PaneStatus = 'idle' | 'ai-idle' | 'ai-working' | 'error';
 
 export interface ProjectState {
   id: string;
-  tabs: TerminalTab[];
-  activeTabId: string;
+  /** 该项目的终端布局树；null = 还没有终端（渲染空态） */
+  layout: SplitNode | null;
+  /** 由 layout 聚合出的项目级状态（error > ai-working > ai-idle > idle） */
+  status: PaneStatus;
   needsAttention?: boolean;
 }
 
@@ -235,67 +222,12 @@ export interface AiCompletionNotification {
   projectName: string;
   timestamp: number;
   /** 通知类型,默认 'ai-completion'(AI 任务完成,点击跳到对应项目);
-   *  'wsl-info' 用于 WSL 启动器重写提示,不携带 projectId 跳转语义。 */
-  kind?: 'ai-completion' | 'wsl-info';
-  /** kind='wsl-info' 时的自定义消息文本,渲染时直接展示。 */
+   *  'wsl-info' 用于 WSL 启动器重写提示,不携带 projectId 跳转语义;
+   *  'mobile-session' 用于移动端远程发起的新会话(点击跳到对应项目);
+   *  'paste-error' 用于远程粘贴上传失败(错误态图标,点击仅关闭)。 */
+  kind?: 'ai-completion' | 'wsl-info' | 'mobile-session' | 'paste-error';
+  /** kind='wsl-info' / 'mobile-session' 时的自定义消息文本,渲染时直接展示。 */
   message?: string;
-}
-
-// === 工作区总览 ===
-
-export type WorkspaceOverviewRefreshStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-export interface OverviewTotals {
-  projectCount: number;
-  openTabCount: number;
-  paneCount: number;
-  aiWorkingCount: number;
-  gitChangedProjectCount: number;
-  gitChangeCount: number;
-  notificationCount: number;
-}
-
-export interface OverviewProjectSummary {
-  projectId: string;
-  name: string;
-  path: string;
-  status: PaneStatus;
-  tabCount: number;
-  paneCount: number;
-  aiWorkingCount: number;
-  gitChangeCount: number;
-  gitError?: string;
-  ccConnectLinked: boolean;
-  ccConnectProjectName?: string;
-  ccConnectMissing: boolean;
-}
-
-export interface OverviewCcConnectSummary {
-  running: boolean;
-  port: number;
-  version?: string;
-  ownPid?: number;
-  diagnostic?: string;
-  linkedProjectCount: number;
-  missingLinkCount: number;
-  remoteListLoaded: boolean;
-  remoteListError?: string;
-}
-
-export interface WorkspaceOverviewState {
-  refreshStatus: WorkspaceOverviewRefreshStatus;
-  lastUpdated?: number;
-  error?: string;
-  totals: OverviewTotals;
-  projects: OverviewProjectSummary[];
-  ccConnect: OverviewCcConnectSummary;
-}
-
-export interface TerminalTab {
-  id: string;
-  customTitle?: string;
-  splitLayout: SplitNode;
-  status: PaneStatus;
 }
 
 export type SplitNode =
@@ -306,9 +238,10 @@ export interface PaneState {
   id: string;
   shellName: string;
   customTitle?: string;
-  terminalEncoding?: TerminalEncoding;
   status: PaneStatus;
   ptyId?: number;
+  /** 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd,随布局持久化 */
+  cwd?: string;
 }
 
 // === AI 会话 ===
@@ -460,15 +393,20 @@ export interface GitRepoInfo {
   name: string;
   path: string;
   currentBranch?: string;
+  /** 该条目是不是某个主仓库的 linked worktree */
+  isWorktree?: boolean;
 }
 
-export type VcsKind = 'git' | 'svn';
-
-export interface VcsRepoInfo {
+/** list_worktrees 返回的单条工作区记录(主工作区 + linked worktree) */
+export interface WorktreeInfo {
   name: string;
   path: string;
-  vcsKind: VcsKind;
-  currentBranch?: string;
+  /** HEAD 所在分支;detached / 失效条目为 undefined */
+  branch?: string;
+  isMain: boolean;
+  /** false = 目录已丢失/元数据损坏,可 prune 的失效条目 */
+  isValid: boolean;
+  isLocked: boolean;
 }
 
 export interface GitCommitInfo {
@@ -478,6 +416,8 @@ export interface GitCommitInfo {
   body?: string;
   author: string;
   timestamp: number;
+  /** 全部父提交 hash（第 0 个是主线父），用于绘制分支拓扑图 */
+  parentHashes: string[];
 }
 
 export interface CommitFileInfo {

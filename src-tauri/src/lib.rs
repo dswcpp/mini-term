@@ -1,84 +1,25 @@
 mod ai_sessions;
-mod cc_connect;
 mod clipboard;
 mod config;
+mod conpty_bootstrap;
 mod editor;
 mod fs;
 mod git;
 mod hook_registry;
 mod hook_server;
+mod mobile_mirror;
+mod mobile_relay;
 mod process_monitor;
 mod pty;
 mod remote_ssh;
 mod search;
 mod ssh;
 mod ssh_mcp_registry;
-mod svn;
-mod terminal_log;
-mod vcs;
+mod window_input_recovery;
 mod window_theme;
 mod wsl_distros;
 
 use tauri::Manager;
-
-#[cfg(windows)]
-extern "system" {
-    fn ReleaseCapture() -> i32;
-    fn GetAsyncKeyState(v_key: i32) -> i16;
-    fn GetWindowLongW(hwnd: *mut std::ffi::c_void, n_index: i32) -> i32;
-    fn SetWindowLongW(hwnd: *mut std::ffi::c_void, n_index: i32, new_long: i32) -> i32;
-    fn SetWindowPos(
-        hwnd: *mut std::ffi::c_void,
-        hwnd_insert_after: *mut std::ffi::c_void,
-        x: i32,
-        y: i32,
-        cx: i32,
-        cy: i32,
-        flags: u32,
-    ) -> i32;
-}
-
-#[cfg(windows)]
-fn disable_native_window_frame(window: &tauri::WebviewWindow) {
-    let Ok(hwnd) = window.hwnd() else {
-        eprintln!("[setup] native window decorations fallback failed: missing HWND");
-        return;
-    };
-
-    const GWL_STYLE: i32 = -16;
-    const WS_CAPTION: i32 = 0x00C00000;
-    const WS_SYSMENU: i32 = 0x00080000;
-    const WS_MINIMIZEBOX: i32 = 0x00020000;
-    const WS_MAXIMIZEBOX: i32 = 0x00010000;
-    const SWP_NOSIZE: u32 = 0x0001;
-    const SWP_NOMOVE: u32 = 0x0002;
-    const SWP_NOZORDER: u32 = 0x0004;
-    const SWP_FRAMECHANGED: u32 = 0x0020;
-
-    unsafe {
-        let hwnd = hwnd.0;
-        let style = GetWindowLongW(hwnd, GWL_STYLE);
-        let next_style = style & !(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
-        if next_style != style {
-            SetWindowLongW(hwnd, GWL_STYLE, next_style);
-            let _ = SetWindowPos(
-                hwnd,
-                std::ptr::null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
-            );
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn disable_native_window_frame(_window: &tauri::WebviewWindow) {}
-
-#[cfg(windows)]
-const VK_LBUTTON: i32 = 0x01;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -90,15 +31,14 @@ pub fn run() {
         .manage(pty::PtyManager::new())
         .manage(fs::FsWatcherManager::new())
         .manage(search::SearchManager::new())
-        .manage(cc_connect::CcConnectManager::new())
+        .manage(mobile_relay::MobileRelayManager::new())
         .manage(remote_ssh::RemoteSshState::new())
         .setup(|app| {
-            if let Some(window) = app.get_webview_window("main") {
-                if let Err(e) = window.set_decorations(false) {
-                    eprintln!("[setup] disable native window decorations failed: {}", e);
-                }
-                disable_native_window_frame(&window);
-            }
+            // portable-pty 0.8.1 会在第一次 openpty 时进程级缓存 ConPTY 函数表；
+            // 因此便携 DLL 的资源校验和绝对路径预载必须是 setup 的第一项，早于
+            // 任何可能创建 PTY 的初始化；预载引用保留到进程退出且不修改 PATH。
+            #[cfg(windows)]
+            conpty_bootstrap::initialize(app.handle());
 
             // identifier 从 com.tauri-app.tauri-app 切换为 com.mini-term.app 后,
             // 第一次启动时把旧 app_data_dir 下的 config.json 拷到新目录,
@@ -111,12 +51,19 @@ pub fn run() {
             let hook_state = hook_server::HookState::new();
             app.manage(hook_state.clone());
 
+            // 状态发射器:monitor 轮询与 hook server 直推共用同一份去重表,
+            // 避免迟到 hook 事件推错状态后 monitor 的纠正被去重吞掉
+            let status_emitter = process_monitor::StatusEmitter::new();
+            app.manage(status_emitter.clone());
+
             // 读取配置，仅当 hookEnabled == true 时才启动 hook server
             let app_config = config::read_config(app.handle());
             if app_config.hook_enabled {
-                if let Err(e) =
-                    hook_server::start_hook_server(app.handle().clone(), hook_state.clone())
-                {
+                if let Err(e) = hook_server::start_hook_server(
+                    app.handle().clone(),
+                    hook_state.clone(),
+                    status_emitter.clone(),
+                ) {
                     eprintln!("[setup] hook server 启动失败: {}", e);
                 }
             }
@@ -124,24 +71,32 @@ pub fn run() {
             // 启动进程监控（传入 hook_state 实现 hook 优先 + 轮询降级）
             let pty_manager = app.state::<crate::pty::PtyManager>();
             let pty_clone = pty_manager.inner().clone();
-            process_monitor::start_monitor(app.handle().clone(), pty_clone, hook_state);
+            process_monitor::start_monitor(
+                app.handle().clone(),
+                pty_clone,
+                hook_state,
+                status_emitter,
+            );
+
+            // 已配置中转地址时,启动对中转服务器的出站长连(断线自动指数退避重连)
+            if let Some(relay) = app_config.mobile_relay.as_ref() {
+                if !relay.relay_url.trim().is_empty() {
+                    app.state::<mobile_relay::MobileRelayManager>().apply(
+                        app.handle(),
+                        &relay.relay_url,
+                        &relay.desktop_key,
+                    );
+                }
+            }
             Ok(())
         })
-        .on_window_event(|_window, event| {
+        .on_window_event(|window, event| {
             // 窗口失焦时释放鼠标捕获，防止外部工具（截图等）与 WebView2
             // 事件处理冲突导致输入锁定。
-            // 但若用户正按住左键发起 modal move/size loop（拖拽标题栏 /
-            // 窗口边缘 resize），WebView2 子窗口会失焦触发该事件，此时
-            // ReleaseCapture 会取消系统的鼠标捕获并立即终止 modal loop，
-            // 表现为拖拽和 resize "光标变化但不生效"。
-            // 因此左键按下时跳过释放，留给系统自然处理；松开时再释放。
+            // 左键按下时不能立即取消正常的拖动/缩放；window_input_recovery
+            // 会等待松开后投递 WM_CANCELMODE，补上此前缺失的延迟清理。
             if let tauri::WindowEvent::Focused(false) = event {
-                #[cfg(windows)]
-                unsafe {
-                    if (GetAsyncKeyState(VK_LBUTTON) as u16 & 0x8000) == 0 {
-                        ReleaseCapture();
-                    }
-                }
+                window_input_recovery::recover_after_focus_loss(window);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -149,7 +104,6 @@ pub fn run() {
             config::save_config,
             pty::create_pty,
             pty::write_pty,
-            pty::set_pty_encoding,
             pty::resize_pty,
             pty::kill_pty,
             pty::arm_ssh_autofill,
@@ -161,7 +115,6 @@ pub fn run() {
             fs::create_directory,
             fs::read_file_content,
             fs::rename_entry,
-            fs::move_entry,
             fs::delete_entry,
             fs::filter_directories,
             ai_sessions::get_ai_sessions,
@@ -171,18 +124,10 @@ pub fn run() {
             remote_ssh::ssh_remote_validate_dir,
             remote_ssh::ssh_remote_ai_sessions,
             remote_ssh::ssh_remote_ai_session_content,
+            remote_ssh::ssh_remote_upload_paste,
             wsl_distros::list_wsl_distros,
             git::get_git_status,
             git::get_git_diff,
-            vcs::discover_vcs_repos,
-            vcs::get_vcs_status,
-            vcs::get_vcs_changes_status,
-            vcs::get_vcs_diff,
-            vcs::vcs_commit,
-            vcs::vcs_stage,
-            vcs::vcs_stage_all,
-            vcs::vcs_update,
-            vcs::vcs_discard_file,
             git::discover_git_repos,
             git::get_git_log,
             git::get_repo_branches,
@@ -197,6 +142,11 @@ pub fn run() {
             git::git_unstage_all,
             git::git_commit,
             git::git_discard_file,
+            git::list_worktrees,
+            git::add_worktree,
+            git::remove_worktree,
+            git::prune_worktrees,
+            git::get_worktree_branches,
             editor::open_in_editor,
             editor::open_path_with_default_app,
             clipboard::read_clipboard_image,
@@ -211,16 +161,14 @@ pub fn run() {
             ssh_mcp_registry::enable_ssh_mcp,
             ssh_mcp_registry::disable_ssh_mcp,
             window_theme::set_window_dark_mode,
-            cc_connect::cc_connect_probe,
-            cc_connect::cc_connect_read_token,
-            cc_connect::cc_connect_config_path,
-            cc_connect::cc_connect_start,
-            cc_connect::cc_connect_stop,
-            cc_connect::cc_connect_restart,
-            cc_connect::cc_connect_list_projects,
-            cc_connect::cc_connect_import_project,
-            cc_connect::cc_connect_import_projects,
-            cc_connect::cc_connect_unlink_project,
+            mobile_relay::mobile_relay_apply,
+            mobile_relay::mobile_relay_status,
+            mobile_relay::mobile_relay_request_pairing_code,
+            mobile_relay::mobile_relay_reset_pairing,
+            mobile_relay::mobile_relay_update_sessions,
+            mobile_relay::mobile_relay_launchers_changed,
+            mobile_relay::mobile_relay_start_session_result,
+            mobile_relay::mobile_relay_check_launcher_command,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

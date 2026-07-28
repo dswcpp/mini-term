@@ -1,128 +1,169 @@
 # Tauri command nested struct 参数 invoke 约定
 
-> Rust 端 `#[tauri::command] fn xxx(req: T)` 参数是 struct 时,前端
-> `invoke('xxx', { ??? })` 必须传 **`{ req: {...} }`**,而**不是**把字段
-> 散开。这是 Tauri + serde 参数传递机制的非显然行为,不遵守会得到
-> cryptic 的 `failed to deserialize parameter` 错误。
+> Rust 端 `#[tauri::command] fn xxx(request: T)` 的参数是 struct 时，前端
+> `invoke('xxx', payload)` 必须把 struct 放在同名的 top-level key 下；不能把
+> struct 字段直接摊平。否则 Tauri 无法反序列化该 command 参数。
+>
+> **伪代码声明**：本文使用的 `ProjectImportRequest`、`import_project` 及所有字段均为
+> 中性伪代码，只用于说明边界形状，不代表当前仓库存在对应命令、类型、文件或测试。
+> 在实际实现落地前，不得把这些名称写成“参考实现”或“已有实现”。
 
 ## Scope / Trigger
 
-新增 Tauri command 时,只要参数含 struct(非 primitive / `String` / `Vec<primitive>` /
-`Option<primitive>`),就必须读本 spec。
+新增或修改 Tauri command 时，只要任一参数是 struct（而非 primitive、`String`、
+`Vec<primitive>` 或 `Option<primitive>`），就必须按本规范核对 Rust 参数名、serde
+字段名和前端 invoke payload。
 
-参考实现:`src-tauri/src/cc_connect.rs::cc_connect_import_project` 的 `req: ImportProjectRequest`
-+ 前端 `src/utils/ccConnectActions.ts` 的 invoke 调用。
-
-## Signatures
+## Signatures（伪代码）
 
 ```rust
-// 后端
+use serde::Deserialize;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ImportProjectRequest {
+pub struct ProjectImportRequest {
     pub name: String,
-    pub work_dir: String,
-    pub agent_type: Option<String>,
+    pub root_dir: String,
+    pub tags: Vec<String>,
 }
 
 #[tauri::command]
-pub fn cc_connect_import_project(
-    req: ImportProjectRequest,
-    config_path: Option<String>,
-) -> Result<(), String> { ... }
+pub fn import_project(
+    request: ProjectImportRequest,
+    dry_run: Option<bool>,
+) -> Result<(), String> {
+    // 伪代码：在这里执行校验与导入。
+    Ok(())
+}
+```
+
+```typescript
+// 伪代码：名称和字段只展示跨边界形状。
+interface ProjectImportRequest {
+  name: string;
+  rootDir: string;
+  tags: string[];
+}
+
+const request: ProjectImportRequest = {
+  name: 'demo',
+  rootDir: '/path/to/project',
+  tags: [],
+};
+
+await invoke<void>('import_project', {
+  request,
+  dryRun: false,
+});
 ```
 
 ## Contracts
 
-### Tauri invoke 参数映射规则
+### Tauri invoke 参数映射
 
-Tauri command 的**每个参数名**会成为 invoke payload 的 **top-level key**;参数类型决定该 key 的 value 形态:
+Tauri command 的每个 Rust 参数名对应 invoke payload 的一个 **top-level key**；参数
+类型只决定该 key 的 value 形状：
 
-| Rust 参数声明 | 前端 invoke payload |
+| Rust 参数声明（伪代码） | 前端 invoke payload |
 |---|---|
-| `name: String` | `{ name: "foo" }` |
-| `config_path: Option<String>` | `{ configPath: "..." }` 或省略 |
-| `req: ImportProjectRequest`(struct) | **`{ req: { name, workDir, agentType } }`** ← `req` 是 wrapping key |
-| `req: T, config_path: Option<String>` | `{ req: {...}, configPath: "..." }` |
+| `name: String` | `{ name: 'demo' }` |
+| `dry_run: Option<bool>` | `{ dryRun: false }`，或省略该可选 key |
+| `request: ProjectImportRequest` | **`{ request: { name, rootDir, tags } }`** |
+| `request: T, dry_run: Option<bool>` | `{ request: { ... }, dryRun: false }` |
 
-参数名本身遵循 Tauri 自动 **snake_case → camelCase** 转换(`config_path` → `configPath`)。
+在默认 Tauri command 参数命名规则下，Rust 的 snake_case 参数名在 JavaScript payload
+侧使用 camelCase（例如 `dry_run` → `dryRun`）。struct 自身仍必须单独处理字段命名。
 
 ### Rust struct 字段命名
 
-每个跨边界 struct **必须**显式 `#[serde(rename_all = "camelCase")]`。否则字段在 invoke 时前端
-不知道该传 `work_dir` 还是 `workDir`,容易踩 mismatch。mini-term 全 codebase 既有约定是 camelCase。
+跨边界 struct 必须显式声明 `#[serde(rename_all = "camelCase")]`，并让对应 TypeScript
+interface 与 serde 产物逐字段一致：
+
+- Rust `root_dir` ↔ TypeScript `rootDir`；
+- Rust `Option<T>` ↔ TypeScript 可选字段 `field?: T`；
+- Rust `Vec<T>` ↔ TypeScript `T[]`；
+- 新增、删除或重命名字段时，两端必须在同一变更中更新。
+
+不要依赖调用方猜测 snake_case 或 camelCase，也不要在 `invoke` 调用处临时声明一份
+脱离共享类型的 inline shape。
 
 ## Validation & Error Matrix
 
-| 错误现象 | 原因 |
-|---|---|
-| `failed to deserialize parameter 'req'` | 前端传了 flat `{ name, workDir }` 而不是 `{ req: { name, workDir } }` |
-| `missing field 'workDir'` | 前端字段写 `work_dir` 但 struct 已加 `#[serde(rename_all = "camelCase")]` |
-| `unknown variant ...` | TS interface 字段拼写不对齐 Rust struct(常见:`ownPid` vs `own_pid`、`workDir` vs `work_dir`) |
-| `invalid type: null, expected struct` | Option<T>(struct) 前端没传时正常;非 Option 前端没传则错 |
+| 错误现象 | 原因 | 修复 |
+|---|---|---|
+| `failed to deserialize parameter 'request'` | payload 缺少 `request` wrapping key，或其值不是 object | 传 `{ request: { ... } }` |
+| `missing field 'rootDir'` | 前端漏字段，或误传为 `root_dir` | 对齐 serde camelCase 字段名 |
+| `invalid type: null, expected struct` | 必填 struct 参数传了 `null` | 传完整 object；只有 Rust 参数为 `Option<T>` 时才允许缺省 |
+| command 能调用但字段值错误 | Rust 与 TypeScript 类型独立漂移 | 使用共享 TS interface，并增加边界 fixture / invoke 测试 |
+| 可选 top-level 参数被误判为必填 | 前端无条件传入错误占位值 | 对 `Option<T>` 省略 key 或传合法值，不伪造默认值 |
 
 ## Good / Base / Bad Cases
 
-- **Good**:Rust 端用 struct + `#[serde(rename_all = "camelCase")]`,TS interface 字段名严格 camel,invoke 时显式 wrap `{ req: {...} }`,Option<T> 字段允许 omit
-- **Base**:参数全部 primitive(`name: String, work_dir: String, agent_type: String`),无 wrapping 烦恼,但参数多了 invoke payload 难读且 IDE 自动补全弱
-- **Bad**:Rust struct 用默认 snake_case 字段 + TS interface 也 snake_case → 短期能跑,破坏 mini-term 既有 camelCase 跨边界约定,后续新 command 风格不一致;前端 invoke 时漏 `req:` wrapping → 反序列化静默失败
+- **Good**：Rust struct 显式 camelCase serde；TypeScript interface 逐字段对齐；invoke
+  payload 保留参数 wrapping key；边界测试同时覆盖成功和错误 payload。
+- **Base**：少量 primitive 参数直接作为 top-level key 传递；参数增长后再重构为 struct，
+  并同步修改调用方和测试。
+- **Bad**：把 struct 字段摊平、混用 snake_case/camelCase，或复制一份 inline TS 类型后
+  假设编译通过就等于运行时反序列化正确。
 
 ## Tests Required
 
-新增带 struct 参数的 command 时,**必须**做端到端 invoke 验证:
+真正新增带 struct 参数的 command 时，必须补齐以下验证；本文伪代码本身不表示这些
+测试已经存在：
 
-1. **前端 invoke 后端**:后端 deserialize 出的 struct 字段值正确(可用临时 `println!` 或最简 manual smoke 验证一次,落地后删除)
-2. **TS 类型定义**:在 `src/types.ts` 显式定义 `interface XxxRequest`,**严格对齐** Rust serde camelCase 产物;不要在 invoke 里现写 inline type
-3. **camelCase 一致性**:跨边界结构(`CcConnectStatus / CcProject / ImportProjectRequest` 等)字段名 review 时必须明确 1:1 对齐 Rust `#[serde(rename_all = "camelCase")]` 产物 ── 重点 `ownPid` `workDir` `agentType` `hasPlatform` 这种容易拼错的
+1. **成功 invoke**：使用完整 `{ request: {...} }` payload，断言 Rust 收到的每个字段值；
+2. **错误 shape**：使用摊平 payload，断言调用失败且错误指向缺失的 struct 参数；
+3. **camelCase fixture**：至少覆盖一个 Rust snake_case 字段，断言前端 camelCase 可反序列化；
+4. **可选参数**：分别验证省略和提供 `Option<T>` top-level 参数；
+5. **类型同步**：TypeScript interface 与 Rust struct 的新增、删除、可选性变化在 review 中逐项核对。
 
-## Wrong vs Correct
+## Wrong vs Correct（伪代码）
 
 ### Wrong
 
 ```typescript
-// ❌ 散开字段,Tauri 在 req 参数找不到 struct
-await invoke('cc_connect_import_project', {
-  name: 'foo',
-  workDir: '/path',
-  agentType: 'claudecode',
-  configPath: '~/.cc-connect/config.toml',
-});
-// 报错: failed to deserialize parameter `req`: missing field `name`
-
-// ❌ 漏 camelCase 转换(struct 已加 rename_all)
-await invoke('cc_connect_import_project', {
-  req: { name: 'foo', work_dir: '/path' },   // 应该 workDir
-  config_path: '...',                         // 应该 configPath
+// 错：struct 字段被摊平，后端找不到 request 参数。
+await invoke('import_project', {
+  name: 'demo',
+  rootDir: '/path/to/project',
+  tags: [],
+  dryRun: false,
 });
 
-// ❌ inline type 写 invoke,容易和 Rust 不对齐
-await invoke<{ name: string; work_dir: string }>('xxx', { ... });
+// 错：struct 已声明 camelCase serde，调用方却发送 snake_case 字段。
+await invoke('import_project', {
+  request: {
+    name: 'demo',
+    root_dir: '/path/to/project',
+    tags: [],
+  },
+});
 ```
 
 ### Correct
 
 ```typescript
-// types.ts
-export interface ImportProjectRequest {
+// 伪代码共享类型。
+interface ProjectImportRequest {
   name: string;
-  workDir: string;
-  agentType?: string;
+  rootDir: string;
+  tags: string[];
 }
 
-// 调用处
-import type { ImportProjectRequest } from '../types';
-await invoke('cc_connect_import_project', {
-  req: {
-    name: 'foo',
-    workDir: '/path',
-    agentType: 'claudecode',   // Option<String> 可省
-  } satisfies ImportProjectRequest,
-  configPath: '~/.cc-connect/config.toml',   // Option<String> 可传 undefined
+const request: ProjectImportRequest = {
+  name: 'demo',
+  rootDir: '/path/to/project',
+  tags: [],
+};
+
+// 参数名是 top-level key，struct 字段保持嵌套。
+await invoke<void>('import_project', {
+  request,
+  dryRun: false,
 });
 ```
 
 ## Related
 
-- [cc-connect-integration.md](./cc-connect-integration.md) ── 8 个 cc-connect command 都遵循本约定
 - [../frontend/type-safety.md](../frontend/type-safety.md) ── 前端跨边界类型约定
 - [../guides/cross-layer-thinking-guide.md](../guides/cross-layer-thinking-guide.md) ── Boundary 思考清单

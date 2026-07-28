@@ -1,18 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { ask, message } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore, isExpanded, toggleExpandedDir } from '../store';
 import { useTauriEvent } from '../hooks/useTauriEvent';
 import { showContextMenu } from '../utils/contextMenu';
-import { showAlert, showConfirm, showPrompt } from '../utils/prompt';
+import { showPrompt } from '../utils/prompt';
 import { isAiPty } from '../utils/terminalCache';
 import { MOD_LABEL } from '../utils/platform';
-import { getVcsStatus } from '../utils/vcsApi';
-import { saveConfig } from '../utils/configApi';
 import { DiffModal } from './DiffModal';
 import { FileViewerModal } from './FileViewerModal';
-import { getFileDragPath, initFileDrag, isFileDragging } from '../utils/fileDragState';
+import { initFileDrag } from '../utils/fileDragState';
 import { getFileTreeCache, setFileTreeCache, projectCacheKey } from '../utils/projectDataCache';
 import { useT } from '../i18n';
 import type { FileEntry, FsChangePayload, GitFileStatus, PtyOutputPayload } from '../types';
@@ -29,8 +28,6 @@ interface TreeNodeProps {
   remoteConnectionId?: string;
 }
 
-const MOVE_AUTO_EXPAND_DELAY_MS = 650;
-
 function getRelativePath(targetPath: string, rootPath: string) {
   const normalize = (value: string) => value.replace(/[\\/]+/g, '/').replace(/\/$/, '');
   const normalizedRoot = normalize(rootPath);
@@ -43,30 +40,6 @@ function getRelativePath(targetPath: string, rootPath: string) {
   return normalizedTarget.slice(normalizedRoot.length + 1).replace(/\//g, sep);
 }
 
-function normalizeTreePath(value: string): string {
-  return value.replace(/[\/]+/g, '/').replace(/\/+$/, '');
-}
-
-function parentTreePath(value: string): string {
-  const normalized = normalizeTreePath(value);
-  const index = normalized.lastIndexOf('/');
-  return index <= 0 ? '' : normalized.slice(0, index);
-}
-
-function canMoveToDirectory(sourcePath: string, targetDir: string): boolean {
-  const source = normalizeTreePath(sourcePath);
-  const target = normalizeTreePath(targetDir);
-  if (!source || !target) return false;
-  if (source === target) return false;
-  if (parentTreePath(source) === target) return false;
-  if (target.startsWith(`${source}/`)) return false;
-  return true;
-}
-
-function dispatchFileTreeRefresh(): void {
-  window.dispatchEvent(new CustomEvent('file-tree-refresh'));
-}
-
 function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewFile, remoteConnectionId }: TreeNodeProps) {
   const t = useT();
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -74,8 +47,6 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     activeProjectId ? isExpanded(activeProjectId, entry.path) : false
   );
   const [children, setChildren] = useState<FileEntry[]>([]);
-  const [moveDropActive, setMoveDropActive] = useState(false);
-  const autoExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 仅远程展开时置 true:SFTP 往返可达秒级,需要行内 spinner 反馈;
   // 本地列目录近乎即时,置 loading 反而闪一帧
   const [loadingChildren, setLoadingChildren] = useState(false);
@@ -103,13 +74,6 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     setChildren(entries);
   }, [entry.path, projectRoot, remoteConnectionId]);
 
-  const clearAutoExpandTimer = useCallback(() => {
-    if (autoExpandTimerRef.current) {
-      clearTimeout(autoExpandTimerRef.current);
-      autoExpandTimerRef.current = null;
-    }
-  }, []);
-
   // 恢复时(初始即展开)加载一次子节点
   useEffect(() => {
     if (expanded && entry.isDir) {
@@ -129,10 +93,6 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
       invoke('unwatch_directory', { path: entry.path }).catch(() => {});
     };
   }, [expanded, entry.isDir, entry.path, projectRoot, remoteConnectionId]);
-
-  useEffect(() => {
-    return () => clearAutoExpandTimer();
-  }, [clearAutoExpandTimer]);
 
   const handleToggle = useCallback(async () => {
     if (!entry.isDir) {
@@ -164,68 +124,32 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     }
   }, [expanded, entry.path, loadChildren, remoteConnectionId]));
 
-  useEffect(() => {
-    const handler = () => {
-      if (expanded) loadChildren();
-    };
-    window.addEventListener('file-tree-refresh', handler);
-    return () => window.removeEventListener('file-tree-refresh', handler);
-  }, [expanded, loadChildren]);
-
-  const handleMoveHover = useCallback(() => {
-    const sourcePath = getFileDragPath();
-    const canDrop = !!sourcePath && entry.isDir && canMoveToDirectory(sourcePath, entry.path);
-    if (isFileDragging() && canDrop) {
-      if (!moveDropActive) setMoveDropActive(true);
-      if (!expanded && !autoExpandTimerRef.current) {
-        autoExpandTimerRef.current = setTimeout(() => {
-          autoExpandTimerRef.current = null;
-          void loadChildren().then(() => {
-            setExpanded(true);
-            if (activeProjectId) {
-              toggleExpandedDir(activeProjectId, entry.path, true);
-            }
-          });
-        }, MOVE_AUTO_EXPAND_DELAY_MS);
-      }
-    } else if (moveDropActive) {
-      setMoveDropActive(false);
-      clearAutoExpandTimer();
-    }
-  }, [activeProjectId, clearAutoExpandTimer, entry.isDir, entry.path, expanded, loadChildren, moveDropActive]);
-
-  const handleMoveLeave = useCallback(() => {
-    if (moveDropActive) setMoveDropActive(false);
-    clearAutoExpandTimer();
-  }, [clearAutoExpandTimer, moveDropActive]);
-
-  const handleMoveDrop = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
-    const sourcePath = getFileDragPath();
-    if (sourcePath) e.stopPropagation();
-    clearAutoExpandTimer();
-    setMoveDropActive(false);
-    if (!sourcePath || !entry.isDir || !canMoveToDirectory(sourcePath, entry.path)) return;
-
-    try {
-      await invoke('move_entry', { projectRoot, sourcePath, targetDir: entry.path });
-      dispatchFileTreeRefresh();
-    } catch (err) {
-      await showAlert(
-        t('fileTree.dialog.moveFailedTitle'),
-        t('fileTree.dialog.moveFailedMessage', { error: String(err) }),
-      );
-    }
-  }, [clearAutoExpandTimer, entry.isDir, entry.path, projectRoot, t]);
-
   return (
     <div>
       <div
         data-file-item
         className={`flex items-center gap-1 py-[3px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 ${
           entry.ignored ? 'text-[var(--text-muted)] opacity-50' : entry.isDir ? 'text-[var(--color-folder)]' : 'text-[var(--color-file)]'
-        } ${moveDropActive ? 'bg-[var(--accent-subtle)] outline outline-1 outline-[var(--accent)]' : ''}`}
+        }`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        role="treeitem"
+        aria-expanded={entry.isDir ? expanded : undefined}
+        aria-label={entry.name}
+        tabIndex={0}
         onClick={handleToggle}
+        onKeyDown={(e) => {
+          // 目录：Enter/Space/→ 展开，← 折叠；文件：Enter/Space 打开预览
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            void handleToggle();
+          } else if (entry.isDir && e.key === 'ArrowRight' && !expanded) {
+            e.preventDefault();
+            void handleToggle();
+          } else if (entry.isDir && e.key === 'ArrowLeft' && expanded) {
+            e.preventDefault();
+            void handleToggle();
+          }
+        }}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -277,23 +201,22 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
                 await invoke('rename_entry', { projectRoot, oldPath: entry.path, newName: newName.trim() });
                 loadChildren();
               } catch (err) {
-                await showAlert(
-                  t('fileTree.dialog.renameFailedTitle'),
-                  t('fileTree.dialog.renameFailedMessage', { error: String(err) }),
-                );
+                console.error('重命名失败:', err);
+                await message(t('fileTree.dialog.renameFailedMessage', { error: String(err) }), { title: t('fileTree.dialog.renameFailedTitle'), kind: 'error' });
               }
             },
           });
           items.push({
             label: t('fileTree.menu.delete'),
             onClick: async () => {
-              const confirmed = await showConfirm(
-                entry.isDir ? t('fileTree.dialog.deleteFolderTitle') : t('fileTree.dialog.deleteFileTitle'),
+              const confirmed = await ask(
                 entry.isDir
                   ? t('fileTree.dialog.deleteConfirmFolder', { name: entry.name })
                   : t('fileTree.dialog.deleteConfirmFile', { name: entry.name }),
                 {
-                  confirmLabel: t('fileTree.dialog.deleteOk'),
+                  title: entry.isDir ? t('fileTree.dialog.deleteFolderTitle') : t('fileTree.dialog.deleteFileTitle'),
+                  kind: 'warning',
+                  okLabel: t('fileTree.dialog.deleteOk'),
                   cancelLabel: t('fileTree.dialog.deleteCancel'),
                 },
               );
@@ -301,10 +224,8 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
               try {
                 await invoke('delete_entry', { projectRoot, path: entry.path });
               } catch (err) {
-                await showAlert(
-                  t('fileTree.dialog.deleteFailedTitle'),
-                  t('fileTree.dialog.deleteFailedMessage', { error: String(err) }),
-                );
+                console.error('删除失败:', err);
+                await message(t('fileTree.dialog.deleteFailedMessage', { error: String(err) }), { title: t('fileTree.dialog.deleteFailedTitle'), kind: 'error' });
               }
             },
           });
@@ -348,9 +269,6 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
         onMouseDown={(e) => {
           if (e.button === 0) initFileDrag(entry.path, e.clientX, e.clientY);
         }}
-        onMouseMove={handleMoveHover}
-        onMouseLeave={handleMoveLeave}
-        onMouseUp={handleMoveDrop}
       >
         {entry.isDir && (
           loadingChildren ? (
@@ -358,7 +276,7 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
               <span className="inline-block w-2.5 h-2.5 border border-[var(--text-muted)] border-t-transparent rounded-full animate-spin" />
             </span>
           ) : (
-            <span className="text-[13px] w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
+            <span className="text-base w-3 text-center text-[var(--text-muted)] transition-transform duration-150"
               style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', display: 'inline-block' }}>
               ▾
             </span>
@@ -447,9 +365,9 @@ export function FileTree() {
   const handleOpenInEditor = useCallback(async (editorName?: string) => {
     if (!project) return;
     if (!config.editors.length) {
-      await showAlert(
-        t('fileTree.dialog.noEditorTitle'),
+      await message(
         t('fileTree.dialog.noEditorMessage'),
+        { title: t('fileTree.dialog.noEditorTitle'), kind: 'warning' },
       );
       return;
     }
@@ -460,14 +378,15 @@ export function FileTree() {
       });
     } catch (err) {
       const detail = typeof err === 'string' ? err : String(err);
-      await showAlert(t('fileTree.dialog.openEditorFailedTitle'), detail);
+      console.error('打开编辑器失败:', err);
+      await message(detail, { title: t('fileTree.dialog.openEditorFailedTitle'), kind: 'error' });
     }
   }, [project, config.editors, t]);
 
   const handleSwitchAndOpen = useCallback((editorName: string) => {
     const newConfig = { ...config, defaultEditor: editorName };
     useAppStore.getState().setConfig(newConfig);
-    void saveConfig(newConfig);
+    invoke('save_config', { config: newConfig });
     handleOpenInEditor(editorName);
   }, [config, handleOpenInEditor]);
 
@@ -481,7 +400,6 @@ export function FileTree() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [diffTarget, setDiffTarget] = useState<GitFileStatus | null>(null);
   const [viewFilePath, setViewFilePath] = useState<string | null>(null);
-  const [rootMoveDropActive, setRootMoveDropActive] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rootEntriesRef = useRef(rootEntries);
   rootEntriesRef.current = rootEntries;
@@ -489,9 +407,9 @@ export function FileTree() {
   gitStatusMapRef.current = gitStatusMap;
 
   const loadGitStatus = useCallback(() => {
-    if (!project || isRemote) return; // 远程项目跳过 VCS 状态(远程 VCS 二期)
+    if (!project || isRemote) return; // 远程项目跳过 git 状态(远程 Git 二期)
     const key = projectCacheKey(project);
-    getVcsStatus(project.path)
+    invoke<GitFileStatus[]>('get_git_status', { projectPath: project.path })
       .then((statuses) => {
         const map = new Map<string, GitFileStatus>();
         for (const s of statuses) map.set(s.path, s);
@@ -600,7 +518,7 @@ export function FileTree() {
     }
 
     const listPromise = invoke<FileEntry[]>('list_directory', { projectRoot: projectPath, path: projectPath });
-    const statusPromise = getVcsStatus(projectPath).catch(() => [] as GitFileStatus[]);
+    const statusPromise = invoke<GitFileStatus[]>('get_git_status', { projectPath }).catch(() => [] as GitFileStatus[]);
     Promise.all([listPromise, statusPromise]).then(([entries, statuses]) => {
       if (cancelled) return;
       const map = new Map<string, GitFileStatus>();
@@ -641,15 +559,6 @@ export function FileTree() {
     }
   }, [project?.path, isRemote, loadRootEntries]));
 
-  useEffect(() => {
-    const handler = () => {
-      loadRootEntries();
-      loadGitStatus();
-    };
-    window.addEventListener('file-tree-refresh', handler);
-    return () => window.removeEventListener('file-tree-refresh', handler);
-  }, [loadRootEntries, loadGitStatus]);
-
   useTauriEvent<FsChangePayload>('fs-change', useCallback((payload: FsChangePayload) => {
     if (project && !isRemote && payload.projectPath === project.path) {
       debouncedRefresh();
@@ -673,41 +582,6 @@ export function FileTree() {
     if (isRemote) return; // 文件查看走本地读文件链路,远程 MVP 只读浏览不支持
     setViewFilePath(path);
   }, [isRemote]);
-
-  const isRootDropSurface = useCallback((target: EventTarget | null) => {
-    return target instanceof Element && !target.closest('[data-file-item]');
-  }, []);
-
-  const handleRootMoveHover = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    const sourcePath = getFileDragPath();
-    const canDrop = !!project && !!sourcePath && isRootDropSurface(e.target) && canMoveToDirectory(sourcePath, project.path);
-    if (isFileDragging() && canDrop) {
-      if (!rootMoveDropActive) setRootMoveDropActive(true);
-    } else if (rootMoveDropActive) {
-      setRootMoveDropActive(false);
-    }
-  }, [isRootDropSurface, project?.path, rootMoveDropActive]);
-
-  const handleRootMoveLeave = useCallback(() => {
-    if (rootMoveDropActive) setRootMoveDropActive(false);
-  }, [rootMoveDropActive]);
-
-  const handleRootMoveDrop = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!project || !isRootDropSurface(e.target)) return;
-    const sourcePath = getFileDragPath();
-    setRootMoveDropActive(false);
-    if (!sourcePath || !canMoveToDirectory(sourcePath, project.path)) return;
-
-    try {
-      await invoke('move_entry', { projectRoot: project.path, sourcePath, targetDir: project.path });
-      dispatchFileTreeRefresh();
-    } catch (err) {
-      await showAlert(
-        t('fileTree.dialog.moveFailedTitle'),
-        t('fileTree.dialog.moveFailedMessage', { error: String(err) }),
-      );
-    }
-  }, [isRootDropSurface, project?.path, t]);
 
   const handleRootContextMenu = useCallback((e: React.MouseEvent) => {
     if (!project) return;
@@ -748,7 +622,7 @@ export function FileTree() {
     <div data-panel className="h-full bg-[var(--bg-surface)] flex flex-col border-l border-[var(--border-subtle)] select-none">
       <div data-panel-header className="px-3 pt-3 pb-1.5 flex items-center justify-between gap-2 flex-shrink-0">
         <span className="text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium truncate">
-          Files — {project.name}
+          {t('panels.filesOf', { project: project.name })}
         </span>
         <div className="flex items-center flex-shrink-0 gap-1">
           {/* 内容搜索是本地 ripgrep 链路,远程项目隐藏 */}
@@ -757,9 +631,13 @@ export function FileTree() {
               type="button"
               onClick={() => setSearchModalOpen(true)}
               title={t('fileTree.header.searchTitle', { mod: MOD_LABEL })}
-              className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-sm leading-none px-1.5 py-0.5 rounded-[var(--radius-sm)] hover:bg-[var(--border-subtle)]"
+              aria-label={t('fileTree.header.searchTitle', { mod: MOD_LABEL })}
+              className="w-[26px] h-[26px] flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors rounded-[var(--radius-sm)] hover:bg-[var(--border-subtle)]"
             >
-              ⌕
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+                <circle cx="7" cy="7" r="4.2" />
+                <path d="M10.2 10.2L14 14" />
+              </svg>
             </button>
           )}
           <button
@@ -770,18 +648,22 @@ export function FileTree() {
               loadGitStatus();
             }}
             title={isRemote ? t('fileTree.remote.refreshTitle') : t('fileTree.header.refresh')}
-            className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-sm leading-none px-1.5 py-0.5 rounded-[var(--radius-sm)] hover:bg-[var(--border-subtle)]"
+            aria-label={isRemote ? t('fileTree.remote.refreshTitle') : t('fileTree.header.refresh')}
+            className="w-[26px] h-[26px] flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors rounded-[var(--radius-sm)] hover:bg-[var(--border-subtle)]"
           >
-            ↻
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M13.5 8a5.5 5.5 0 1 1-1.7-3.97" />
+              <path d="M13.6 2.6v3.2h-3.2" />
+            </svg>
           </button>
           {/* 外部编辑器打开的是本机路径,远程项目隐藏 */}
           {!isRemote && config.editors.length > 0 && (
-            <div className="flex items-center">
+            <div className="flex items-center ml-0.5 pl-1 border-l border-[var(--border-subtle)]">
               <button
                 type="button"
                 onClick={() => handleOpenInEditor()}
                 title={t('fileTree.header.openWithEditor', { editor: config.editors.find((e) => e.name === config.defaultEditor)?.name ?? config.editors[0]?.name ?? t('fileTree.header.editorFallback') })}
-                className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-xs leading-none px-1.5 py-0.5 rounded-l-[var(--radius-sm)] hover:bg-[var(--border-subtle)]"
+                className="h-[26px] flex items-center text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-xs px-1.5 rounded-l-[var(--radius-sm)] hover:bg-[var(--border-subtle)]"
               >
                 {config.editors.find((e) => e.name === config.defaultEditor)?.name ?? config.editors[0]?.name}
               </button>
@@ -797,7 +679,7 @@ export function FileTree() {
                     })));
                   }}
                   title={t('fileTree.menu.chooseOtherEditor')}
-                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-xs leading-none pl-0.5 pr-1 py-0.5 rounded-r-[var(--radius-sm)] hover:bg-[var(--border-subtle)] border-l border-[var(--border-subtle)]"
+                  className="h-[26px] flex items-center text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors text-xs pl-1 pr-1.5 rounded-r-[var(--radius-sm)] hover:bg-[var(--border-subtle)] border-l border-[var(--border-subtle)]"
                 >
                   <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">
                     <path d="M1.5 3L4 5.5L6.5 3" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -808,15 +690,7 @@ export function FileTree() {
           )}
         </div>
       </div>
-      <div
-        className={`flex-1 min-h-0 overflow-y-auto px-1 transition-colors ${
-          rootMoveDropActive ? 'bg-[var(--accent-subtle)] outline outline-1 outline-[var(--accent)] outline-offset-[-2px]' : ''
-        }`}
-        onContextMenu={handleRootContextMenu}
-        onMouseMove={handleRootMoveHover}
-        onMouseLeave={handleRootMoveLeave}
-        onMouseUp={handleRootMoveDrop}
-      >
+      <div className="flex-1 min-h-0 overflow-y-auto px-1" role="tree" aria-label={t('panels.files')} onContextMenu={handleRootContextMenu}>
         {loading && rootEntries.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-[var(--text-muted)] text-sm">
             {t('fileTree.empty.loading')}

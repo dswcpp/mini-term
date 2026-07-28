@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
-import { createPortal } from 'react-dom';
+import { invoke } from '@tauri-apps/api/core';
 import { Allotment } from 'allotment';
 import { useAppStore } from '../store';
+import { Modal } from './Modal';
 import { useT } from '../i18n';
-import { getVcsDiff } from '../utils/vcsApi';
-import type { GitFileStatus, GitDiffResult, DiffLine, VcsKind } from '../types';
+import type { GitFileStatus, GitDiffResult, DiffLine } from '../types';
 
 interface DiffModalProps {
   open: boolean;
@@ -12,7 +12,6 @@ interface DiffModalProps {
   projectPath: string;
   status: GitFileStatus;
   staged?: boolean;
-  vcsKind?: VcsKind;
 }
 
 type ViewMode = 'side-by-side' | 'inline';
@@ -153,7 +152,7 @@ export function SideBySideView({ hunks, fontSize = 13 }: { hunks: GitDiffResult[
 
 // ─── DiffModal ───
 
-export function DiffModal({ open, onClose, projectPath, status, staged, vcsKind }: DiffModalProps) {
+export function DiffModal({ open, onClose, projectPath, status, staged }: DiffModalProps) {
   const t = useT();
   const [viewMode, setViewMode] = useState<ViewMode>('side-by-side');
   const [diffResult, setDiffResult] = useState<GitDiffResult | null>(null);
@@ -167,38 +166,23 @@ export function DiffModal({ open, onClose, projectPath, status, staged, vcsKind 
     setError('');
     setDiffResult(null);
 
-    getVcsDiff({
+    invoke<GitDiffResult>('get_git_diff', {
       projectPath,
       filePath: status.path,
       staged: staged ?? false,
-      vcsKind: vcsKind ?? 'git',
     })
       .then(setDiffResult)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [open, projectPath, status.path, staged, vcsKind]);
-
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [open, onClose]);
+  }, [open, projectPath, status.path]);
 
   if (!open) return null;
 
   const fileName = status.path.split('/').pop() ?? status.path;
 
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center select-text" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-      <div
-        className="relative flex flex-col overflow-hidden bg-[var(--bg-surface)] border border-[var(--border-strong)] rounded-[var(--radius-md)] shadow-[var(--shadow-overlay)] animate-slide-in"
-        style={{ width: '90vw', height: '80vh' }}
-        onClick={(e) => e.stopPropagation()}
-      >
+  return (
+    <Modal open={open} onClose={onClose} align="center" ariaLabel={fileName}
+      panelClassName="w-[90vw] h-[80vh] select-text">
         {/* 工具栏 */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0">
           <div className="flex items-center gap-2">
@@ -270,8 +254,6 @@ export function DiffModal({ open, onClose, projectPath, status, staged, vcsKind 
               : <InlineView hunks={diffResult.hunks} fontSize={terminalFontSize} />
           )}
         </div>
-      </div>
-    </div>,
-    document.body,
+    </Modal>
   );
 }

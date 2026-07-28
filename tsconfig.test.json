@@ -16,9 +16,6 @@
     "src/utils/themeManager.ts",
     "src/utils/terminalSnapshot.ts",
     "src/utils/ptyWriteQueue.ts",
-    "src/utils/sshCommand.ts",
-    "src/utils/updateChecker.ts",
-    "src/utils/terminalEncoding.ts",
-    "src/utils/terminalLayoutPresets.ts"
+    "src/utils/wslPath.ts"
   ]
 }

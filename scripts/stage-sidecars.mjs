@@ -1,28 +1,22 @@
-// 构建 / 收集 mini-term 的 sidecar 二进制（miniterm-hook、mt-ssh-mcp、cc-connect）并就位。
+// 构建 mini-term 的 sidecar 二进制（miniterm-hook、mt-ssh-mcp）并就位。
 //
-// Rust sidecar 在独立 crate src-tauri/mt-sidecars/（不依赖 tauri-build），单独
-// 构建不触发主程序的 externalBin 校验；cc-connect 从仓库内预编译文件收集。
-// tauri.conf.json 声明了 bundle.externalBin，
+// 两个 sidecar 在独立 crate src-tauri/mt-sidecars/（不依赖 tauri-build），单独
+// 构建不触发主程序的 externalBin 校验。tauri.conf.json 声明了 bundle.externalBin，
 // tauri dev / tauri build 都校验 src-tauri/binaries/<name>-<triple>[.exe] 存在，
 // 缺则失败 —— 故本脚本必产出这些文件。
 //
-// dev/build 经 scripts/tauri.mjs 按命令 profile 调本脚本；CI（release.yml）直接调并带
+// dev 经 package.json 的 pretauri 钩子调本脚本；CI（release.yml）直接调并带
 // --release --target —— tauri-action 不走 npm run tauri，不会触发 pretauri。
 //
 //   node scripts/stage-sidecars.mjs                       dev: debug，triple 取 rustc host
 //   node scripts/stage-sidecars.mjs --release --target T  CI:  release，triple = T
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { stagePortableConpty, WINDOWS_X64_TARGET } from './stage-conpty.mjs';
 
 const SIDECARS = ['miniterm-hook', 'mt-ssh-mcp'];
-const PREBUILT_SIDECARS = [
-  {
-    name: 'cc-connect',
-    windowsX64Source: join('cc-connect', 'cc-connect-v1.4.1-windows-amd64.exe'),
-  },
-];
 const MANIFEST = join('src-tauri', 'mt-sidecars', 'Cargo.toml');
 // externalBin 校验 + 发布打包都从这里取（文件名带 triple 后缀）。
 const EXTERNAL_BIN_DIR = join('src-tauri', 'binaries');
@@ -85,42 +79,14 @@ for (const name of SIDECARS) {
   }
 }
 
-for (const { name, windowsX64Source } of PREBUILT_SIDECARS) {
-  const staged = join(EXTERNAL_BIN_DIR, `${name}-${triple}${ext}`);
-
-  if (triple === 'x86_64-pc-windows-msvc') {
-    if (!existsSync(windowsX64Source)) {
-      throw new Error(`缺少 ${windowsX64Source};无法打包 ${name}`);
-    }
-
-    copyFileSync(windowsX64Source, staged);
-    console.log(`[stage-sidecars] ${windowsX64Source} -> ${staged}`);
-
-    if (!release) {
-      const devCopy = join(DEV_EXE_DIR, `${name}${ext}`);
-      try {
-        copyFileSync(windowsX64Source, devCopy);
-        console.log(`[stage-sidecars] ${windowsX64Source} -> ${devCopy}`);
-      } catch (e) {
-        console.warn(`[stage-sidecars] 跳过 ${devCopy}（可能正在运行）: ${e.code ?? e.message}`);
-      }
-    }
-    continue;
+if (triple.includes('windows')) {
+  if (triple !== WINDOWS_X64_TARGET) {
+    throw new Error(
+      `[stage-sidecars] Windows 目标 ${triple} 尚无匹配的便携 ConPTY 资源`,
+    );
   }
-
-  if (triple.includes('windows')) {
-    throw new Error(`${name} 当前只随仓库提供 Windows x64 预编译文件,不支持目标 ${triple}`);
-  }
-
-  // Tauri 的 externalBin 对所有目标都会校验文件存在。仓库当前只提供 Windows x64
-  // cc-connect,非 Windows 包内放置不可启动占位文件;运行时只在 Windows 优先使用内置副本,
-  // macOS/Linux 继续回退 PATH 中的 cc-connect。
-  const stub = `#!/bin/sh
-echo "cc-connect is only bundled for Windows x64 in this mini-term build." >&2
-exit 127
-`;
-  writeFileSync(staged, stub, { encoding: 'utf8' });
-  chmodSync(staged, 0o755);
-  console.log(`[stage-sidecars] stub -> ${staged}`);
+  await stagePortableConpty({ target: triple });
+} else {
+  console.log(`[stage-sidecars] ${triple} 非 Windows，跳过便携 ConPTY staging`);
 }
 console.log('[stage-sidecars] done');
