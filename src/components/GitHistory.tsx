@@ -6,7 +6,7 @@ import { GitChanges } from './GitChanges';
 import { GitWorktreeModal } from './GitWorktreeModal';
 import { getGitHistoryCache, setGitHistoryCache } from '../utils/projectDataCache';
 import { useT } from '../i18n';
-import type { GitRepoInfo } from '../types';
+import type { VcsRepoInfo } from '../types';
 
 type GitTab = 'history' | 'changes';
 
@@ -21,7 +21,7 @@ export function GitHistory() {
   const [activeTab, setActiveTab] = useState<GitTab>('history');
 
   // 仓库选择器状态 — 提升到容器层，两个 tab 共享
-  const [repos, setRepos] = useState<GitRepoInfo[]>(() => {
+  const [repos, setRepos] = useState<VcsRepoInfo[]>(() => {
     return (project ? getGitHistoryCache(project.path) : undefined)?.repos ?? [];
   });
   const [selectedRepo, setSelectedRepo] = useState<string>(() => {
@@ -32,7 +32,7 @@ export function GitHistory() {
 
   const loadRepos = useCallback(() => {
     if (!project || isRemote) return;
-    invoke<GitRepoInfo[]>('discover_git_repos', { projectPath: project.path })
+    invoke<VcsRepoInfo[]>('discover_vcs_repos', { projectPath: project.path })
       .then((r) => {
         setRepos(r);
         let nextRepo = '';
@@ -85,6 +85,21 @@ export function GitHistory() {
   const [worktreeRepo, setWorktreeRepo] = useState<string | null>(null);
 
   const selectedRepoInfo = repos.find((r) => r.path === selectedRepo);
+  const gitRepos = repos.filter((repo) => repo.vcsKind === 'git');
+  const hasGitRepos = gitRepos.length > 0;
+  const hasSvnRepos = repos.some((repo) => repo.vcsKind === 'svn');
+
+  useEffect(() => {
+    if (activeTab === 'history' && !hasGitRepos && hasSvnRepos) {
+      setActiveTab('changes');
+    }
+  }, [activeTab, hasGitRepos, hasSvnRepos]);
+
+  const handleOpenWorktrees = useCallback((repoPath: string) => {
+    if (repos.some((repo) => repo.path === repoPath && repo.vcsKind === 'git')) {
+      setWorktreeRepo(repoPath);
+    }
+  }, [repos]);
 
   if (!project) {
     return (
@@ -139,6 +154,11 @@ export function GitHistory() {
                 &#9662;
               </span>
               <span className="truncate font-medium">{selectedRepoInfo?.name ?? t("gitHistory.selectRepo")}</span>
+              {selectedRepoInfo && (
+                <span className="shrink-0 text-sm leading-[18px] px-1.5 rounded font-mono uppercase text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                  {selectedRepoInfo.vcsKind}
+                </span>
+              )}
               {selectedRepoInfo?.currentBranch && (
                 <span className="shrink-0 text-sm leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
                   {selectedRepoInfo.isWorktree ? '⎇ ' : ''}{selectedRepoInfo.currentBranch}
@@ -162,6 +182,9 @@ export function GitHistory() {
                   }}
                 >
                   <span className="truncate">{r.name}</span>
+                  <span className="shrink-0 text-sm leading-[18px] px-1.5 rounded font-mono uppercase text-[var(--text-muted)] bg-[var(--border-subtle)]">
+                    {r.vcsKind}
+                  </span>
                   {r.currentBranch && (
                     <span className="shrink-0 text-sm leading-[18px] px-1.5 rounded font-mono text-[var(--text-muted)] bg-[var(--border-subtle)]">
                       {r.isWorktree ? '⎇ ' : ''}{r.currentBranch}
@@ -180,21 +203,22 @@ export function GitHistory() {
           <GitHistoryContent
             key={historyRefreshKey}
             projectPath={project.path}
-            repos={repos}
+            repos={gitRepos}
             refreshRepos={loadRepos}
-            onOpenWorktrees={setWorktreeRepo}
+            onOpenWorktrees={handleOpenWorktrees}
           />
         ) : (
           <GitChanges
             projectPath={project.path}
             repoPath={selectedRepo}
+            vcsKind={selectedRepoInfo?.vcsKind ?? 'git'}
             onCommitSuccess={onCommitSuccess}
           />
         )}
       </div>
 
       <GitWorktreeModal
-        repoPath={worktreeRepo}
+        repoPath={worktreeRepo && gitRepos.some((repo) => repo.path === worktreeRepo) ? worktreeRepo : null}
         onClose={() => setWorktreeRepo(null)}
         onChanged={loadRepos}
       />

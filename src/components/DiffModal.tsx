@@ -4,7 +4,7 @@ import { Allotment } from 'allotment';
 import { useAppStore } from '../store';
 import { Modal } from './Modal';
 import { useT } from '../i18n';
-import type { GitFileStatus, GitDiffResult, DiffLine } from '../types';
+import type { GitFileStatus, GitDiffResult, DiffLine, VcsKind } from '../types';
 
 interface DiffModalProps {
   open: boolean;
@@ -12,6 +12,7 @@ interface DiffModalProps {
   projectPath: string;
   status: GitFileStatus;
   staged?: boolean;
+  vcsKind?: VcsKind;
 }
 
 type ViewMode = 'side-by-side' | 'inline';
@@ -152,13 +153,14 @@ export function SideBySideView({ hunks, fontSize = 13 }: { hunks: GitDiffResult[
 
 // ─── DiffModal ───
 
-export function DiffModal({ open, onClose, projectPath, status, staged }: DiffModalProps) {
+export function DiffModal({ open, onClose, projectPath, status, staged, vcsKind }: DiffModalProps) {
   const t = useT();
   const [viewMode, setViewMode] = useState<ViewMode>('side-by-side');
   const [diffResult, setDiffResult] = useState<GitDiffResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize) || 14;
+  const effectiveVcsKind = vcsKind ?? status.vcsKind ?? 'git';
 
   useEffect(() => {
     if (!open) return;
@@ -166,15 +168,16 @@ export function DiffModal({ open, onClose, projectPath, status, staged }: DiffMo
     setError('');
     setDiffResult(null);
 
-    invoke<GitDiffResult>('get_git_diff', {
+    invoke<GitDiffResult>(effectiveVcsKind === 'svn' ? 'get_vcs_diff' : 'get_git_diff', {
       projectPath,
       filePath: status.path,
       staged: staged ?? false,
+      ...(effectiveVcsKind === 'svn' ? { vcsKind: effectiveVcsKind } : {}),
     })
       .then(setDiffResult)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, [open, projectPath, status.path]);
+  }, [open, projectPath, status.path, staged, effectiveVcsKind]);
 
   if (!open) return null;
 

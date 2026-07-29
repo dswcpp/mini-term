@@ -22,6 +22,11 @@ export interface AppConfig {
   uiFontFamily?: string;
   terminalFontFamily?: string;
   terminalLigatures?: boolean;
+  terminalEncoding: TerminalEncoding;
+  terminalDepthUi: boolean;
+  terminalLogEnabled: boolean;
+  terminalLogPath?: string;
+  terminalLogMaxSizeMb: number;
   layoutSizes?: number[];
   middleColumnSizes?: number[];
   theme: 'auto' | 'light' | 'dark';
@@ -53,6 +58,7 @@ export interface AppConfig {
   /** 移动端中转配置(docs/adr/0001),未配置时缺省 */
   mobileRelay?: MobileRelayConfig;
 }
+
 
 /** 移动端中转体系的持久化配置。字段对齐后端 #[serde(rename_all = "camelCase")]. */
 export interface MobileRelayConfig {
@@ -156,6 +162,16 @@ export interface ShellConfig {
   args?: string[];
 }
 
+export type TerminalEncoding =
+  | 'auto'
+  | 'utf-8'
+  | 'gbk'
+  | 'gb18030'
+  | 'big5'
+  | 'shift_jis'
+  | 'euc-kr'
+  | 'windows-1252';
+
 export interface EditorConfig {
   name: string;
   command: string;
@@ -176,6 +192,8 @@ export interface SshConnection {
 
 export interface SavedPane {
   shellName: string;
+  customTitle?: string;
+  terminalEncoding?: TerminalEncoding;
   /** 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd */
   cwd?: string;
 }
@@ -238,6 +256,7 @@ export interface PaneState {
   id: string;
   shellName: string;
   customTitle?: string;
+  terminalEncoding?: TerminalEncoding;
   status: PaneStatus;
   ptyId?: number;
   /** 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd,随布局持久化 */
@@ -346,6 +365,13 @@ export interface GitFileStatus {
   oldPath?: string;
   status: GitStatusType;
   statusLabel: string; // "M", "A", "D", "R", "?", "C"
+  /** get_vcs_status 返回来源；旧 Git-only 调用与手工构造状态可省略。 */
+  vcsKind?: VcsKind;
+}
+
+/** get_vcs_status 的跨层响应，始终携带版本控制类型。 */
+export interface VcsFileStatus extends GitFileStatus {
+  vcsKind: VcsKind;
 }
 
 export interface ChangeFileStatus {
@@ -395,6 +421,13 @@ export interface GitRepoInfo {
   currentBranch?: string;
   /** 该条目是不是某个主仓库的 linked worktree */
   isWorktree?: boolean;
+}
+
+export type VcsKind = 'git' | 'svn';
+
+/** VCS 通用仓库信息；继承 Git 字段以保留 linked worktree 元数据。 */
+export interface VcsRepoInfo extends GitRepoInfo {
+  vcsKind: VcsKind;
 }
 
 /** list_worktrees 返回的单条工作区记录(主工作区 + linked worktree) */

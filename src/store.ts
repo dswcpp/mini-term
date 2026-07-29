@@ -29,6 +29,7 @@ import {
   migrateToTree,
 } from './utils/projectTree';
 import { clearProjectCache, projectCacheKey } from './utils/projectDataCache';
+import { DEFAULT_TERMINAL_ENCODING, normalizeTerminalEncoding } from './utils/terminalEncoding';
 
 // 生成唯一 ID
 let idCounter = 0;
@@ -152,7 +153,15 @@ function updateProjectPane(
 // 序列化 SplitNode 树（剥离运行时数据）
 function serializeSplitNode(node: SplitNode): SavedSplitNode {
   if (node.type === 'leaf') {
-    return { type: 'leaf', panes: node.panes.map((p) => ({ shellName: p.shellName, cwd: p.cwd })) };
+    return {
+      type: 'leaf',
+      panes: node.panes.map((p) => ({
+        shellName: p.shellName,
+        customTitle: p.customTitle,
+        terminalEncoding: normalizeTerminalEncoding(p.terminalEncoding),
+        cwd: p.cwd,
+      })),
+    };
   }
   return {
     type: 'split',
@@ -434,6 +443,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     uiFontSize: 13,
     terminalFontSize: 14,
     terminalLigatures: false,
+    terminalEncoding: DEFAULT_TERMINAL_ENCODING,
+    terminalDepthUi: true,
+    terminalLogEnabled: false,
+    terminalLogMaxSizeMb: 10,
     theme: 'auto',
     skin: 'none',
     terminalFollowTheme: true,
@@ -733,7 +746,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     ))),
 
   // 移动端改会话名:按 paneId 全局找（移动端只认得 pane，不知道它挂在哪个项目下）。
-  // pane 级 customTitle 不进 savedLayout，所以不落配置——AI 会话本来就活不过重启。
+  // 此 action 只更新运行态；需要持久化时由桌面端调用方触发 saveLayoutToConfig。
   renamePaneById: (paneId, title) =>
     set((state) => {
       const nextTitle = title || undefined; // 空串 = 清掉自定义名，回落 shell 名

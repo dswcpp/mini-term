@@ -7,8 +7,14 @@ import type {
   SavedSplitNode,
   SplitNode,
 } from '../types';
+import { normalizeTerminalEncoding } from './terminalEncoding';
 
-function resolveShellName(savedPane: SavedPane, config: Pick<AppConfig, 'availableShells' | 'defaultShell'>): string | null {
+type LayoutRestoreConfig = Pick<
+  AppConfig,
+  'availableShells' | 'defaultShell' | 'terminalEncoding'
+>;
+
+function resolveShellName(savedPane: SavedPane, config: LayoutRestoreConfig): string | null {
   const shell =
     config.availableShells.find((s) => s.name === savedPane.shellName)
     ?? config.availableShells.find((s) => s.name === config.defaultShell)
@@ -18,7 +24,7 @@ function resolveShellName(savedPane: SavedPane, config: Pick<AppConfig, 'availab
 
 export function restoreSavedSplitNode(
   saved: SavedSplitNode,
-  config: Pick<AppConfig, 'availableShells' | 'defaultShell'>,
+  config: LayoutRestoreConfig,
   createId: () => string,
 ): SplitNode | null {
   if (saved.type === 'leaf') {
@@ -32,6 +38,10 @@ export function restoreSavedSplitNode(
       panes.push({
         id: createId(),
         shellName,
+        customTitle: savedPane.customTitle?.trim() || undefined,
+        terminalEncoding: normalizeTerminalEncoding(
+          savedPane.terminalEncoding ?? config.terminalEncoding,
+        ),
         status: 'idle',
         cwd: savedPane.cwd,
       });
@@ -85,7 +95,7 @@ function appendPanesToFirstLeaf(node: SplitNode, panes: PaneState[]): SplitNode 
 export function restoreSavedProjectLayout(
   projectId: string,
   savedLayout: SavedProjectLayout,
-  config: Pick<AppConfig, 'availableShells' | 'defaultShell'>,
+  config: LayoutRestoreConfig,
   createId: () => string,
 ): ProjectState | null {
   const trees: SplitNode[] = [];

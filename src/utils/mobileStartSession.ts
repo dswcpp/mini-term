@@ -17,6 +17,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppStore, genId, saveLayoutToConfig } from '../store';
 import { createProjectPty } from './remoteProject';
 import { getOrCreateTerminal } from './terminalCache';
+import { normalizeTerminalEncoding } from './terminalEncoding';
 import { t } from '../i18n';
 import type {
   MobileStartSessionPayload,
@@ -56,6 +57,7 @@ export async function handleMobileStartSession(
 ): Promise<void> {
   const { requestId, projectId, launcherName, shellName, command } = payload;
   const { config } = useAppStore.getState();
+  const terminalEncoding = normalizeTerminalEncoding(config.terminalEncoding);
   const project = config.projects.find((p) => p.id === projectId);
   if (!project) {
     reportResult(requestId, false, undefined, 'projectNotFound');
@@ -75,7 +77,7 @@ export async function handleMobileStartSession(
 
   let ptyId: number;
   try {
-    ptyId = await createProjectPty(project, shell);
+    ptyId = await createProjectPty(project, shell, undefined, terminalEncoding);
   } catch {
     reportResult(requestId, false, undefined, 'spawnFailed');
     return;
@@ -87,6 +89,7 @@ export async function handleMobileStartSession(
     // 用启动器名当 pane 标题:回到电脑前一眼看出这个标签是什么,手机列表里也不再
     // 显示成裸 shell 名。shellName 仍存实际 shell —— 布局恢复靠它查 availableShells。
     customTitle: launcherName,
+    terminalEncoding,
     status: 'idle',
     shellName: shell.name,
     ptyId,

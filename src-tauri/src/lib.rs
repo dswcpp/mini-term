@@ -15,6 +15,9 @@ mod remote_ssh;
 mod search;
 mod ssh;
 mod ssh_mcp_registry;
+mod svn;
+mod terminal_log;
+mod vcs;
 mod window_input_recovery;
 mod window_theme;
 mod wsl_distros;
@@ -104,6 +107,7 @@ pub fn run() {
             config::save_config,
             pty::create_pty,
             pty::write_pty,
+            pty::set_pty_encoding,
             pty::resize_pty,
             pty::kill_pty,
             pty::arm_ssh_autofill,
@@ -115,6 +119,7 @@ pub fn run() {
             fs::create_directory,
             fs::read_file_content,
             fs::rename_entry,
+            fs::move_entry,
             fs::delete_entry,
             fs::filter_directories,
             ai_sessions::get_ai_sessions,
@@ -128,6 +133,15 @@ pub fn run() {
             wsl_distros::list_wsl_distros,
             git::get_git_status,
             git::get_git_diff,
+            vcs::discover_vcs_repos,
+            vcs::get_vcs_status,
+            vcs::get_vcs_changes_status,
+            vcs::get_vcs_diff,
+            vcs::vcs_commit,
+            vcs::vcs_stage,
+            vcs::vcs_stage_all,
+            vcs::vcs_update,
+            vcs::vcs_discard_file,
             git::discover_git_repos,
             git::get_git_log,
             git::get_repo_branches,

@@ -1,3 +1,4 @@
+use encoding_rs::GB18030;
 use ignore::gitignore::Gitignore;
 use notify::{Event as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -368,6 +369,62 @@ pub struct FileContentResult {
 }
 
 const MAX_FILE_VIEW_SIZE: u64 = 1_048_576; // 1MB
+const C_CPP_SOURCE_EXTENSIONS: &[&str] = &[
+    "c", "h", "cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp", "inl", "tpp",
+];
+
+fn is_c_cpp_source_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            C_CPP_SOURCE_EXTENSIONS.contains(&ext.as_str())
+        })
+        .unwrap_or(false)
+}
+
+fn has_nul_byte(bytes: &[u8]) -> bool {
+    bytes.iter().any(|b| *b == 0)
+}
+
+fn decode_file_preview_content(path: &Path, bytes: Vec<u8>) -> FileContentResult {
+    if has_nul_byte(&bytes) {
+        return FileContentResult {
+            content: String::new(),
+            is_binary: true,
+            too_large: false,
+        };
+    }
+
+    match String::from_utf8(bytes) {
+        Ok(s) => FileContentResult {
+            content: s,
+            is_binary: false,
+            too_large: false,
+        },
+        Err(e) if is_c_cpp_source_file(path) => {
+            let (content, _encoding_used, had_errors) = GB18030.decode(e.as_bytes());
+            if had_errors {
+                FileContentResult {
+                    content: String::new(),
+                    is_binary: true,
+                    too_large: false,
+                }
+            } else {
+                FileContentResult {
+                    content: content.into_owned(),
+                    is_binary: false,
+                    too_large: false,
+                }
+            }
+        }
+        Err(_) => FileContentResult {
+            content: String::new(),
+            is_binary: true,
+            too_large: false,
+        },
+    }
+}
 
 #[tauri::command]
 pub fn read_file_content(project_root: String, path: String) -> Result<FileContentResult, String> {
@@ -384,18 +441,7 @@ pub fn read_file_content(project_root: String, path: String) -> Result<FileConte
         });
     }
     let bytes = fs::read(&p).map_err(|e| e.to_string())?;
-    match String::from_utf8(bytes) {
-        Ok(s) => Ok(FileContentResult {
-            content: s,
-            is_binary: false,
-            too_large: false,
-        }),
-        Err(_) => Ok(FileContentResult {
-            content: String::new(),
-            is_binary: true,
-            too_large: false,
-        }),
-    }
+    Ok(decode_file_preview_content(&p, bytes))
 }
 
 #[tauri::command]
@@ -448,6 +494,47 @@ pub fn rename_entry(
 }
 
 #[tauri::command]
+pub fn move_entry(
+    project_root: String,
+    source_path: String,
+    target_dir: String,
+) -> Result<String, String> {
+    let root = Path::new(&project_root)
+        .canonicalize()
+        .map(strip_verbatim_prefix)
+        .map_err(|e| format!("项目根目录无效: {}: {}", project_root, e))?;
+    let source = verify_under_project_root(&project_root, &source_path, true)?;
+    let target = verify_under_project_root(&project_root, &target_dir, true)?;
+
+    if source == root {
+        return Err("不能移动项目根目录".to_string());
+    }
+    if !target.is_dir() {
+        return Err(format!("目标不是目录: {}", target.display()));
+    }
+    if source == target {
+        return Err("不能把条目移动到自身".to_string());
+    }
+    if source.is_dir() && target.starts_with(&source) {
+        return Err("不能把目录移动到自身或其子目录内".to_string());
+    }
+
+    let name = source
+        .file_name()
+        .ok_or_else(|| "无法获取源文件名".to_string())?;
+    let destination = target.join(name);
+    let destination =
+        verify_under_project_root(&project_root, destination.to_string_lossy().as_ref(), false)?;
+
+    if destination.exists() {
+        return Err(format!("目标已存在: {}", destination.display()));
+    }
+
+    fs::rename(&source, &destination).map_err(|e| e.to_string())?;
+    Ok(destination.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub fn delete_entry(project_root: String, path: String) -> Result<(), String> {
     let target = verify_under_project_root(&project_root, &path, true)?;
     // 多一道保险:绝不允许删除项目根目录本身
@@ -478,6 +565,83 @@ mod tests {
     }
 
     #[test]
+    fn c_cpp_source_file_detects_common_extensions() {
+        for name in [
+            "main.c",
+            "lib.h",
+            "app.cpp",
+            "view.cc",
+            "engine.cxx",
+            "module.c++",
+            "types.hpp",
+            "defs.hh",
+            "api.hxx",
+            "detail.h++",
+            "impl.ipp",
+            "inline.inl",
+            "template.tpp",
+            "UPPER.CPP",
+        ] {
+            assert!(
+                is_c_cpp_source_file(Path::new(name)),
+                "expected source: {name}"
+            );
+        }
+
+        for name in ["image.png", "archive.zip", "notes.txt", "binary.exe"] {
+            assert!(
+                !is_c_cpp_source_file(Path::new(name)),
+                "expected non-source: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_file_preview_accepts_utf8_source() {
+        let result = decode_file_preview_content(
+            Path::new("main.cpp"),
+            "int main() {\n  return 0;\n}\n".as_bytes().to_vec(),
+        );
+
+        assert!(!result.is_binary);
+        assert!(!result.too_large);
+        assert!(result.content.contains("return 0"));
+    }
+
+    #[test]
+    fn decode_file_preview_accepts_gb18030_c_cpp_source() {
+        let (bytes, _encoding_used, had_errors) = GB18030.encode("// 中文注释\nint main() {}\n");
+        assert!(!had_errors);
+
+        let result = decode_file_preview_content(Path::new("main.c"), bytes.into_owned());
+
+        assert!(!result.is_binary);
+        assert!(!result.too_large);
+        assert!(result.content.contains("中文注释"));
+    }
+
+    #[test]
+    fn decode_file_preview_rejects_non_source_non_utf8() {
+        let (bytes, _encoding_used, had_errors) = GB18030.encode("中文");
+        assert!(!had_errors);
+
+        let result = decode_file_preview_content(Path::new("notes.dat"), bytes.into_owned());
+
+        assert!(result.is_binary);
+        assert!(!result.too_large);
+        assert!(result.content.is_empty());
+    }
+
+    #[test]
+    fn decode_file_preview_rejects_nul_bytes_even_for_source() {
+        let result = decode_file_preview_content(Path::new("main.cpp"), b"int\0main".to_vec());
+
+        assert!(result.is_binary);
+        assert!(!result.too_large);
+        assert!(result.content.is_empty());
+    }
+
+    #[test]
     fn is_path_ignored_empty_returns_false() {
         assert!(!is_path_ignored(&[], Path::new("/any/path"), false));
     }
@@ -498,7 +662,10 @@ mod tests {
 
         // 目标已存在 → 原子覆盖(Windows 下也应成功,验证 rename 替换语义)
         atomic_write(&target, b"second-longer-content").unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), "second-longer-content");
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "second-longer-content"
+        );
 
         // 不应残留任何 .tmp 临时文件
         let leftover: Vec<_> = fs::read_dir(&dir)
@@ -605,6 +772,105 @@ mod tests {
         assert!(result.is_err(), "应拒绝 ../ 逃逸");
         // 旧文件应未被改动
         assert!(old_file.exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_entry_file_into_directory_succeeds() {
+        let (root, source_file) = make_test_project();
+        let target_dir = root.join("target");
+        fs::create_dir(&target_dir).unwrap();
+
+        let moved = move_entry(
+            root.to_string_lossy().to_string(),
+            source_file.to_string_lossy().to_string(),
+            target_dir.to_string_lossy().to_string(),
+        )
+        .unwrap();
+
+        let expected = target_dir.join("inside.txt");
+        assert_eq!(PathBuf::from(moved), expected);
+        assert!(expected.exists(), "目标文件应存在");
+        assert!(!source_file.exists(), "源文件应被移走");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_entry_rejects_existing_destination() {
+        let (root, source_file) = make_test_project();
+        let target_dir = root.join("target");
+        fs::create_dir(&target_dir).unwrap();
+        fs::write(target_dir.join("inside.txt"), "already here").unwrap();
+
+        let err = move_entry(
+            root.to_string_lossy().to_string(),
+            source_file.to_string_lossy().to_string(),
+            target_dir.to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("目标已存在"));
+        assert!(source_file.exists(), "冲突时源文件不应被移动");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_entry_file_back_to_project_root_succeeds() {
+        let (root, _) = make_test_project();
+        let source_dir = root.join("source");
+        fs::create_dir(&source_dir).unwrap();
+        let source_file = source_dir.join("nested.txt");
+        fs::write(&source_file, "nested").unwrap();
+
+        let moved = move_entry(
+            root.to_string_lossy().to_string(),
+            source_file.to_string_lossy().to_string(),
+            root.to_string_lossy().to_string(),
+        )
+        .unwrap();
+
+        let expected = root.join("nested.txt");
+        assert_eq!(PathBuf::from(moved), expected);
+        assert!(expected.exists(), "根目录目标文件应存在");
+        assert!(!source_file.exists(), "源文件应被移回根目录");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_entry_rejects_directory_into_descendant() {
+        let (root, _) = make_test_project();
+        let source_dir = root.join("source");
+        let child_dir = source_dir.join("child");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&child_dir).unwrap();
+
+        let err = move_entry(
+            root.to_string_lossy().to_string(),
+            source_dir.to_string_lossy().to_string(),
+            child_dir.to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("子目录"));
+        assert!(source_dir.exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn move_entry_rejects_project_root() {
+        let (root, _) = make_test_project();
+        let target_dir = root.join("target");
+        fs::create_dir(&target_dir).unwrap();
+
+        let err = move_entry(
+            root.to_string_lossy().to_string(),
+            root.to_string_lossy().to_string(),
+            target_dir.to_string_lossy().to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("不能移动项目根目录"));
+        assert!(root.exists());
         fs::remove_dir_all(&root).ok();
     }
 

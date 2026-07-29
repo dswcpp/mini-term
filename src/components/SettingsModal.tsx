@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { useAppStore } from '../store';
 import { playNotificationSound } from '../utils/notificationSound';
 import { checkForUpdate, compareVersions, type ReleaseInfo } from '../utils/updateChecker';
@@ -12,10 +12,34 @@ import { applyUiFontFamily } from '../utils/fontManager';
 import { MOD_LABEL } from '../utils/platform';
 import { comboLabel, hotkeyGroups } from '../utils/hotkeys';
 import { DEFAULT_REMOTE_PASTE_DIR } from '../utils/pastePath';
-import { useT } from '../i18n';
+import { showAlert } from '../utils/prompt';
+import {
+  normalizeTerminalEncoding,
+  TERMINAL_ENCODING_OPTIONS,
+} from '../utils/terminalEncoding';
+import { useT, t as tStatic } from '../i18n';
 import { LanguageToggle } from './LanguageToggle';
 import { Modal } from './Modal';
-import type { ShellConfig, EditorConfig } from '../types';
+import type { AppConfig, ShellConfig, EditorConfig, TerminalEncoding } from '../types';
+
+async function saveConfigPatch(patch: Partial<AppConfig>): Promise<void> {
+  const previousConfig = useAppStore.getState().config;
+  const newConfig = { ...previousConfig, ...patch };
+  useAppStore.getState().setConfig(newConfig);
+
+  try {
+    await invoke('save_config', { config: newConfig });
+  } catch (error) {
+    // 只回滚本次乐观更新，避免覆盖随后产生的配置变更。
+    if (useAppStore.getState().config === newConfig) {
+      useAppStore.getState().setConfig(previousConfig);
+    }
+    await showAlert(
+      tStatic('settings.common.saveFailed'),
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
 
 interface Props {
   open: boolean;
@@ -262,10 +286,17 @@ function TerminalSettings() {
 
   const longPasteEnabled = config.longPasteToFile ?? true;
   const smartCopyPasteEnabled = config.smartCopyPaste ?? false;
+  const terminalDepthUiEnabled = config.terminalDepthUi ?? true;
   const savedLineThreshold = config.longPasteLineThreshold ?? 10;
   const savedCharThreshold = config.longPasteCharThreshold ?? 2000;
+  const terminalLogEnabled = config.terminalLogEnabled ?? false;
+  const terminalEncoding = normalizeTerminalEncoding(config.terminalEncoding);
+  const savedTerminalLogPath = config.terminalLogPath ?? '';
+  const savedTerminalLogMaxSizeMb = config.terminalLogMaxSizeMb ?? 10;
   const [lineThresholdInput, setLineThresholdInput] = useState(String(savedLineThreshold));
   const [charThresholdInput, setCharThresholdInput] = useState(String(savedCharThreshold));
+  const [terminalLogPathInput, setTerminalLogPathInput] = useState(savedTerminalLogPath);
+  const [terminalLogMaxSizeInput, setTerminalLogMaxSizeInput] = useState(String(savedTerminalLogMaxSizeMb));
   const savedRemotePasteDir = config.remotePasteDir ?? DEFAULT_REMOTE_PASTE_DIR;
   const [remotePasteDirInput, setRemotePasteDirInput] = useState(savedRemotePasteDir);
 
@@ -278,8 +309,16 @@ function TerminalSettings() {
   useEffect(() => {
     setLineThresholdInput(String(savedLineThreshold));
     setCharThresholdInput(String(savedCharThreshold));
+    setTerminalLogPathInput(savedTerminalLogPath);
+    setTerminalLogMaxSizeInput(String(savedTerminalLogMaxSizeMb));
     setRemotePasteDirInput(savedRemotePasteDir);
-  }, [savedLineThreshold, savedCharThreshold, savedRemotePasteDir]);
+  }, [
+    savedLineThreshold,
+    savedCharThreshold,
+    savedTerminalLogPath,
+    savedTerminalLogMaxSizeMb,
+    savedRemotePasteDir,
+  ]);
 
   const save = useCallback(async (updatedShells: ShellConfig[], updatedDefault: string) => {
     const newConfig = {
@@ -333,14 +372,57 @@ function TerminalSettings() {
     save(shells, name);
   };
 
-  const saveConfigPatch = useCallback(async (patch: Partial<typeof config>) => {
-    const newConfig = { ...useAppStore.getState().config, ...patch };
-    setConfig(newConfig);
-    await invoke('save_config', { config: newConfig });
-  }, [setConfig]);
-
   const handleLongPasteEnabledChange = (enabled: boolean) => {
     void saveConfigPatch({ longPasteToFile: enabled });
+  };
+
+  const handleTerminalDepthUiEnabledChange = (enabled: boolean) => {
+    void saveConfigPatch({ terminalDepthUi: enabled });
+  };
+
+  const handleTerminalLogEnabledChange = (enabled: boolean) => {
+    void saveConfigPatch({ terminalLogEnabled: enabled });
+  };
+
+  const handleTerminalEncodingChange = (encoding: TerminalEncoding) => {
+    void saveConfigPatch({ terminalEncoding: normalizeTerminalEncoding(encoding) });
+  };
+
+  const commitTerminalLogPath = () => {
+    const trimmed = terminalLogPathInput.trim();
+    setTerminalLogPathInput(trimmed);
+    const nextPath = trimmed || undefined;
+    if ((savedTerminalLogPath || undefined) !== nextPath) {
+      void saveConfigPatch({ terminalLogPath: nextPath });
+    }
+  };
+
+  const handleChooseTerminalLogPath = async () => {
+    const selected = await saveDialog({
+      title: t('settings.terminal.logPathDialogTitle'),
+      defaultPath: terminalLogPathInput.trim() || 'terminal.log',
+      filters: [
+        {
+          name: t('settings.terminal.logFileFilter'),
+          extensions: ['log', 'txt'],
+        },
+      ],
+    });
+    if (typeof selected === 'string' && selected.trim()) {
+      setTerminalLogPathInput(selected);
+      void saveConfigPatch({ terminalLogPath: selected });
+    }
+  };
+
+  const commitTerminalLogMaxSize = () => {
+    const n = parseInt(terminalLogMaxSizeInput, 10);
+    const clamped = Number.isFinite(n) && n > 0
+      ? Math.min(Math.max(n, 1), 10240)
+      : savedTerminalLogMaxSizeMb;
+    setTerminalLogMaxSizeInput(String(clamped));
+    if (clamped !== savedTerminalLogMaxSizeMb) {
+      void saveConfigPatch({ terminalLogMaxSizeMb: clamped });
+    }
   };
 
   const commitLineThreshold = () => {
@@ -437,6 +519,122 @@ function TerminalSettings() {
 
       <div className="pt-3 text-sm text-[var(--text-muted)]">
         {t("settings.terminal.defaultHint")}
+      </div>
+
+      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
+        {t("settings.terminal.appearance")}
+      </div>
+
+      <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
+        <div className="flex-1 min-w-0">
+          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.encodingTitle")}</div>
+          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.encodingDesc")}</div>
+        </div>
+        <select
+          className="min-w-40 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)]"
+          value={terminalEncoding}
+          onChange={(e) => handleTerminalEncodingChange(e.target.value as TerminalEncoding)}
+        >
+          {TERMINAL_ENCODING_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
+        <div className="pr-4">
+          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.depthUiTitle")}</div>
+          <div className="text-sm text-[var(--text-muted)]">
+            {t("settings.terminal.depthUiDesc")}
+          </div>
+        </div>
+        <button
+          type="button"
+          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+            terminalDepthUiEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
+          }`}
+          onClick={() => handleTerminalDepthUiEnabledChange(!terminalDepthUiEnabled)}
+        >
+          <span
+            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
+              terminalDepthUiEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+      </div>
+
+      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
+        {t("settings.terminal.logTerminal")}
+      </div>
+
+      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
+        <div className="pr-4">
+          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.logTerminalTitle")}</div>
+          <div className="text-sm text-[var(--text-muted)]">
+            {t("settings.terminal.logTerminalDesc")}
+          </div>
+        </div>
+        <button
+          type="button"
+          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+            terminalLogEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
+          }`}
+          onClick={() => handleTerminalLogEnabledChange(!terminalLogEnabled)}
+        >
+          <span
+            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
+              terminalLogEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
+        <div className="flex-1 min-w-0">
+          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.logOutputTo")}</div>
+          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.logOutputToDesc")}</div>
+        </div>
+        <div className="flex items-center gap-2 min-w-0 flex-[1.4]">
+          <input
+            className="min-w-0 flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
+            placeholder="terminal.log"
+            value={terminalLogPathInput}
+            onChange={(e) => setTerminalLogPathInput(e.target.value)}
+            onBlur={commitTerminalLogPath}
+            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+          />
+          <button
+            type="button"
+            className="px-3 py-1 text-base bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all flex-shrink-0"
+            onClick={() => void handleChooseTerminalLogPath()}
+          >
+            ...
+          </button>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
+        <div className="flex-1 min-w-0">
+          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.logMaxSize")}</div>
+          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.logMaxSizeDesc")}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            max={10240}
+            className="w-24 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono text-right"
+            value={terminalLogMaxSizeInput}
+            onChange={(e) => setTerminalLogMaxSizeInput(e.target.value)}
+            onBlur={commitTerminalLogMaxSize}
+            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+          />
+          <span className="text-base text-[var(--text-muted)]">MB</span>
+        </div>
+      </div>
+
+      <div className="pt-1 text-sm text-[var(--text-muted)]">
+        {t("settings.terminal.logFooter")}
       </div>
 
       <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
@@ -1244,13 +1442,6 @@ function AiHookSettings() {
 function AiNotificationSettings() {
   const t = useT();
   const config = useAppStore((s) => s.config);
-  const setConfig = useAppStore((s) => s.setConfig);
-
-  const saveConfigPatch = useCallback(async (patch: Partial<typeof config>) => {
-    const newConfig = { ...useAppStore.getState().config, ...patch };
-    setConfig(newConfig);
-    await invoke('save_config', { config: newConfig });
-  }, [setConfig]);
 
   const handleSoundPathChange = useCallback(async () => {
     const selected = await openDialog({

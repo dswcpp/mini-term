@@ -217,6 +217,7 @@ export function getTerminalTheme(terminalFollowTheme: boolean): typeof DARK_TERM
 }
 
 const cache = new Map<number, CachedEntry>();
+const lastResizeByPty = new Map<number, string>();
 
 const aiPtyIds = new Set<number>();
 
@@ -233,12 +234,15 @@ let globalPtyListenerInit = false;
 function ensureGlobalPtyOutputListener() {
   if (globalPtyListenerInit) return;
   globalPtyListenerInit = true;
-  listen<PtyOutputPayload>('pty-output', (event) => {
+  void listen<PtyOutputPayload>('pty-output', (event) => {
     const entry = cache.get(event.payload.ptyId);
-    if (entry) {
+    if (!entry) return;
+    try {
       entry.term.write(event.payload.data);
+    } catch (error) {
+      logTerminalRuntimeError('pty-output write failed', error);
     }
-  });
+  }).catch((error) => logTerminalRuntimeError('pty-output listener failed', error));
 }
 const enqueuePtyWrite = createPtyWriteQueue((ptyId, data, lineSnapshot) => {
   const payload = lineSnapshot === undefined
@@ -246,6 +250,47 @@ const enqueuePtyWrite = createPtyWriteQueue((ptyId, data, lineSnapshot) => {
     : { ptyId, data, lineSnapshot };
   return invoke('write_pty', payload);
 });
+
+function logTerminalRuntimeError(context: string, error: unknown): void {
+  // eslint-disable-next-line no-console
+  console.warn(`[terminal] ${context}`, error);
+}
+
+function refreshTerminalViewport(term: Terminal): void {
+  if (term.rows <= 0) return;
+  try {
+    term.refresh(0, term.rows - 1);
+  } catch (error) {
+    logTerminalRuntimeError('refresh failed', error);
+  }
+}
+
+async function sendPtyInput(
+  ptyId: number,
+  data: string,
+  lineSnapshot?: string,
+): Promise<void> {
+  try {
+    await enqueuePtyWrite(ptyId, data, lineSnapshot);
+  } catch (error) {
+    logTerminalRuntimeError('write_pty failed', error);
+  }
+}
+
+export function resizePtySafely(ptyId: number, cols: number, rows: number): void {
+  if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols <= 0 || rows <= 0) return;
+  const resizeKey = `${cols}x${rows}`;
+  if (lastResizeByPty.get(ptyId) === resizeKey) return;
+  lastResizeByPty.set(ptyId, resizeKey);
+  void invoke('resize_pty', { ptyId, cols, rows }).catch((error) => {
+    if (lastResizeByPty.get(ptyId) === resizeKey) {
+      lastResizeByPty.delete(ptyId);
+    }
+    if (cache.has(ptyId)) {
+      logTerminalRuntimeError('resize_pty failed', error);
+    }
+  });
+}
 
 const markerInstancesByPty = new Map<number, Map<number, IMarker>>();
 
@@ -366,18 +411,22 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
   // 事件也通过 triggerDataEvent 发出 CSI I/CSI O。这不是用户按键,如果也跟着
   // scrollToBottom,用户往上翻历史时一切焦点(点别处或切回来)就会被打回底部。
   const onDataDisp = term.onData((data) => {
-    const lineSnapshot = isStandaloneEnter(data)
-      ? getCurrentLineSnapshot(term)
-      : undefined;
-    if (data !== FOCUS_IN_SEQ && data !== FOCUS_OUT_SEQ) {
-      term.scrollToBottom();
+    try {
+      const lineSnapshot = isStandaloneEnter(data)
+        ? getCurrentLineSnapshot(term)
+        : undefined;
+      if (data !== FOCUS_IN_SEQ && data !== FOCUS_OUT_SEQ) {
+        term.scrollToBottom();
+      }
+      void sendPtyInput(ptyId, data, lineSnapshot);
+    } catch (error) {
+      logTerminalRuntimeError('input handling failed', error);
     }
-    void enqueuePtyWrite(ptyId, data, lineSnapshot);
   });
 
   // 终端 resize → 同步到 PTY
   const onResizeDisp = term.onResize(({ cols, rows }) => {
-    invoke('resize_pty', { ptyId, cols, rows });
+    resizePtySafely(ptyId, cols, rows);
   });
 
   // PTY 输出由全局单一监听器分发（避免 N 个终端各自监听导致的 O(N) 事件广播开销）
@@ -472,7 +521,7 @@ function refreshAllTerminalsForAtlasChange(reason: 'add' | 'remove'): void {
     });
   }
   for (const e of cache.values()) {
-    if (e.term.rows > 0) e.term.refresh(0, e.term.rows - 1);
+    refreshTerminalViewport(e.term);
   }
 }
 
@@ -502,7 +551,7 @@ export function resetRenderStateForPty(ptyId: number): void {
     const renderer = (entry.webglAddon as any)._renderer;
     if (typeof renderer?._clearModel === 'function') {
       renderer._clearModel(true);
-      entry.term.refresh(0, entry.term.rows - 1);
+      refreshTerminalViewport(entry.term);
       atlasDebugLog('clear-model', { ptyId, rows: entry.term.rows });
     } else {
       // 反射失效(addon 升级后私有字段改名)时退回公开 API;
@@ -516,23 +565,32 @@ export function resetRenderStateForPty(ptyId: number): void {
   }
 }
 
+/** @deprecated 使用 resetRenderStateForPty；保留名称供旧组件兼容。 */
+export function clearAtlasForPty(ptyId: number): void {
+  resetRenderStateForPty(ptyId);
+}
+
 function loadWebgl(entry: CachedEntry): void {
   if (entry.webglLoaded) return;
   entry.webglLoaded = true;
+  let webgl: WebglAddon | undefined;
   try {
-    const webgl = new WebglAddon();
+    webgl = new WebglAddon();
     webgl.onContextLoss(() => {
       // 必须走 disposeWebgl 重置 webglLoaded,否则 context 丢失后 activateWebgl
       // 因 webglLoaded 仍为 true 永远空转,该终端只能退回 DOM 渲染直到进程重启
       disposeWebgl(entry);
-      entry.term.refresh(0, entry.term.rows - 1);
+      refreshTerminalViewport(entry.term);
     });
     webgl.onAddTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('add'));
     webgl.onRemoveTextureAtlasCanvas(() => refreshAllTerminalsForAtlasChange('remove'));
     entry.term.loadAddon(webgl);
     entry.webglAddon = webgl;
-  } catch {
+  } catch (error) {
+    try { webgl?.dispose(); } catch { /* load failed */ }
+    entry.webglAddon = undefined;
     entry.webglLoaded = false;
+    logTerminalRuntimeError('WebglAddon load failed', error);
   }
 }
 
@@ -558,7 +616,7 @@ export function reloadLigaturesForPty(ptyId: number): void {
   disposeLigatures(entry);
   loadLigaturesIfEnabled(entry);
   loadWebgl(entry);
-  entry.term.refresh(0, entry.term.rows - 1);
+  refreshTerminalViewport(entry.term);
 }
 
 /** 获取已缓存的终端（不创建新的） */
@@ -579,12 +637,17 @@ export function setSearchAddon(ptyId: number, addon: SearchAddon): void {
 /** 彻底销毁终端（面板关闭 / kill_pty 后调用） */
 export function disposeTerminal(ptyId: number): void {
   const entry = cache.get(ptyId);
+  lastResizeByPty.delete(ptyId);
   if (!entry) return;
-  entry.wrapper.remove();
-  entry.cleanup();
   cache.delete(ptyId);
   aiPtyIds.delete(ptyId);
   clearMarkerInstances(ptyId);
+  entry.wrapper.remove();
+  try {
+    entry.cleanup();
+  } catch (error) {
+    logTerminalRuntimeError('dispose failed', error);
+  }
 }
 
 export function registerAiMarker(ptyId: number): IMarker | null {
@@ -643,24 +706,29 @@ export function updateAllTerminalThemes(terminalFollowTheme: boolean): void {
 }
 
 export function writePtyInput(ptyId: number, data: string): Promise<void> {
-  return enqueuePtyWrite(ptyId, data);
+  return sendPtyInput(ptyId, data);
 }
 
 /** 复制当前终端选中文本到系统剪贴板。无选中则不操作。返回是否有内容被复制。 */
 export async function copyTerminalSelection(ptyId: number): Promise<boolean> {
-  const cached = cache.get(ptyId);
-  if (!cached) return false;
-  const sel = cached.term.getSelection();
-  if (!sel) return false;
-  // 优先走 Webview 原生 Clipboard API(直接由 WebView 写系统剪贴板,
-  // 不经过 Tauri IPC 的 JSON 序列化),避免长文本经 IPC 被截断。
-  // 不可用时回退到 Tauri 插件 writeText。
   try {
-    await navigator.clipboard.writeText(sel);
-  } catch {
-    await writeText(sel);
+    const cached = cache.get(ptyId);
+    if (!cached) return false;
+    const sel = cached.term.getSelection();
+    if (!sel) return false;
+    // 优先走 Webview 原生 Clipboard API(直接由 WebView 写系统剪贴板,
+    // 不经过 Tauri IPC 的 JSON 序列化),避免长文本经 IPC 被截断。
+    // 不可用时回退到 Tauri 插件 writeText。
+    try {
+      await navigator.clipboard.writeText(sel);
+    } catch {
+      await writeText(sel);
+    }
+    return true;
+  } catch (error) {
+    logTerminalRuntimeError('copy failed', error);
+    return false;
   }
-  return true;
 }
 
 /** 检测剪贴板是否含图片（Tauri 插件 + 浏览器 Clipboard API 双重检测） */
@@ -717,6 +785,8 @@ export async function pasteToTerminal(ptyId: number): Promise<void> {
   pasteInFlight.add(ptyId);
   try {
     await pasteToTerminalInner(ptyId);
+  } catch (error) {
+    logTerminalRuntimeError('paste failed', error);
   } finally {
     pasteInFlight.delete(ptyId);
   }
@@ -736,7 +806,7 @@ async function pasteToTerminalInner(ptyId: number): Promise<void> {
     if (localPath !== null) {
       try {
         const path = await mapPastedFilePath(localPath, target);
-        await enqueuePtyWrite(ptyId, `"${path}"`);
+        await sendPtyInput(ptyId, `"${path}"`);
         return;
       } catch (e) {
         // 上传失败：明确告知。此时回退 Alt+V 也没用（远端 agent 读的是远端
@@ -747,7 +817,7 @@ async function pasteToTerminalInner(ptyId: number): Promise<void> {
     }
 
     // 回退：发送 Alt+V 转义序列让 AI 工具自行处理
-    await enqueuePtyWrite(ptyId, '\x1bv');
+    await sendPtyInput(ptyId, '\x1bv');
     return;
   }
   const text = await readText().catch(() => null);
@@ -763,7 +833,7 @@ async function pasteToTerminalInner(ptyId: number): Promise<void> {
     try {
       const localPath = await invoke<string>('save_clipboard_text', { text });
       const path = await mapPastedFilePath(localPath, target);
-      await enqueuePtyWrite(ptyId, `"${path}"`);
+      await sendPtyInput(ptyId, `"${path}"`);
       return;
     } catch (e) {
       // 本地写文件失败 → 直接粘原文（老行为）。
@@ -779,5 +849,5 @@ async function pasteToTerminalInner(ptyId: number): Promise<void> {
     return;
   }
 
-  await enqueuePtyWrite(ptyId, text);
+  await sendPtyInput(ptyId, text);
 }

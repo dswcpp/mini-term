@@ -219,11 +219,12 @@ export type OrderedItem =
 /** 递归展平树为带 depth 和 parentGroupId 的有序列表。
  *  子项目(parentProjectId 有值,不在树中)紧随其父项目之后、深度 +1 注入。 */
 export function getOrderedTree(config: AppConfig): OrderedItem[] {
-  const projectMap = new Map(config.projects.map((p) => [p.id, p]));
+  const projects = config.projects ?? [];
+  const projectMap = new Map(projects.map((p) => [p.id, p]));
   const result: OrderedItem[] = [];
 
   const childrenByParent = new Map<string, ProjectConfig[]>();
-  for (const p of config.projects) {
+  for (const p of projects) {
     if (!p.parentProjectId) continue;
     const list = childrenByParent.get(p.parentProjectId) ?? [];
     list.push(p);
@@ -271,7 +272,7 @@ export function getOrderedTree(config: AppConfig): OrderedItem[] {
     }
   })(tree);
 
-  for (const p of config.projects) {
+  for (const p of projects) {
     if (pushed.has(p.id)) continue;
     if (inTree.has(p.id)) continue; // 折叠组内的项目:在树中,只是视图上隐藏
     if (p.parentProjectId && projectMap.has(p.parentProjectId)) continue;
@@ -294,7 +295,8 @@ export interface ProjectWithGroupPath {
  * 而这里的消费者（移动端快照）要的是完整清单，折叠与否由移动端自己决定。
  */
 export function getProjectsWithGroupPath(config: AppConfig): ProjectWithGroupPath[] {
-  const projectMap = new Map(config.projects.map((p) => [p.id, p]));
+  const projects = config.projects ?? [];
+  const projectMap = new Map(projects.map((p) => [p.id, p]));
   const result: ProjectWithGroupPath[] = [];
   const seen = new Set<string>();
 
@@ -314,7 +316,7 @@ export function getProjectsWithGroupPath(config: AppConfig): ProjectWithGroupPat
   walk(config.projectTree ?? [], []);
 
   // 不在树中的项目（异常配置兜底）追加到顶层，与 getOrderedTree 口径一致
-  for (const p of config.projects) {
+  for (const p of projects) {
     if (!seen.has(p.id)) result.push({ project: p, groupPath: [] });
   }
   return result;
@@ -389,7 +391,8 @@ export function findGroupInTree(tree: ProjectTreeItem[], groupId: string): Proje
 
 /** 从旧配置格式迁移到 projectTree（前端侧，作为 Rust 迁移的备份） */
 export function migrateToTree(config: AppConfig): ProjectTreeItem[] {
-  const { projectGroups, projectOrdering, projects } = config;
+  const { projectGroups, projectOrdering } = config;
+  const projects = config.projects ?? [];
   if (!projectOrdering || projectOrdering.length === 0) {
     return projects.map((p) => p.id);
   }

@@ -13,6 +13,7 @@ import { createProjectPty, isRemoteProject, remotePaneLabel } from './remoteProj
 import { disposeTerminal, getCachedTerminal } from './terminalCache';
 import { showAlert, showConfirm, showPrompt } from './prompt';
 import { closeTerminalSearchFor } from './terminalSearch';
+import { normalizeTerminalEncoding } from './terminalEncoding';
 import {
   collectLeaves,
   findAdjacentPtyId,
@@ -27,7 +28,13 @@ import {
   type Direction,
 } from './layoutOps';
 import { t } from '../i18n';
-import type { PaneState, ProjectConfig, ShellConfig, SplitNode } from '../types';
+import type {
+  PaneState,
+  ProjectConfig,
+  ShellConfig,
+  SplitNode,
+  TerminalEncoding,
+} from '../types';
 
 /** 取项目 + 布局的当前快照。 */
 function snapshot(projectId: string) {
@@ -56,12 +63,14 @@ async function spawnPane(
   shell: ShellConfig | undefined,
   customTitle?: string,
   cwd?: string,
+  terminalEncoding?: TerminalEncoding,
 ): Promise<PaneState | null> {
   const remote = isRemoteProject(project);
   if (!remote && !shell) return null;
+  const encoding = normalizeTerminalEncoding(terminalEncoding);
   let ptyId: number;
   try {
-    ptyId = await createProjectPty(project, shell, cwd);
+    ptyId = await createProjectPty(project, shell, cwd, encoding);
   } catch (e) {
     await showAlert(
       t('terminalArea.remoteConnectFailedTitle'),
@@ -73,6 +82,7 @@ async function spawnPane(
     id: genId(),
     shellName: remote ? remotePaneLabel(project) : shell!.name,
     customTitle,
+    terminalEncoding: encoding,
     status: 'idle',
     ptyId,
     cwd,
@@ -101,7 +111,13 @@ export async function newTerminal(
   const resolved = isRemoteProject(project) ? undefined : resolveShell(state.config, shell);
   if (!isRemoteProject(project) && !resolved) return null;
 
-  const pane = await spawnPane(project, resolved, opts?.title, opts?.cwd);
+  const pane = await spawnPane(
+    project,
+    resolved,
+    opts?.title,
+    opts?.cwd,
+    state.config.terminalEncoding,
+  );
   if (!pane) return null;
 
   // await 期间布局可能已变。注意这里**不能**回落到 await 之前的快照：
@@ -142,9 +158,15 @@ export async function splitPane(
   const resolved = isRemoteProject(project) ? undefined : resolveShell(state.config);
   if (!isRemoteProject(project) && !resolved) return;
 
-  // 分屏继承源 pane 的 cwd 覆盖:worktree 终端分出来的屏理应还在 worktree 里
-  const sourceCwd = findPaneById(layout, target)?.cwd;
-  const pane = await spawnPane(project, resolved, undefined, sourceCwd);
+  // 分屏继承源 pane 的 cwd 和编码:worktree 终端分出来的屏理应保持相同运行环境。
+  const sourcePane = findPaneById(layout, target);
+  const pane = await spawnPane(
+    project,
+    resolved,
+    undefined,
+    sourcePane?.cwd,
+    sourcePane?.terminalEncoding ?? state.config.terminalEncoding,
+  );
   if (!pane) return;
 
   // spawn 期间布局可能已变：目标 pane 被关掉、或整个项目的终端都关光了。

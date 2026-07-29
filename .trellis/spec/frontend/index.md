@@ -23,6 +23,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [xterm Ligatures + WebGL Order](./xterm-ligatures-with-webgl-order.md) | LigaturesAddon 必须先于 WebglAddon、热切换同步无 await、平台差异 | Filled |
 | [xterm.js WebGL TextureAtlas 跨实例共享](./xterm-webgl-atlas-sharing.md) | atlas page merge 后必须广播 `term.refresh` 唤醒 dormant 终端;否则多 AI 并发出现同形乱码 | Active |
 | [Fluent 2 + backdrop-filter Modal Portal Convention](./fluent2-portal-modal.md) | 复用当前 `Modal.tsx`，通过 `createPortal(node, document.body)` 脱离 containing block，并统一 overlay stack、清理与焦点契约 | Active |
+| [Markdown Preview Security](./markdown-preview-security.md) | Shared raw-HTML sanitization contract for Markdown previews, including plugin order, URL/class allowlists, GFM, Mermaid, and tests | Active |
 
 ---
 

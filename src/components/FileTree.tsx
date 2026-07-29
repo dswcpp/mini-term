@@ -11,10 +11,10 @@ import { isAiPty } from '../utils/terminalCache';
 import { MOD_LABEL } from '../utils/platform';
 import { DiffModal } from './DiffModal';
 import { FileViewerModal } from './FileViewerModal';
-import { initFileDrag } from '../utils/fileDragState';
+import { getFileDragPath, initFileDrag, isFileDragging } from '../utils/fileDragState';
 import { getFileTreeCache, setFileTreeCache, projectCacheKey } from '../utils/projectDataCache';
 import { useT } from '../i18n';
-import type { FileEntry, FsChangePayload, GitFileStatus, PtyOutputPayload } from '../types';
+import type { FileEntry, FsChangePayload, GitFileStatus, PtyOutputPayload, VcsFileStatus } from '../types';
 
 interface TreeNodeProps {
   entry: FileEntry;
@@ -28,6 +28,22 @@ interface TreeNodeProps {
   remoteConnectionId?: string;
 }
 
+const MOVE_AUTO_EXPAND_DELAY_MS = 650;
+
+const VCS_REFRESH_PATTERNS = [
+  /create mode/,
+  /Switched to/,
+  /Already up to date/,
+  /insertions?\(\+\)/,
+  /deletions?\(-\)/,
+  /Sending\s+/,
+  /Transmitting file data/,
+  /Committed revision/,
+  /Updated to revision/,
+  /At revision/,
+  /Reverted\s+/,
+];
+
 function getRelativePath(targetPath: string, rootPath: string) {
   const normalize = (value: string) => value.replace(/[\\/]+/g, '/').replace(/\/$/, '');
   const normalizedRoot = normalize(rootPath);
@@ -40,6 +56,39 @@ function getRelativePath(targetPath: string, rootPath: string) {
   return normalizedTarget.slice(normalizedRoot.length + 1).replace(/\//g, sep);
 }
 
+function normalizeTreePath(value: string): string {
+  const normalized = value.replace(/[\\/]+/g, '/');
+  return normalized === '/' ? normalized : normalized.replace(/\/+$/, '');
+}
+
+function parentTreePath(value: string): string {
+  const normalized = normalizeTreePath(value);
+  const index = normalized.lastIndexOf('/');
+  if (index < 0) return '';
+  return index === 0 ? '/' : normalized.slice(0, index);
+}
+
+function canMoveToDirectory(sourcePath: string, targetDir: string): boolean {
+  let source = normalizeTreePath(sourcePath);
+  let target = normalizeTreePath(targetDir);
+  if (!source || !target) return false;
+
+  // 当前本地工作流支持的 Windows 盘符和 UNC 路径均按大小写不敏感处理。
+  if (sourcePath.includes('\\') || targetDir.includes('\\') || /^[a-z]:/i.test(source) || /^[a-z]:/i.test(target)) {
+    source = source.toLowerCase();
+    target = target.toLowerCase();
+  }
+
+  if (source === target) return false;
+  if (parentTreePath(source) === target) return false;
+  if (target.startsWith(`${source}/`)) return false;
+  return true;
+}
+
+function dispatchFileTreeRefresh(): void {
+  window.dispatchEvent(new CustomEvent('file-tree-refresh'));
+}
+
 function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewFile, remoteConnectionId }: TreeNodeProps) {
   const t = useT();
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -47,6 +96,8 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     activeProjectId ? isExpanded(activeProjectId, entry.path) : false
   );
   const [children, setChildren] = useState<FileEntry[]>([]);
+  const [moveDropActive, setMoveDropActive] = useState(false);
+  const autoExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 仅远程展开时置 true:SFTP 往返可达秒级,需要行内 spinner 反馈;
   // 本地列目录近乎即时,置 loading 反而闪一帧
   const [loadingChildren, setLoadingChildren] = useState(false);
@@ -74,6 +125,13 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     setChildren(entries);
   }, [entry.path, projectRoot, remoteConnectionId]);
 
+  const clearAutoExpandTimer = useCallback(() => {
+    if (autoExpandTimerRef.current) {
+      clearTimeout(autoExpandTimerRef.current);
+      autoExpandTimerRef.current = null;
+    }
+  }, []);
+
   // 恢复时(初始即展开)加载一次子节点
   useEffect(() => {
     if (expanded && entry.isDir) {
@@ -93,6 +151,10 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
       invoke('unwatch_directory', { path: entry.path }).catch(() => {});
     };
   }, [expanded, entry.isDir, entry.path, projectRoot, remoteConnectionId]);
+
+  useEffect(() => {
+    return () => clearAutoExpandTimer();
+  }, [clearAutoExpandTimer]);
 
   const handleToggle = useCallback(async () => {
     if (!entry.isDir) {
@@ -124,13 +186,68 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
     }
   }, [expanded, entry.path, loadChildren, remoteConnectionId]));
 
+  useEffect(() => {
+    const handler = () => {
+      if (!remoteConnectionId && expanded) void loadChildren();
+    };
+    window.addEventListener('file-tree-refresh', handler);
+    return () => window.removeEventListener('file-tree-refresh', handler);
+  }, [expanded, loadChildren, remoteConnectionId]);
+
+  const handleMoveHover = useCallback(() => {
+    if (remoteConnectionId) return;
+    const sourcePath = getFileDragPath();
+    const canDrop = !!sourcePath && entry.isDir && canMoveToDirectory(sourcePath, entry.path);
+    if (!isFileDragging() || !canDrop) {
+      if (moveDropActive) setMoveDropActive(false);
+      clearAutoExpandTimer();
+      return;
+    }
+
+    if (!moveDropActive) setMoveDropActive(true);
+    if (!expanded && !autoExpandTimerRef.current) {
+      autoExpandTimerRef.current = setTimeout(() => {
+        autoExpandTimerRef.current = null;
+        const activeSourcePath = getFileDragPath();
+        if (!activeSourcePath || !canMoveToDirectory(activeSourcePath, entry.path)) return;
+        void loadChildren().then(() => {
+          setExpanded(true);
+          if (activeProjectId) {
+            toggleExpandedDir(activeProjectId, entry.path, true);
+          }
+        });
+      }, MOVE_AUTO_EXPAND_DELAY_MS);
+    }
+  }, [activeProjectId, clearAutoExpandTimer, entry.isDir, entry.path, expanded, loadChildren, moveDropActive, remoteConnectionId]);
+
+  const handleMoveLeave = useCallback(() => {
+    if (moveDropActive) setMoveDropActive(false);
+    clearAutoExpandTimer();
+  }, [clearAutoExpandTimer, moveDropActive]);
+
+  const handleMoveDrop = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    const sourcePath = getFileDragPath();
+    if (sourcePath) e.stopPropagation();
+    clearAutoExpandTimer();
+    setMoveDropActive(false);
+    if (remoteConnectionId || !sourcePath || !entry.isDir || !canMoveToDirectory(sourcePath, entry.path)) return;
+
+    try {
+      await invoke('move_entry', { projectRoot, sourcePath, targetDir: entry.path });
+      dispatchFileTreeRefresh();
+    } catch (err) {
+      console.error('移动文件失败:', err);
+      await message(String(err), { title: t('panels.statusDot.error'), kind: 'error' });
+    }
+  }, [clearAutoExpandTimer, entry.isDir, entry.path, projectRoot, remoteConnectionId, t]);
+
   return (
     <div>
       <div
         data-file-item
         className={`flex items-center gap-1 py-[3px] cursor-pointer hover:bg-[var(--border-subtle)] rounded-[var(--radius-sm)] text-base transition-colors duration-100 ${
           entry.ignored ? 'text-[var(--text-muted)] opacity-50' : entry.isDir ? 'text-[var(--color-folder)]' : 'text-[var(--color-file)]'
-        }`}
+        } ${moveDropActive ? 'bg-[var(--accent-subtle)] outline outline-1 outline-[var(--accent)]' : ''}`}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
         role="treeitem"
         aria-expanded={entry.isDir ? expanded : undefined}
@@ -269,6 +386,9 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
         onMouseDown={(e) => {
           if (e.button === 0) initFileDrag(entry.path, e.clientX, e.clientY);
         }}
+        onMouseMove={handleMoveHover}
+        onMouseLeave={handleMoveLeave}
+        onMouseUp={handleMoveDrop}
       >
         {entry.isDir && (
           loadingChildren ? (
@@ -400,16 +520,17 @@ export function FileTree() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [diffTarget, setDiffTarget] = useState<GitFileStatus | null>(null);
   const [viewFilePath, setViewFilePath] = useState<string | null>(null);
+  const [rootMoveDropActive, setRootMoveDropActive] = useState(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rootEntriesRef = useRef(rootEntries);
   rootEntriesRef.current = rootEntries;
   const gitStatusMapRef = useRef(gitStatusMap);
   gitStatusMapRef.current = gitStatusMap;
 
-  const loadGitStatus = useCallback(() => {
-    if (!project || isRemote) return; // 远程项目跳过 git 状态(远程 Git 二期)
+  const loadVcsStatus = useCallback(() => {
+    if (!project || isRemote) return; // 远程项目跳过 VCS 状态(远程 VCS 二期)
     const key = projectCacheKey(project);
-    invoke<GitFileStatus[]>('get_git_status', { projectPath: project.path })
+    invoke<VcsFileStatus[]>('get_vcs_status', { projectPath: project.path })
       .then((statuses) => {
         const map = new Map<string, GitFileStatus>();
         for (const s of statuses) map.set(s.path, s);
@@ -425,8 +546,8 @@ export function FileTree() {
 
   const debouncedRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(loadGitStatus, 500);
-  }, [loadGitStatus]);
+    refreshTimerRef.current = setTimeout(loadVcsStatus, 500);
+  }, [loadVcsStatus]);
 
   /** 加载根目录列表。`refreshIgnore=true` 仅远程有效:强制后端重读根 .gitignore(手动刷新)。 */
   const loadRootEntries = useCallback((refreshIgnore = false) => {
@@ -491,7 +612,7 @@ export function FileTree() {
     setDiffTarget(null);
     setViewFilePath(null);
 
-    // SSH 远程项目:SFTP readdir,不拉 git 状态、不注册 notify watcher;
+    // SSH 远程项目:SFTP readdir,不拉 VCS 状态、不注册 notify watcher;
     // 断链直接给明确错误(项目仍可见、可删除)。
     if (isRemote) {
       if (remoteBroken) {
@@ -518,7 +639,7 @@ export function FileTree() {
     }
 
     const listPromise = invoke<FileEntry[]>('list_directory', { projectRoot: projectPath, path: projectPath });
-    const statusPromise = invoke<GitFileStatus[]>('get_git_status', { projectPath }).catch(() => [] as GitFileStatus[]);
+    const statusPromise = invoke<VcsFileStatus[]>('get_vcs_status', { projectPath }).catch(() => [] as VcsFileStatus[]);
     Promise.all([listPromise, statusPromise]).then(([entries, statuses]) => {
       if (cancelled) return;
       const map = new Map<string, GitFileStatus>();
@@ -559,17 +680,26 @@ export function FileTree() {
     }
   }, [project?.path, isRemote, loadRootEntries]));
 
+  useEffect(() => {
+    const handler = () => {
+      if (isRemote) return;
+      loadRootEntries();
+      loadVcsStatus();
+    };
+    window.addEventListener('file-tree-refresh', handler);
+    return () => window.removeEventListener('file-tree-refresh', handler);
+  }, [isRemote, loadRootEntries, loadVcsStatus]);
+
   useTauriEvent<FsChangePayload>('fs-change', useCallback((payload: FsChangePayload) => {
     if (project && !isRemote && payload.projectPath === project.path) {
       debouncedRefresh();
     }
   }, [project?.path, isRemote, debouncedRefresh]));
 
-  const GIT_PATTERNS = [/create mode/, /Switched to/, /Already up to date/, /insertions?\(\+\)/, /deletions?\(-\)/];
   useTauriEvent<PtyOutputPayload>('pty-output', useCallback((payload: PtyOutputPayload) => {
-    if (isRemote) return; // 远程项目不做 git 状态刷新
+    if (isRemote) return; // 远程项目不做 VCS 状态刷新
     if (isAiPty(payload.ptyId)) return;
-    if (GIT_PATTERNS.some((p) => p.test(payload.data))) {
+    if (VCS_REFRESH_PATTERNS.some((p) => p.test(payload.data))) {
       debouncedRefresh();
     }
   }, [isRemote, debouncedRefresh]));
@@ -582,6 +712,40 @@ export function FileTree() {
     if (isRemote) return; // 文件查看走本地读文件链路,远程 MVP 只读浏览不支持
     setViewFilePath(path);
   }, [isRemote]);
+
+  const isRootDropSurface = useCallback((target: EventTarget | null) => {
+    return target instanceof Element && !target.closest('[data-file-item]');
+  }, []);
+
+  const handleRootMoveHover = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const sourcePath = getFileDragPath();
+    const canDrop = !isRemote && !!project && !!sourcePath && isRootDropSurface(e.target)
+      && canMoveToDirectory(sourcePath, project.path);
+    if (isFileDragging() && canDrop) {
+      if (!rootMoveDropActive) setRootMoveDropActive(true);
+    } else if (rootMoveDropActive) {
+      setRootMoveDropActive(false);
+    }
+  }, [isRemote, isRootDropSurface, project?.path, rootMoveDropActive]);
+
+  const handleRootMoveLeave = useCallback(() => {
+    if (rootMoveDropActive) setRootMoveDropActive(false);
+  }, [rootMoveDropActive]);
+
+  const handleRootMoveDrop = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    setRootMoveDropActive(false);
+    if (!project || isRemote || !isRootDropSurface(e.target)) return;
+    const sourcePath = getFileDragPath();
+    if (!sourcePath || !canMoveToDirectory(sourcePath, project.path)) return;
+
+    try {
+      await invoke('move_entry', { projectRoot: project.path, sourcePath, targetDir: project.path });
+      dispatchFileTreeRefresh();
+    } catch (err) {
+      console.error('移动文件失败:', err);
+      await message(String(err), { title: t('panels.statusDot.error'), kind: 'error' });
+    }
+  }, [isRemote, isRootDropSurface, project?.path, t]);
 
   const handleRootContextMenu = useCallback((e: React.MouseEvent) => {
     if (!project) return;
@@ -645,7 +809,7 @@ export function FileTree() {
             onClick={() => {
               // 远程:refreshIgnore=true 强制重读根 .gitignore;本地:同旧行为
               loadRootEntries(isRemote);
-              loadGitStatus();
+              loadVcsStatus();
             }}
             title={isRemote ? t('fileTree.remote.refreshTitle') : t('fileTree.header.refresh')}
             aria-label={isRemote ? t('fileTree.remote.refreshTitle') : t('fileTree.header.refresh')}
@@ -690,7 +854,17 @@ export function FileTree() {
           )}
         </div>
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto px-1" role="tree" aria-label={t('panels.files')} onContextMenu={handleRootContextMenu}>
+      <div
+        className={`flex-1 min-h-0 overflow-y-auto px-1 transition-colors ${
+          rootMoveDropActive ? 'bg-[var(--accent-subtle)] outline outline-1 outline-[var(--accent)] outline-offset-[-2px]' : ''
+        }`}
+        role="tree"
+        aria-label={t('panels.files')}
+        onContextMenu={handleRootContextMenu}
+        onMouseMove={handleRootMoveHover}
+        onMouseLeave={handleRootMoveLeave}
+        onMouseUp={handleRootMoveDrop}
+      >
         {loading && rootEntries.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-[var(--text-muted)] text-sm">
             {t('fileTree.empty.loading')}
@@ -750,6 +924,7 @@ export function FileTree() {
           onClose={() => setDiffTarget(null)}
           projectPath={project.path}
           status={diffTarget}
+          vcsKind={diffTarget.vcsKind}
         />
       )}
     </div>

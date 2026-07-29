@@ -12,6 +12,7 @@ import type { ChangeFileStatus, PtyOutputPayload } from '../types';
 interface GitChangesProps {
   projectPath: string;
   repoPath: string;
+  vcsKind?: 'git' | 'svn';
   onCommitSuccess: () => void;
 }
 
@@ -82,7 +83,7 @@ function statusColor(_file: ChangeFileStatus, area: string): string {
 
 // --- Main component ---
 
-export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSuccess }: GitChangesProps) {
+export function GitChanges({ projectPath: _projectPath, repoPath, vcsKind = 'git', onCommitSuccess }: GitChangesProps) {
   const t = useT();
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
@@ -102,21 +103,26 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
   } | null>(null);
 
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const isSvn = vcsKind === 'svn';
 
   // Grouping
   const staged = changes.filter((c) => c.stagedStatus);
   const unstaged = changes.filter((c) => c.unstagedStatus && c.unstagedStatus !== 'untracked');
   const untracked = changes.filter((c) => c.unstagedStatus === 'untracked');
+  const committable = isSvn ? changes.filter((c) => c.unstagedStatus !== 'untracked') : staged;
 
   // Load changes
   const loadChanges = useCallback(() => {
     if (!repoPath) return;
     setLoading(true);
-    invoke<ChangeFileStatus[]>('get_changes_status', { repoPath })
+    invoke<ChangeFileStatus[]>(
+      isSvn ? 'get_vcs_changes_status' : 'get_changes_status',
+      isSvn ? { repoPath, vcsKind } : { repoPath },
+    )
       .then(setChanges)
       .catch(() => setChanges([]))
       .finally(() => setLoading(false));
-  }, [repoPath]);
+  }, [repoPath, vcsKind, isSvn]);
 
   useEffect(() => {
     loadChanges();
@@ -146,45 +152,57 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
 
   const handleStage = useCallback(async (files: string[]) => {
     try {
-      await invoke('git_stage', { repoPath, files });
+      await invoke(
+        isSvn ? 'vcs_stage' : 'git_stage',
+        isSvn ? { repoPath, vcsKind, files } : { repoPath, files },
+      );
       loadChanges();
     } catch (e) {
       console.error('stage failed:', e);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, vcsKind, isSvn, loadChanges]);
 
   const handleUnstage = useCallback(async (files: string[]) => {
+    if (isSvn) return;
     try {
       await invoke('git_unstage', { repoPath, files });
       loadChanges();
     } catch (e) {
       console.error('unstage failed:', e);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, isSvn, loadChanges]);
 
-  const handleStageAll = useCallback(async () => {
+  const handleStageAll = useCallback(async (includeUntracked = true) => {
     try {
-      await invoke('git_stage_all', { repoPath });
+      await invoke(
+        isSvn ? 'vcs_stage_all' : 'git_stage_all',
+        isSvn ? { repoPath, vcsKind, includeUntracked } : { repoPath },
+      );
       loadChanges();
     } catch (e) {
       console.error('stage all failed:', e);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, vcsKind, isSvn, loadChanges]);
 
   const handleUnstageAll = useCallback(async () => {
+    if (isSvn) return;
     try {
       await invoke('git_unstage_all', { repoPath });
       loadChanges();
     } catch (e) {
       console.error('unstage all failed:', e);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, isSvn, loadChanges]);
 
   const handleCommit = useCallback(async () => {
-    if (!commitMsg.trim() || staged.length === 0) return;
+    if (!commitMsg.trim() || committable.length === 0) return;
     setCommitting(true);
     try {
-      await invoke('git_commit', { repoPath, message: commitMsg.trim() });
+      const message = commitMsg.trim();
+      await invoke(
+        isSvn ? 'vcs_commit' : 'git_commit',
+        isSvn ? { repoPath, vcsKind, message } : { repoPath, message },
+      );
       setCommitMsg('');
       loadChanges();
       onCommitSuccess();
@@ -193,7 +211,7 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     } finally {
       setCommitting(false);
     }
-  }, [repoPath, commitMsg, staged.length, loadChanges, onCommitSuccess]);
+  }, [repoPath, vcsKind, isSvn, commitMsg, committable.length, loadChanges, onCommitSuccess]);
 
   const handleDiscard = useCallback(async (files: string[]) => {
     const confirmed = await ask(
@@ -202,12 +220,15 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
     );
     if (!confirmed) return;
     try {
-      await invoke('git_discard_file', { repoPath, files });
+      await invoke(
+        isSvn ? 'vcs_discard_file' : 'git_discard_file',
+        isSvn ? { repoPath, vcsKind, files } : { repoPath, files },
+      );
       loadChanges();
     } catch (e) {
       console.error('discard failed:', e);
     }
-  }, [repoPath, loadChanges]);
+  }, [repoPath, vcsKind, isSvn, loadChanges, t]);
 
   const handleViewDiff = useCallback((filePath: string, isStaged: boolean, statusLabel: string) => {
     setDiffModal({ open: true, filePath, staged: isStaged, statusLabel });
@@ -240,12 +261,16 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
         onContextMenu={(e) => {
           e.preventDefault();
           const sep = { separator: true as const };
+          const vcsActions: Parameters<typeof showContextMenu>[2] = isSvn
+            ? (area === 'untracked'
+              ? [{ label: t('panels.stage'), onClick: () => handleStage([file.path]) }]
+              : [])
+            : (isStaged
+              ? [{ label: t('panels.unstage'), onClick: () => handleUnstage([file.path]) }]
+              : [{ label: t('panels.stage'), onClick: () => handleStage([file.path]) }]);
           const items: Parameters<typeof showContextMenu>[2] = [
             { label: t('gitChanges.contextViewDiff'), onClick: () => handleViewDiff(file.path, isStaged, statusChar) },
-            sep,
-            ...(isStaged
-              ? [{ label: t('panels.unstage'), onClick: () => handleUnstage([file.path]) }]
-              : [{ label: t('panels.stage'), onClick: () => handleStage([file.path]) }]),
+            ...(vcsActions.length > 0 ? [sep, ...vcsActions] : []),
             ...(area !== 'staged'
               ? [sep, { label: t('gitChanges.contextDiscard'), onClick: () => handleDiscard([file.path]) }]
               : []),
@@ -261,17 +286,19 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
             {displayName}
           </span>
         </div>
-        <button
-          className="shrink-0 w-5 h-5 flex items-center justify-center text-sm opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-opacity"
-          title={isStaged ? t('panels.unstage') : t('panels.stage')}
-          aria-label={isStaged ? t('panels.unstage') : t('panels.stage')}
-          onClick={(e) => {
-            e.stopPropagation();
-            isStaged ? handleUnstage([file.path]) : handleStage([file.path]);
-          }}
-        >
-          {isStaged ? '−' : '+'}
-        </button>
+        {(!isSvn || area === 'untracked') && (
+          <button
+            className="shrink-0 w-5 h-5 flex items-center justify-center text-sm opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-opacity"
+            title={isSvn ? t('panels.stage') : isStaged ? t('panels.unstage') : t('panels.stage')}
+            aria-label={isSvn ? t('panels.stage') : isStaged ? t('panels.unstage') : t('panels.stage')}
+            onClick={(e) => {
+              e.stopPropagation();
+              isStaged ? handleUnstage([file.path]) : handleStage([file.path]);
+            }}
+          >
+            {isStaged ? '−' : '+'}
+          </button>
+        )}
       </div>
     );
   };
@@ -389,11 +416,11 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
         })}
         {renderGroup(t('panels.unstagedChanges'), unstaged, 'unstaged', {
           label: t('gitChanges.stageAll'),
-          onClick: handleStageAll,
+          onClick: () => handleStageAll(false),
         })}
         {renderGroup(t('panels.untrackedFiles'), untracked, 'untracked', {
           label: t('gitChanges.stageAll'),
-          onClick: handleStageAll,
+          onClick: () => handleStageAll(true),
         })}
       </div>
 
@@ -413,14 +440,14 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
         />
         <button
           className={`w-full mt-1.5 py-1.5 text-sm rounded font-medium transition-colors ${
-            commitMsg.trim() && staged.length > 0 && !committing
+            commitMsg.trim() && committable.length > 0 && !committing
               ? 'bg-[var(--accent)] text-white hover:opacity-90 cursor-pointer'
               : 'bg-[var(--bg-elevated)] text-[var(--text-muted)] cursor-not-allowed'
           }`}
-          disabled={!commitMsg.trim() || staged.length === 0 || committing}
+          disabled={!commitMsg.trim() || committable.length === 0 || committing}
           onClick={handleCommit}
         >
-          {committing ? t('gitChanges.committing') : t('panels.commit', { count: staged.length })}
+          {committing ? t('gitChanges.committing') : t('panels.commit', { count: committable.length })}
         </button>
       </div>
 
@@ -432,6 +459,7 @@ export function GitChanges({ projectPath: _projectPath, repoPath, onCommitSucces
           projectPath={repoPath}
           status={diffModalStatus}
           staged={diffModal.staged}
+          vcsKind={vcsKind}
         />
       )}
     </div>

@@ -11,6 +11,11 @@ import { t } from "../i18n";
  * 清理走同一条路，顺带补上 role/aria、焦点陷阱与关闭后的焦点还原。
  */
 
+export interface ConfirmOptions {
+  confirmLabel?: string;
+  cancelLabel?: string;
+}
+
 interface DialogHandle {
   dialog: HTMLElement;
   /** 关闭弹窗并做全部清理（幂等） */
@@ -113,7 +118,11 @@ function appendButtons(
 }
 
 /** 自定义 confirm，替代 window.confirm。 */
-export function showConfirm(title: string, message: string): Promise<boolean> {
+export function showConfirm(
+  title: string,
+  message: string,
+  options: ConfirmOptions = {},
+): Promise<boolean> {
   return new Promise((resolve) => {
     const { dialog, close } = createDialog(title, (e) => {
       if (e.key === 'Enter') { finish(true); return; }
@@ -123,8 +132,8 @@ export function showConfirm(title: string, message: string): Promise<boolean> {
 
     appendMessage(dialog, message);
     const [cancelBtn, confirmBtn] = appendButtons(dialog, [
-      { label: t('prompt.cancel'), kind: 'cancel' },
-      { label: t('prompt.confirm'), kind: 'confirm' },
+      { label: options.cancelLabel ?? t('prompt.cancel'), kind: 'cancel' },
+      { label: options.confirmLabel ?? t('prompt.confirm'), kind: 'confirm' },
     ]);
 
     const finish = (value: boolean) => {

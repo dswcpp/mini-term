@@ -21,6 +21,8 @@
 | [toml_edit 处理 array-of-tables](./toml-edit-array-of-tables.md) | 编辑 TOML `[[xxx]]` 数组表的标准模式，保留用户注释和顺序；包含类型推断歧义 / `ArrayOfTables` 无 `Index<usize>` 等坑的 Wrong vs Correct |
 | [Tauri command nested struct 参数 invoke 约定](./tauri-command-nested-args.md) | 后端 command 含 struct 参数时，前端 invoke 必须按参数名保留 wrapping key；文中命令与类型均为中性伪代码 |
 | [经 `\\wsl$` UNC 扫描 WSL 内 AI 会话](./wsl-unc-session-scanning.md) | 从 Windows 读 WSL 发行版内文件的完整契约：发行版枚举只读注册表 Lxss（禁 spawn wsl.exe）、秒级 9P IO 必须 `#[tauri::command(async)]`、缓存锁不得跨慢 IO、unix/windows 两套 normalize 不可混用、一切失败静默降级 |
+| [终端输出日志](./terminal-output-logging.md) | PTY 输出日志必须经有界后台队列异步写入，配置从 `config.json` 读取并按大小轮转，禁止阻塞终端输出线程 |
+| [Git / SVN 版本控制兼容层](./vcs-git-svn-compat.md) | 新增版本控制能力优先走 `vcs_*` 跨层命令；Git 保留 staging/history，SVN 通过 CLI 适配 status/diff/commit/revert |
 | [SSH 远程项目契约](./ssh-remote-project.md) | `sshConnectionId` 判别字段语义、4 个 `ssh_remote_*` command + `create_pty sshRemote` 签名、POSIX 路径纪律、密码 autofill 须 spawn 前预注册、本地消费者 gate 规则、`map_while(Result::ok)` 截断陷阱 |
 
 ---

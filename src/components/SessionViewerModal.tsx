@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
+import { MARKDOWN_SANITIZE_SCHEMA } from '../utils/markdownSanitize';
 import { MOD_LABEL } from '../utils/platform';
 import { handleExternalLinkClick } from '../utils/externalLink';
 import { Modal } from './Modal';
@@ -271,7 +273,7 @@ export function SessionViewerModal({ open, onClose, session, projectPath }: Prop
                   <div className="md-preview">
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeRaw]}
+                      rehypePlugins={[rehypeRaw, [rehypeSanitize, MARKDOWN_SANITIZE_SCHEMA]]}
                       components={{
                         a: ({ href, children, ...props }) => (
                           <a href={href} onClick={handleExternalLinkClick} {...props}>{children}</a>

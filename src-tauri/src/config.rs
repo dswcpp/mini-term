@@ -57,6 +57,16 @@ pub struct AppConfig {
     pub terminal_font_family: Option<String>,
     #[serde(default)]
     pub terminal_ligatures: bool,
+    #[serde(default = "default_terminal_encoding")]
+    pub terminal_encoding: String,
+    #[serde(default = "default_true")]
+    pub terminal_depth_ui: bool,
+    #[serde(default)]
+    pub terminal_log_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_log_path: Option<String>,
+    #[serde(default = "default_terminal_log_max_size_mb")]
+    pub terminal_log_max_size_mb: u64,
     #[serde(default)]
     pub layout_sizes: Option<Vec<f64>>,
     #[serde(default)]
@@ -186,6 +196,10 @@ fn default_launchers() -> Vec<AiLauncher> {
 #[serde(rename_all = "camelCase")]
 pub struct SavedPane {
     pub shell_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_encoding: Option<String>,
     /// 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -315,6 +329,12 @@ fn default_long_paste_line_threshold() -> u32 {
 fn default_long_paste_char_threshold() -> u32 {
     2000
 }
+fn default_terminal_log_max_size_mb() -> u64 {
+    10
+}
+fn default_terminal_encoding() -> String {
+    "auto".to_string()
+}
 /// 默认落项目内的隐藏目录:agent 对项目目录天然有读权限，不像 `/tmp` 那样
 /// 会触发 Claude Code 的项目外路径确认。
 pub fn default_remote_paste_dir() -> String {
@@ -338,6 +358,11 @@ impl Default for AppConfig {
             ui_font_family: None,
             terminal_font_family: None,
             terminal_ligatures: false,
+            terminal_encoding: default_terminal_encoding(),
+            terminal_depth_ui: true,
+            terminal_log_enabled: false,
+            terminal_log_path: None,
+            terminal_log_max_size_mb: default_terminal_log_max_size_mb(),
             layout_sizes: None,
             middle_column_sizes: None,
             theme: default_theme(),
@@ -527,6 +552,22 @@ fn normalize_split_node(node: &mut SavedSplitNode) {
 }
 
 fn migrate_config(mut config: AppConfig) -> AppConfig {
+    if config.available_shells.is_empty() {
+        config.available_shells = default_shells();
+    }
+    if config.default_shell.trim().is_empty()
+        || !config
+            .available_shells
+            .iter()
+            .any(|shell| shell.name == config.default_shell)
+    {
+        config.default_shell = config
+            .available_shells
+            .first()
+            .map(|shell| shell.name.clone())
+            .unwrap_or_else(default_shell_name);
+    }
+
     // 迁移 vscodePath → editors
     if config.editors.is_empty() {
         if let Some(ref path) = config.vscode_path {
@@ -698,6 +739,109 @@ mod tests {
     }
 
     #[test]
+    fn terminal_encoding_round_trip() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "terminalEncoding": "gb18030"
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.terminal_encoding, "gb18030");
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.terminal_encoding, "gb18030");
+    }
+
+    #[test]
+    fn terminal_encoding_absent_defaults_auto() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.terminal_encoding, "auto");
+    }
+
+    #[test]
+    fn terminal_depth_ui_round_trip() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "terminalDepthUi": false
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.terminal_depth_ui);
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        assert!(!reparsed.terminal_depth_ui);
+    }
+
+    #[test]
+    fn terminal_depth_ui_absent_defaults_true() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.terminal_depth_ui);
+    }
+
+    #[test]
+    fn terminal_log_config_round_trip() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14,
+            "terminalLogEnabled": true,
+            "terminalLogPath": "C:/logs/mini-term.log",
+            "terminalLogMaxSizeMb": 25
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.terminal_log_enabled);
+        assert_eq!(
+            config.terminal_log_path.as_deref(),
+            Some("C:/logs/mini-term.log")
+        );
+        assert_eq!(config.terminal_log_max_size_mb, 25);
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
+        assert!(reparsed.terminal_log_enabled);
+        assert_eq!(reparsed.terminal_log_max_size_mb, 25);
+    }
+
+    #[test]
+    fn terminal_log_config_absent_uses_defaults() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "cmd",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.terminal_log_enabled);
+        assert!(config.terminal_log_path.is_none());
+        assert_eq!(config.terminal_log_max_size_mb, 10);
+    }
+
+    #[test]
     fn old_config_without_layout_deserializes() {
         let json = r#"{
             "projects": [{"id": "1", "name": "test", "path": "/tmp"}],
@@ -727,6 +871,39 @@ mod tests {
     }
 
     #[test]
+    fn migrate_empty_shells_restores_platform_defaults() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "",
+            "availableShells": [],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let config = migrate_config(config);
+        assert!(!config.available_shells.is_empty());
+        assert!(!config.default_shell.is_empty());
+        assert!(config
+            .available_shells
+            .iter()
+            .any(|shell| shell.name == config.default_shell));
+    }
+
+    #[test]
+    fn migrate_invalid_default_shell_uses_first_available() {
+        let json = r#"{
+            "projects": [],
+            "defaultShell": "missing",
+            "availableShells": [{"name": "cmd", "command": "cmd"}],
+            "uiFontSize": 13,
+            "terminalFontSize": 14
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let config = migrate_config(config);
+        assert_eq!(config.default_shell, "cmd");
+    }
+
+    #[test]
     fn layout_round_trip() {
         let layout = SavedProjectLayout {
             tabs: vec![SavedTab {
@@ -738,6 +915,8 @@ mod tests {
                             pane: None,
                             panes: vec![SavedPane {
                                 shell_name: "cmd".into(),
+                                custom_title: Some("Build".into()),
+                                terminal_encoding: Some("gbk".into()),
                                 cwd: None,
                             }],
                         },
@@ -745,6 +924,8 @@ mod tests {
                             pane: None,
                             panes: vec![SavedPane {
                                 shell_name: "powershell".into(),
+                                custom_title: None,
+                                terminal_encoding: None,
                                 cwd: None,
                             }],
                         },
@@ -755,9 +936,20 @@ mod tests {
             active_tab_index: 0,
         };
         let json = serde_json::to_string(&layout).unwrap();
+        assert!(json.contains(r#""customTitle":"Build""#));
+        assert!(json.contains(r#""terminalEncoding":"gbk""#));
         let parsed: SavedProjectLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tabs.len(), 1);
         assert_eq!(parsed.active_tab_index, 0);
+        let SavedSplitNode::Split { children, .. } = &parsed.tabs[0].split_layout else {
+            panic!("expected split layout");
+        };
+        let SavedSplitNode::Leaf { panes, .. } = &children[0] else {
+            panic!("expected leaf layout");
+        };
+        assert_eq!(panes[0].custom_title.as_deref(), Some("Build"));
+        assert_eq!(panes[0].terminal_encoding.as_deref(), Some("gbk"));
+        assert!(panes[0].cwd.is_none());
     }
 
     #[test]
@@ -917,7 +1109,10 @@ mod tests {
             "terminalFontSize": 14
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.projects[0].ssh_connection_id.as_deref(), Some("conn-1"));
+        assert_eq!(
+            config.projects[0].ssh_connection_id.as_deref(),
+            Some("conn-1")
+        );
         assert_eq!(config.projects[0].path, "/home/u/proj");
         // 旧配置无该字段 → None(向后兼容)
         assert!(config.projects[1].ssh_connection_id.is_none());
@@ -931,7 +1126,10 @@ mod tests {
             "本地项目不应序列化 sshConnectionId: {serialized}"
         );
         let reparsed: AppConfig = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(reparsed.projects[0].ssh_connection_id.as_deref(), Some("conn-1"));
+        assert_eq!(
+            reparsed.projects[0].ssh_connection_id.as_deref(),
+            Some("conn-1")
+        );
     }
 
     #[test]

@@ -1,14 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppStore } from '../store';
+import { saveLayoutToConfig, useAppStore } from '../store';
 import { TerminalInstance } from './TerminalInstance';
 import { StatusDot } from './StatusDot';
 import { MarkerList } from './MarkerList';
 import { showContextMenu } from '../utils/contextMenu';
 import { disposeTerminal } from '../utils/terminalCache';
 import { createProjectPty, isRemoteProject, remotePaneLabel } from '../utils/remoteProject';
-import { findPaneById } from '../utils/layoutOps';
+import { findPaneById, updateLeafOfPane } from '../utils/layoutOps';
 import {
   activatePane,
   closeLeaf,
@@ -19,9 +19,20 @@ import {
 } from '../utils/paneActions';
 import { hotkeyLabel } from '../utils/hotkeys';
 import { openTerminalSearch } from '../utils/terminalSearch';
+import { showAlert } from '../utils/prompt';
+import {
+  normalizeTerminalEncoding,
+  TERMINAL_ENCODING_OPTIONS,
+} from '../utils/terminalEncoding';
 import { MOD_LABEL } from '../utils/platform';
 import { useT } from '../i18n';
-import type { SplitNode, PaneState, ShellConfig, AiMarker } from '../types';
+import type {
+  SplitNode,
+  PaneState,
+  ShellConfig,
+  AiMarker,
+  TerminalEncoding,
+} from '../types';
 
 const EMPTY_MARKERS: AiMarker[] = [];
 const hydratingPaneIds = new Set<string>();
@@ -91,10 +102,13 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
       }
     }
 
+    const encoding = normalizeTerminalEncoding(
+      activePane.terminalEncoding ?? config.terminalEncoding,
+    );
     hydratingPaneIds.add(activePane.id);
     // 远程分支:create_pty 带 sshRemote,后端直接 spawn ssh 并预注册密码 autofill;
     // 本地分支:行为与既有链路一致(shell + cwd + envVars),pane 的 cwd 覆盖优先(worktree 终端)。
-    createProjectPty(project, shell, activePane.cwd)
+    createProjectPty(project, shell, activePane.cwd, encoding)
       .then((ptyId) => {
         const layout = useAppStore.getState().projectStates.get(projectId)?.layout;
         const pane = layout ? findPaneById(layout, activePane.id) : null;
@@ -126,8 +140,10 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
     activePane?.shellName,
     activePane?.status,
     activePane?.cwd,
+    activePane?.terminalEncoding,
     config.availableShells,
     config.defaultShell,
+    config.terminalEncoding,
     project,
     remote,
     projectId,
@@ -209,11 +225,62 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
     useAppStore.getState().resetPaneForReconnect(projectId, activePane.id);
   }, [activePane, projectId]);
 
+  const updatePaneEncoding = useCallback(async (
+    paneId: string,
+    nextEncoding: TerminalEncoding,
+  ) => {
+    const encoding = normalizeTerminalEncoding(nextEncoding);
+    const layout = useAppStore.getState().projectStates.get(projectId)?.layout;
+    const pane = layout ? findPaneById(layout, paneId) : null;
+    if (!layout || !pane) return;
+
+    try {
+      if (pane.ptyId !== undefined) {
+        await invoke<TerminalEncoding>('set_pty_encoding', {
+          ptyId: pane.ptyId,
+          encoding,
+        });
+      }
+
+      // invoke 期间布局可能变化，按 paneId 从最新树更新，避免覆盖并行的分屏/关闭操作。
+      const latestLayout = useAppStore.getState().projectStates.get(projectId)?.layout;
+      if (!latestLayout || !findPaneById(latestLayout, paneId)) return;
+      const updatedLayout = updateLeafOfPane(latestLayout, paneId, (leaf) => ({
+        ...leaf,
+        panes: leaf.panes.map((item) => (
+          item.id === paneId ? { ...item, terminalEncoding: encoding } : item
+        )),
+      }));
+      useAppStore.getState().setProjectLayout(projectId, updatedLayout);
+      saveLayoutToConfig(projectId);
+    } catch (error) {
+      await showAlert(
+        t('paneGroup.encodingUpdateFailed'),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }, [projectId, t]);
+
   const paneContextMenu = useCallback((e: React.MouseEvent, paneId: string) => {
     e.preventDefault();
     e.stopPropagation();
+    const layout = useAppStore.getState().projectStates.get(projectId)?.layout;
+    const pane = layout ? findPaneById(layout, paneId) : null;
+    const currentEncoding = normalizeTerminalEncoding(
+      pane?.terminalEncoding ?? config.terminalEncoding,
+    );
     showContextMenu(e.clientX, e.clientY, [
       { label: t('paneGroup.rename'), shortcut: hotkeyLabel('renamePane'), onClick: () => void renamePane(projectId, paneId) },
+      {
+        label: t('paneGroup.encoding'),
+        submenu: [
+          { header: t('paneGroup.encoding') },
+          ...TERMINAL_ENCODING_OPTIONS.map((option) => ({
+            label: option.value === currentEncoding ? `✓ ${option.label}` : option.label,
+            onClick: () => void updatePaneEncoding(paneId, option.value),
+          })),
+        ],
+      },
       { separator: true },
       { label: t('paneGroup.splitRight'), shortcut: hotkeyLabel('splitRight'), onClick: () => void splitPane(projectId, 'horizontal', paneId) },
       { label: t('paneGroup.splitDown'), shortcut: hotkeyLabel('splitDown'), onClick: () => void splitPane(projectId, 'vertical', paneId) },
@@ -221,7 +288,7 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
       { label: t('paneGroup.closeTab'), onClick: () => void closePane(projectId, paneId) },
       { label: t('paneGroup.closePane'), shortcut: hotkeyLabel('closePane'), danger: true, onClick: () => void closeLeaf(projectId, paneId) },
     ]);
-  }, [projectId, t]);
+  }, [config.terminalEncoding, projectId, t, updatePaneEncoding]);
 
   if (!activePane) return null;
 

@@ -143,6 +143,6 @@ test('CSI 策略与 100000 行容量:alt screen 必须放行,ED 全交给 xterm'
   );
   assert.match(
     terminalCacheSource,
-    /term\.onResize\(\(\{ cols, rows \}\) => \{\s*invoke\('resize_pty'/,
+    /term\.onResize\(\(\{ cols, rows \}\) => \{\s*resizePtySafely\(ptyId, cols, rows\)/,
   );
 });

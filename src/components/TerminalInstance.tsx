@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
-import { getOrCreateTerminal, getCachedTerminal, activateWebgl, getTerminalTheme, DARK_TERMINAL_THEME, writePtyInput, copyTerminalSelection, pasteToTerminal, resolveTerminalFontFamily, reloadLigaturesForPty, resetRenderStateForPty } from '../utils/terminalCache';
+import { getOrCreateTerminal, getCachedTerminal, activateWebgl, getTerminalTheme, DARK_TERMINAL_THEME, writePtyInput, copyTerminalSelection, pasteToTerminal, resolveTerminalFontFamily, reloadLigaturesForPty, resetRenderStateForPty, resizePtySafely } from '../utils/terminalCache';
 import { getResolvedTheme } from '../utils/themeManager';
 import { showContextMenu, type MenuEntry } from '../utils/contextMenu';
 import { isFileDragging, getFileDragPath } from '../utils/fileDragState';
@@ -27,6 +27,19 @@ function buildSshCommand(conn: SshConnection, identityPath: string | undefined):
   if (identity) parts.push('-i', `"${identity.replace(/\\/g, '/')}"`);
   parts.push(`${conn.user}@${conn.host}`);
   return parts.join(' ');
+}
+
+function logTerminalInstanceError(context: string, error: unknown): void {
+  // eslint-disable-next-line no-console
+  console.warn(`[terminal] ${context}`, error);
+}
+
+function runTerminalAction(context: string, action: () => Promise<unknown>): void {
+  void action().catch((error) => logTerminalInstanceError(context, error));
+}
+
+function hasLayoutBox(container: HTMLElement): boolean {
+  return container.clientWidth > 0 && container.clientHeight > 0;
 }
 
 /** 在指定终端中连接 SSH:有密码先注册自动填充,再写入 ssh 命令并回车 */
@@ -71,7 +84,10 @@ function buildSshSubmenu(connections: SshConnection[], ptyId: number): MenuEntry
       entries.push({ header: bucket.group ?? t('terminal.ungrouped') });
     }
     for (const conn of bucket.items) {
-      entries.push({ label: conn.name, onClick: () => void connectSsh(ptyId, conn) });
+      entries.push({
+        label: conn.name,
+        onClick: () => runTerminalAction('ssh connect failed', () => connectSsh(ptyId, conn)),
+      });
     }
   }
   return entries;
@@ -84,6 +100,7 @@ export function TerminalInstance({ ptyId }: Props) {
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize);
   const terminalFontFamily = useAppStore((s) => s.config.terminalFontFamily);
   const terminalLigatures = useAppStore((s) => s.config.terminalLigatures);
+  const terminalDepthUi = useAppStore((s) => s.config.terminalDepthUi ?? true);
   const terminalFollowTheme = useAppStore((s) => s.config.terminalFollowTheme);
   const sshConnections = useAppStore((s) => s.config.sshConnections);
 
@@ -98,6 +115,44 @@ export function TerminalInstance({ ptyId }: Props) {
     if (!container) return;
 
     const { term, fitAddon, wrapper } = getOrCreateTerminal(ptyId);
+    let disposed = false;
+    const rafIds = new Set<number>();
+    let settleId: ReturnType<typeof setTimeout> | undefined;
+
+    const scheduleFrame = (callback: () => void): number | undefined => {
+      if (disposed) return undefined;
+      const id = requestAnimationFrame(() => {
+        rafIds.delete(id);
+        if (!disposed) callback();
+      });
+      rafIds.add(id);
+      return id;
+    };
+
+    const cancelFrame = (id: number | undefined): void => {
+      if (id === undefined) return;
+      cancelAnimationFrame(id);
+      rafIds.delete(id);
+    };
+
+    const fitVisibleTerminal = (): void => {
+      if (!hasLayoutBox(container)) return;
+      try {
+        fitAddon.fit();
+      } catch (error) {
+        logTerminalInstanceError('fit failed', error);
+      }
+    };
+
+    const refreshVisibleTerminal = (): void => {
+      if (!hasLayoutBox(container)) return;
+      try {
+        fitAddon.fit();
+        if (term.rows > 0) term.refresh(0, term.rows - 1);
+      } catch (error) {
+        logTerminalInstanceError('refresh failed', error);
+      }
+    };
 
     container.appendChild(wrapper);
 
@@ -105,68 +160,99 @@ export function TerminalInstance({ ptyId }: Props) {
     const bufBefore = term.buffer.active;
     const mountWasAtBottom = bufBefore.baseY + term.rows >= bufBefore.length;
 
-    requestAnimationFrame(() => {
-      if (container.clientWidth > 0 && container.clientHeight > 0) {
+    scheduleFrame(() => {
+      if (!hasLayoutBox(container)) return;
+      try {
         fitAddon.fit();
-        invoke('resize_pty', { ptyId, cols: term.cols, rows: term.rows });
-        term.refresh(0, term.rows - 1);
-        // split/remount 后视口可能停留在 buffer 顶部，滚回光标位置
-        if (mountWasAtBottom) term.scrollToBottom();
-        // 等 canvas 渲染器首帧合成上屏后再加载 WebGL，避免替换 canvas 时闪白
-        requestAnimationFrame(() => {
-          activateWebgl(ptyId);
-          // mount 后重建本终端 model/顶点缓冲，对齐共享 atlas 当前布局
-          // (只清自己，不动共享 atlas —— 见 resetRenderStateForPty 注释)
-          requestAnimationFrame(() => resetRenderStateForPty(ptyId));
-        });
+        resizePtySafely(ptyId, term.cols, term.rows);
+        if (term.rows > 0) term.refresh(0, term.rows - 1);
+      } catch (error) {
+        logTerminalInstanceError('initial fit failed', error);
+        return;
       }
+
+      // split/remount 后视口可能停留在 buffer 顶部，滚回光标位置
+      if (mountWasAtBottom) {
+        try {
+          term.scrollToBottom();
+        } catch (error) {
+          logTerminalInstanceError('scroll failed', error);
+        }
+      }
+
+      // 等 canvas 渲染器首帧合成上屏后再加载 WebGL，避免替换 canvas 时闪白
+      scheduleFrame(() => {
+        try {
+          activateWebgl(ptyId);
+        } catch (error) {
+          logTerminalInstanceError('activate webgl failed', error);
+          return;
+        }
+        // mount 后重建本终端 model/顶点缓冲，对齐共享 atlas 当前布局。
+        scheduleFrame(() => {
+          try {
+            resetRenderStateForPty(ptyId);
+          } catch (error) {
+            logTerminalInstanceError('reset render state failed', error);
+          }
+        });
+      });
     });
 
-    let rafId: number;
-    let settleId: ReturnType<typeof setTimeout>;
     // 初始值用挂载前采样值，避免 ResizeObserver 首次回调时 fit 已改变 buffer 状态
     let wasAtBottom = mountWasAtBottom;
     let resizing = false;
+    let resizeRafId: number | undefined;
     const observer = new ResizeObserver(() => {
+      if (disposed) return;
       if (!resizing) {
         const buf = term.buffer.active;
         wasAtBottom = buf.baseY + term.rows >= buf.length;
         resizing = true;
       }
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          fitAddon.fit();
-        }
+      cancelFrame(resizeRafId);
+      resizeRafId = scheduleFrame(() => {
+        resizeRafId = undefined;
+        fitVisibleTerminal();
       });
       // resize 结束后做一次完整刷新，修复 reflow 残留的空白行/空格
       clearTimeout(settleId);
       settleId = setTimeout(() => {
+        if (disposed) return;
+        cancelFrame(resizeRafId);
+        resizeRafId = undefined;
         resizing = false;
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          fitAddon.fit();
-          term.refresh(0, term.rows - 1);
-          // split/resize 后若用户原本在底部，确保视口跟随光标
-          if (wasAtBottom) term.scrollToBottom();
+        refreshVisibleTerminal();
+        // split/resize 后若用户原本在底部，确保视口跟随光标
+        if (wasAtBottom) {
+          try {
+            term.scrollToBottom();
+          } catch (error) {
+            logTerminalInstanceError('scroll failed', error);
+          }
         }
       }, 150);
     });
     observer.observe(container);
 
     const visibilityObserver = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) {
-        requestAnimationFrame(() => {
-          fitAddon.fit();
-          term.refresh(0, term.rows - 1);
-          // 可见性恢复时重建 model/顶点缓冲，兜底 _isPaused 拦截期间共享 atlas 变更的残留
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      scheduleFrame(() => {
+        refreshVisibleTerminal();
+        // 可见性恢复时重建 model/顶点缓冲，兜底 _isPaused 期间共享 atlas 变更的残留。
+        try {
           resetRenderStateForPty(ptyId);
-        });
-      }
+        } catch (error) {
+          logTerminalInstanceError('visibility render reset failed', error);
+        }
+      });
     });
     visibilityObserver.observe(container);
 
     return () => {
-      cancelAnimationFrame(rafId);
+      disposed = true;
+      for (const id of rafIds) cancelAnimationFrame(id);
+      rafIds.clear();
       clearTimeout(settleId);
       observer.disconnect();
       visibilityObserver.disconnect();
@@ -264,9 +350,11 @@ export function TerminalInstance({ ptyId }: Props) {
     <div className="w-full h-full flex flex-col">
       <div
         ref={dropZoneRef}
-        className="flex-1 relative bg-[var(--bg-terminal)]"
+        className={`${terminalDepthUi ? 'terminal-depth-shell' : ''} flex-1 relative bg-[var(--bg-terminal)]`}
         style={termStyle}
         data-terminal-drop
+        data-terminal-depth={terminalDepthUi ? 'enabled' : 'disabled'}
+        data-terminal-tone={forceDarkBg ? 'dark' : undefined}
         data-pty-id={ptyId}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
@@ -275,7 +363,10 @@ export function TerminalInstance({ ptyId }: Props) {
       >
         {/* cursor-none 曾挂在这里,但 xterm.css 的 `.xterm { cursor: text }` 把它整个盖掉了,
             只在 padding 缝隙生效 —— 留着纯属误导,已移除 */}
-        <div ref={containerRef} className="absolute top-1.5 bottom-0 left-2.5 right-0" />
+        <div
+          ref={containerRef}
+          className={`${terminalDepthUi ? 'terminal-depth-content' : ''} absolute top-1.5 bottom-0 left-2.5 right-0`}
+        />
 
         {fileDrag && (
           <div

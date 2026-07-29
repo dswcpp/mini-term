@@ -2,6 +2,9 @@ import { isTopOverlay, popOverlay, pushOverlay } from './overlayStack';
 
 export interface MenuItem {
   label: string;
+  icon?: string;
+  preview?: 'columns' | 'rows' | 'two-columns' | 'two-rows' | 'quad';
+  description?: string;
   danger?: boolean;
   disabled?: boolean;
   /** 右侧显示的快捷键提示（如 `Ctrl+Shift+D`），仅展示不参与匹配 */
@@ -191,6 +194,7 @@ export function showContextMenu(x: number, y: number, items: MenuEntry[]) {
       if ('header' in entry) {
         const head = document.createElement('div');
         head.className = 'ctx-menu-header';
+        head.setAttribute('role', 'presentation');
         head.textContent = entry.header;
         menu.appendChild(head);
         return;
@@ -205,10 +209,39 @@ export function showContextMenu(x: number, y: number, items: MenuEntry[]) {
       if (!entry.disabled) item.tabIndex = -1;
       if (entry.disabled) item.setAttribute('aria-disabled', 'true');
 
+      const content = document.createElement('span');
+      content.className = 'ctx-menu-item-content';
+
+      if (entry.preview) {
+        const preview = document.createElement('span');
+        preview.className = `ctx-menu-preview ctx-menu-preview--${entry.preview}`;
+        const cellCount = entry.preview === 'quad' ? 4 : 2;
+        for (let i = 0; i < cellCount; i++) {
+          preview.appendChild(document.createElement('span'));
+        }
+        content.appendChild(preview);
+      } else if (entry.icon) {
+        const icon = document.createElement('span');
+        icon.className = 'ctx-menu-icon';
+        icon.textContent = entry.icon;
+        content.appendChild(icon);
+      }
+
+      const text = document.createElement('span');
+      text.className = 'ctx-menu-text';
       const label = document.createElement('span');
       label.className = 'ctx-menu-label';
       label.textContent = entry.label;
-      item.appendChild(label);
+      text.appendChild(label);
+      if (entry.description) {
+        const description = document.createElement('span');
+        description.className = 'ctx-menu-description';
+        description.textContent = entry.description;
+        text.appendChild(description);
+      }
+      content.appendChild(text);
+      item.appendChild(content);
+
       if (entry.shortcut) {
         const kbd = document.createElement('span');
         kbd.className = 'ctx-menu-shortcut';

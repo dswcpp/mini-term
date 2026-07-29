@@ -1,3 +1,7 @@
+use crate::vcs::{
+    build_hunks, full_replace_diff, hide_console_window, status_label, ChangeFileStatus,
+    GitDiffResult, GitFileStatus, GitStatus,
+};
 use git2::{Repository, RepositoryOpenFlags, Status, StatusOptions};
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -5,69 +9,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-
-// ---------------------------------------------------------------------------
-// Data structures
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub enum GitStatus {
-    Modified,
-    Added,
-    Deleted,
-    Renamed,
-    Untracked,
-    Conflicted,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct GitFileStatus {
-    pub path: String,
-    pub old_path: Option<String>,
-    pub status: GitStatus,
-    pub status_label: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct ChangeFileStatus {
-    pub path: String,
-    pub old_path: Option<String>,
-    pub staged_status: Option<GitStatus>,
-    pub unstaged_status: Option<GitStatus>,
-    pub status_label: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct DiffHunk {
-    pub old_start: u32,
-    pub old_lines: u32,
-    pub new_start: u32,
-    pub new_lines: u32,
-    pub lines: Vec<DiffLine>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct DiffLine {
-    pub kind: String,
-    pub content: String,
-    pub old_lineno: Option<u32>,
-    pub new_lineno: Option<u32>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct GitDiffResult {
-    pub old_content: String,
-    pub new_content: String,
-    pub hunks: Vec<DiffHunk>,
-    pub is_binary: bool,
-    pub too_large: bool,
-}
 
 // ---------------------------------------------------------------------------
 // Task 2: get_git_status implementation
@@ -97,17 +38,6 @@ fn map_status(status: Status, is_empty_repo: bool) -> Option<GitStatus> {
         }
     }
     None
-}
-
-fn status_label(status: &GitStatus) -> &'static str {
-    match status {
-        GitStatus::Modified => "M",
-        GitStatus::Added => "A",
-        GitStatus::Deleted => "D",
-        GitStatus::Renamed => "R",
-        GitStatus::Untracked => "?",
-        GitStatus::Conflicted => "C",
-    }
 }
 
 fn map_staged_status(status: Status) -> Option<GitStatus> {
@@ -816,182 +746,6 @@ fn get_head_content(repo: &Repository, rel_path: &str) -> Result<Option<String>,
     Ok(Some(content))
 }
 
-// LCS-based diff producing DiffHunks (context = 3 lines)
-fn build_hunks(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffHunk> {
-    let m = old_lines.len();
-    let n = new_lines.len();
-
-    // LCS DP table
-    let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in (0..m).rev() {
-        for j in (0..n).rev() {
-            if old_lines[i] == new_lines[j] {
-                dp[i][j] = dp[i + 1][j + 1] + 1;
-            } else {
-                dp[i][j] = dp[i + 1][j].max(dp[i][j + 1]);
-            }
-        }
-    }
-
-    // Produce flat edit list: ('=', old_i, new_j) | ('-', old_i, _) | ('+', _, new_j)
-    let mut flat: Vec<(char, usize, usize)> = Vec::new();
-    let mut i = 0;
-    let mut j = 0;
-    while i < m || j < n {
-        if i < m && j < n && old_lines[i] == new_lines[j] {
-            flat.push(('=', i, j));
-            i += 1;
-            j += 1;
-        } else if j < n && (i >= m || dp[i][j + 1] >= dp[i + 1][j]) {
-            flat.push(('+', i, j));
-            j += 1;
-        } else {
-            flat.push(('-', i, j));
-            i += 1;
-        }
-    }
-
-    // Group into hunks (context = 3 lines)
-    const CONTEXT: usize = 3;
-    let mut hunks: Vec<DiffHunk> = Vec::new();
-
-    // Find ranges of non-equal edits, expand with context
-    let changed_indices: Vec<usize> = flat
-        .iter()
-        .enumerate()
-        .filter(|(_, (k, _, _))| *k != '=')
-        .map(|(idx, _)| idx)
-        .collect();
-
-    if changed_indices.is_empty() {
-        return hunks;
-    }
-
-    // Group changed indices into contiguous ranges (with context)
-    let mut groups: Vec<(usize, usize)> = Vec::new(); // (start, end) in flat[]
-    let start = changed_indices[0].saturating_sub(CONTEXT);
-    let end = (changed_indices[0] + CONTEXT + 1).min(flat.len());
-    groups.push((start, end));
-
-    for &idx in &changed_indices[1..] {
-        let last = groups.last_mut().unwrap();
-        let expanded_start = idx.saturating_sub(CONTEXT);
-        let expanded_end = (idx + CONTEXT + 1).min(flat.len());
-        if expanded_start <= last.1 {
-            last.1 = last.1.max(expanded_end);
-        } else {
-            groups.push((expanded_start, expanded_end));
-        }
-    }
-
-    for (grp_start, grp_end) in groups {
-        let slice = &flat[grp_start..grp_end];
-        let mut lines_out: Vec<DiffLine> = Vec::new();
-        let mut old_start = 0u32;
-        let mut new_start = 0u32;
-        let mut old_count = 0u32;
-        let mut new_count = 0u32;
-        let mut first = true;
-
-        for (k, oi, ni) in slice {
-            let old_lineno = (*oi as u32) + 1;
-            let new_lineno = (*ni as u32) + 1;
-            match k {
-                '=' => {
-                    if first {
-                        old_start = old_lineno;
-                        new_start = new_lineno;
-                        first = false;
-                    }
-                    lines_out.push(DiffLine {
-                        kind: "context".to_string(),
-                        content: old_lines[*oi].to_string(),
-                        old_lineno: Some(old_lineno),
-                        new_lineno: Some(new_lineno),
-                    });
-                    old_count += 1;
-                    new_count += 1;
-                }
-                '-' => {
-                    if first {
-                        old_start = old_lineno;
-                        // new_start might be the next insert; approximate
-                        new_start = (*ni as u32) + 1;
-                        first = false;
-                    }
-                    lines_out.push(DiffLine {
-                        kind: "delete".to_string(),
-                        content: old_lines[*oi].to_string(),
-                        old_lineno: Some(old_lineno),
-                        new_lineno: None,
-                    });
-                    old_count += 1;
-                }
-                '+' => {
-                    if first {
-                        old_start = (*oi as u32) + 1;
-                        new_start = new_lineno;
-                        first = false;
-                    }
-                    lines_out.push(DiffLine {
-                        kind: "add".to_string(),
-                        content: new_lines[*ni].to_string(),
-                        old_lineno: None,
-                        new_lineno: Some(new_lineno),
-                    });
-                    new_count += 1;
-                }
-                _ => {}
-            }
-        }
-
-        hunks.push(DiffHunk {
-            old_start,
-            old_lines: old_count,
-            new_start,
-            new_lines: new_count,
-            lines: lines_out,
-        });
-    }
-
-    hunks
-}
-
-fn full_replace_diff(old_content: &str, new_content: &str) -> Vec<DiffHunk> {
-    let old_lines: Vec<&str> = old_content.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
-    let mut lines_out: Vec<DiffLine> = Vec::new();
-
-    for (i, l) in old_lines.iter().enumerate() {
-        lines_out.push(DiffLine {
-            kind: "delete".to_string(),
-            content: l.to_string(),
-            old_lineno: Some((i as u32) + 1),
-            new_lineno: None,
-        });
-    }
-    for (i, l) in new_lines.iter().enumerate() {
-        lines_out.push(DiffLine {
-            kind: "add".to_string(),
-            content: l.to_string(),
-            old_lineno: None,
-            new_lineno: Some((i as u32) + 1),
-        });
-    }
-
-    if lines_out.is_empty() {
-        return Vec::new();
-    }
-
-    vec![DiffHunk {
-        old_start: 1,
-        old_lines: old_lines.len() as u32,
-        new_start: 1,
-        new_lines: new_lines.len() as u32,
-        lines: lines_out,
-    }]
-}
-
 #[tauri::command]
 pub fn get_git_diff(
     project_path: String,
@@ -1095,18 +849,6 @@ pub fn get_git_diff(
         is_binary: false,
         too_large: false,
     })
-}
-
-/// 在 Windows GUI 应用(windows_subsystem = "windows")下 spawn console 子进程
-/// (比如 git.exe)默认会弹出 conhost 黑框,并且窗口创建/焦点切换会让 UI 感知卡顿。
-/// 这里统一给 `Command` 加 CREATE_NO_WINDOW 抑制掉控制台分配。
-fn hide_console_window(_cmd: &mut std::process::Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        _cmd.creation_flags(CREATE_NO_WINDOW);
-    }
 }
 
 /// 通用 git CLI 执行器(pull/push/worktree 系列共用):
@@ -1423,10 +1165,7 @@ pub fn list_worktrees(repo_path: String) -> Result<Vec<WorktreeInfo>, String> {
             };
             let wt_path = wt.path().to_path_buf();
             let is_valid = wt_path.exists() && wt.validate().is_ok();
-            let is_locked = matches!(
-                wt.is_locked(),
-                Ok(git2::WorktreeLockStatus::Locked(_))
-            );
+            let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_)));
             let branch = if is_valid {
                 Repository::open_from_worktree(&wt)
                     .ok()

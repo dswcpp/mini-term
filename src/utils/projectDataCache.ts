@@ -1,4 +1,4 @@
-import type { FileEntry, GitFileStatus, GitRepoInfo } from '../types';
+import type { FileEntry, GitFileStatus, VcsRepoInfo } from '../types';
 
 interface FileTreeCache {
   rootEntries: FileEntry[];
@@ -6,7 +6,7 @@ interface FileTreeCache {
 }
 
 interface GitHistoryCache {
-  repos: GitRepoInfo[];
+  repos: VcsRepoInfo[];
   selectedRepo: string;
 }
 

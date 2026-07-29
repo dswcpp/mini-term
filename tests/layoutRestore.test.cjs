@@ -8,6 +8,7 @@ const config = {
     { name: 'cmd', command: 'cmd' },
   ],
   defaultShell: 'cmd',
+  terminalEncoding: 'utf-8',
 };
 
 let id = 0;
@@ -20,7 +21,7 @@ const savedLayout = {
       customTitle: 'first',
       splitLayout: {
         type: 'leaf',
-        panes: [{ shellName: 'nushell' }],
+        panes: [{ shellName: 'nushell', customTitle: 'Build', terminalEncoding: 'gbk', cwd: 'D:/worktrees/build' }],
       },
     },
     {
@@ -40,17 +41,22 @@ const savedLayout = {
 const restored = restoreSavedProjectLayout('project-1', savedLayout, config, createId);
 
 assert.equal(restored.id, 'project-1');
-assert.equal(restored.tabs.length, 2);
-assert.equal(restored.activeTabId, restored.tabs[1].id);
+assert.equal(restored.status, 'idle');
 
-const firstPane = restored.tabs[0].splitLayout.panes[0];
-assert.equal(firstPane.shellName, 'nushell');
-assert.equal(Object.hasOwn(firstPane, 'ptyId'), false);
-assert.equal(firstPane.status, 'idle');
-
-const split = restored.tabs[1].splitLayout;
+const split = restored.layout;
 assert.equal(split.type, 'split');
 assert.deepEqual(split.sizes, [40, 60]);
-assert.equal(split.children[0].panes[0].shellName, 'cmd');
-assert.equal(Object.hasOwn(split.children[0].panes[0], 'ptyId'), false);
+
+const fallbackPane = split.children[0].panes[0];
+assert.equal(fallbackPane.shellName, 'cmd');
+assert.equal(fallbackPane.terminalEncoding, 'utf-8');
+assert.equal(Object.hasOwn(fallbackPane, 'ptyId'), false);
+
+const firstPane = split.children[0].panes[1];
+assert.equal(firstPane.shellName, 'nushell');
+assert.equal(firstPane.customTitle, 'Build');
+assert.equal(firstPane.cwd, 'D:/worktrees/build');
+assert.equal(firstPane.terminalEncoding, 'gbk');
+assert.equal(Object.hasOwn(firstPane, 'ptyId'), false);
+assert.equal(firstPane.status, 'idle');
 assert.equal(split.children[1].panes.length, 2);

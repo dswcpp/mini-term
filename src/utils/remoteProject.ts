@@ -9,7 +9,28 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { getProjectEnvs } from './projectEnv';
-import type { ProjectConfig, ShellConfig, SshConnection, SshRemoteSpec } from '../types';
+import type {
+  ProjectConfig,
+  ShellConfig,
+  SshConnection,
+  SshRemoteSpec,
+  TerminalEncoding,
+} from '../types';
+
+const TERMINAL_ENCODINGS = new Set<TerminalEncoding>([
+  'auto',
+  'utf-8',
+  'gbk',
+  'gb18030',
+  'big5',
+  'shift_jis',
+  'euc-kr',
+  'windows-1252',
+]);
+
+function isTerminalEncoding(value: string | undefined): value is TerminalEncoding {
+  return value !== undefined && TERMINAL_ENCODINGS.has(value as TerminalEncoding);
+}
 
 /** 是否为 SSH 远程项目 */
 export function isRemoteProject(project: ProjectConfig | undefined | null): boolean {
@@ -42,8 +63,17 @@ export function remotePaneLabel(project: ProjectConfig): string {
 export function createProjectPty(
   project: ProjectConfig,
   shell: ShellConfig | undefined,
-  cwd?: string,
+  cwdOrEncoding?: string | TerminalEncoding,
+  encoding?: TerminalEncoding,
 ): Promise<number> {
+  let cwd: string | undefined = cwdOrEncoding;
+  let resolvedEncoding = encoding;
+  // v0.8.2 的第三参数是 encoding；v0.8.3 改为 worktree cwd。兼容两种调用形态。
+  if (encoding === undefined && isTerminalEncoding(cwdOrEncoding)) {
+    cwd = undefined;
+    resolvedEncoding = cwdOrEncoding;
+  }
+
   if (project.sshConnectionId) {
     const sshRemote: SshRemoteSpec = {
       connectionId: project.sshConnectionId,
@@ -53,6 +83,7 @@ export function createProjectPty(
       shell: '',
       args: [],
       cwd: '',
+      ...(resolvedEncoding ? { encoding: resolvedEncoding } : {}),
       sshRemote,
     });
   }
@@ -64,5 +95,6 @@ export function createProjectPty(
     args: shell.args ?? [],
     cwd: cwd ?? project.path,
     envs: getProjectEnvs(project.id),
+    ...(resolvedEncoding ? { encoding: resolvedEncoding } : {}),
   });
 }
