@@ -1,14 +1,20 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
 import { showContextMenu } from '../utils/contextMenu';
 import { isWslPath } from '../utils/wslPath';
+import { buildResumeCommand } from '../utils/aiResume';
 import { writePtyInput } from '../utils/terminalCache';
 import { resolveActivePane } from '../utils/layoutOps';
 import { focusPane, newTerminal } from '../utils/paneActions';
-import { SessionViewerModal } from './SessionViewerModal';
+import { useEverOpened } from '../hooks/useOverlayMotion';
+import { BrandIcon } from './BrandIcon';
 import { useT, t } from '../i18n';
+import type { AiVendor } from '../utils/inferVendor';
 import type { AiSession, ProjectConfig } from '../types';
+
+// 懒加载：SessionViewerModal 连带 react-markdown（数百 KB），首次查看会话正文才拉 chunk
+const SessionViewerModal = lazy(() => import('./SessionViewerModal').then((m) => ({ default: m.SessionViewerModal })));
 
 const PAGE_SIZE = 20;
 
@@ -39,9 +45,11 @@ function formatTime(iso: string): string {
   return y === currentYear ? t('sessionList.time.monthDay', { m, d }) : `${y}/${m}/${d}`;
 }
 
-const TYPE_BADGE: Record<string, { label: string; color: string }> = {
-  claude: { label: 'C', color: 'var(--color-ai)' },
-  codex: { label: 'X', color: 'var(--color-success)' },
+/** 会话来源 → 品牌图标厂商 key(codex 是 OpenAI 家的 CLI,grok 是 xAI 的)。 */
+const TYPE_VENDOR: Record<string, AiVendor> = {
+  claude: 'claude',
+  codex: 'openai',
+  grok: 'grok',
 };
 
 /** 项目是否有 WSL 会话来源:WSL 根项目(UNC)自动启用,或显式配置了发行版 */
@@ -49,11 +57,10 @@ function hasWslSource(project: ProjectConfig): boolean {
   return isWslPath(project.path) || !!project.wslSessionsDistro;
 }
 
-/** 该会话对应的 resume 命令。 */
-function resumeCommand(session: AiSession): string {
-  return session.sessionType === 'claude'
-    ? `claude --resume ${session.id}`
-    : `codex resume ${session.id}`;
+/** 该会话对应的 resume 命令;id 形态异常(会话文件被篡改/损坏)返回 null,
+ *  不提供任何会把它写进终端或剪贴板的入口。 */
+function resumeCommand(session: AiSession): string | null {
+  return buildResumeCommand(session.sessionType, session.id);
 }
 
 /**
@@ -97,6 +104,8 @@ export function SessionList() {
   const [loading, setLoading] = useState(false);
   const [wslLoading, setWslLoading] = useState(false);
   const [viewingSession, setViewingSession] = useState<AiSession | null>(null);
+  // 懒挂载门控：首次查看会话前不挂 SessionViewerModal（chunk 不拉）；之后常驻，退场动画照播
+  const viewerEverOpened = useEverOpened(!!viewingSession);
   // 请求序号:项目切换后旧请求(尤其是慢的 WSL 请求)返回时不得覆盖新项目的列表
   const requestIdRef = useRef(0);
 
@@ -248,15 +257,19 @@ export function SessionList() {
           </div>
         )}
 
-        <SessionViewerModal
-          open={!!viewingSession}
-          onClose={() => setViewingSession(null)}
-          session={viewingSession}
-          projectPath={activeProject?.path ?? ''}
-        />
+        {viewerEverOpened && (
+          <Suspense fallback={null}>
+            <SessionViewerModal
+              open={!!viewingSession}
+              onClose={() => setViewingSession(null)}
+              session={viewingSession}
+              projectPath={activeProject?.path ?? ''}
+            />
+          </Suspense>
+        )}
 
         {visibleSessions.map((session) => {
-          const badge = TYPE_BADGE[session.sessionType] ?? TYPE_BADGE.claude;
+          const vendor = TYPE_VENDOR[session.sessionType] ?? 'claude';
           // 远程会话标识:显示来源连接名(连接被删时回退 'SSH')
           const remoteConnName = session.sshConnectionId
             ? (config.sshConnections.find((c) => c.id === session.sshConnectionId)?.name ?? 'SSH')
@@ -273,7 +286,7 @@ export function SessionList() {
                 const cmd = resumeCommand(session);
                 // 会话来自别处（WSL / 远程）时，把命令敲进本机终端是跑不通的，
                 // 只保留「查看 / 复制命令」——用户自己知道该在哪个终端里粘。
-                const canResumeHere = !session.wslDistro && !session.sshConnectionId;
+                const canResumeHere = cmd !== null && !session.wslDistro && !session.sshConnectionId;
                 showContextMenu(e.clientX, e.clientY, [
                   {
                     label: t('sessionList.view'),
@@ -290,20 +303,19 @@ export function SessionList() {
                       onClick: () => void resumeInNewTerminal(activeProjectId, cmd),
                     },
                   ] : []),
-                  { separator: true },
-                  {
-                    label: t('sessionList.copyResumeCommand'),
-                    onClick: () => navigator.clipboard.writeText(cmd),
-                  },
+                  ...(cmd !== null ? [
+                    { separator: true as const },
+                    {
+                      label: t('sessionList.copyResumeCommand'),
+                      onClick: () => void navigator.clipboard.writeText(cmd),
+                    },
+                  ] : []),
                 ]);
               }}
             >
-              {/* 类型徽标 */}
-              <span
-                className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-xs font-bold mt-0.5"
-                style={{ backgroundColor: badge.color + '22', color: badge.color }}
-              >
-                {badge.label}
+              {/* 来源品牌图标(Mono 变体走 currentColor 跟随主题) */}
+              <span className="flex-shrink-0 w-4 h-4 flex items-center justify-center mt-0.5 text-[var(--text-secondary)]">
+                <BrandIcon vendor={vendor} size={14} title={session.sessionType} />
               </span>
 
               {/* 标题 + 时间 */}

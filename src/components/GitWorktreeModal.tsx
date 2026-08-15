@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Modal } from './Modal';
-import { useAppStore, genId } from '../store';
+import { useAppStore, genId, saveConfigToDisk } from '../store';
 import { newTerminal } from '../utils/paneActions';
 import {
   disposeProjectTerminals,
@@ -352,7 +352,7 @@ export function GitWorktreeModal({ repoPath, discoverRepos, onClose, onChanged, 
 
   const switchToProjectAt = useCallback((path: string, fallbackName: string, mainPath: string) => {
     const id = addProjectAt(path, fallbackName, mainPath);
-    invoke('save_config', { config: useAppStore.getState().config });
+    saveConfigToDisk();
     useAppStore.getState().setActiveProject(id);
   }, [addProjectAt]);
 
@@ -391,7 +391,7 @@ export function GitWorktreeModal({ repoPath, discoverRepos, onClose, onChanged, 
           const id = addProjectAt(r.target.path, branch, r.target.group.mainPath);
           if (!firstNewProject) firstNewProject = id;
         }
-        invoke('save_config', { config: useAppStore.getState().config });
+        saveConfigToDisk();
       }
 
       if (failed.length > 0) {
@@ -457,8 +457,20 @@ export function GitWorktreeModal({ repoPath, discoverRepos, onClose, onChanged, 
   const handlePrune = useCallback(async (group: RepoGroup) => {
     if (pruningKey) return;
     setPruningKey(group.key);
+    // prune 只清 git 侧的登记,指向失效 worktree 的项目也要一并移除,不留断链项目。
+    // 以「目录确实已不存在」为准:isValid=false 但目录还在(元数据损坏)时项目保留。
+    const invalidPaths = group.worktrees.filter((w) => !w.isValid).map((w) => w.path);
     try {
       await invoke('prune_worktrees', { repoPath: group.mainPath });
+      if (invalidPaths.length > 0) {
+        const existing = await invoke<string[]>('filter_directories', { paths: invalidPaths });
+        const alive = new Set(existing);
+        for (const path of invalidPaths) {
+          if (alive.has(path)) continue;
+          const project = findProjectByPath(path);
+          if (project) removeProjectWithCleanup(project.id);
+        }
+      }
       onChanged();
       await load();
     } catch {

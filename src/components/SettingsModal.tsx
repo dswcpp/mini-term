@@ -1,14 +1,21 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
-import { useAppStore } from '../store';
+import { useAppStore, saveConfigToDisk } from '../store';
 import { playNotificationSound } from '../utils/notificationSound';
 import { checkForUpdate, compareVersions, type ReleaseInfo } from '../utils/updateChecker';
 import { applyTheme } from '../utils/themeManager';
-import { updateAllTerminalThemes, DEFAULT_TERMINAL_FONT_FAMILY } from '../utils/terminalCache';
+import {
+  updateAllTerminalThemes,
+  updateAllTerminalScrollback,
+  resolveScrollback,
+  MAX_SCROLLBACK,
+  DEFAULT_TERMINAL_FONT_FAMILY,
+} from '../utils/terminalCache';
 import { applyUiFontFamily } from '../utils/fontManager';
+import { clearCustomTheme, invalidateThemeAssets, listThemePacks, loadAndApplyCustomTheme, resolveThemeAssetUrl, type ThemePackMeta } from '../utils/themePackManager';
 import { MOD_LABEL } from '../utils/platform';
 import { comboLabel, hotkeyGroups } from '../utils/hotkeys';
 import { DEFAULT_REMOTE_PASTE_DIR } from '../utils/pastePath';
@@ -20,26 +27,13 @@ import {
 import { useT, t as tStatic } from '../i18n';
 import { LanguageToggle } from './LanguageToggle';
 import { Modal } from './Modal';
-import type { AppConfig, ShellConfig, EditorConfig, TerminalEncoding } from '../types';
-
-async function saveConfigPatch(patch: Partial<AppConfig>): Promise<void> {
-  const previousConfig = useAppStore.getState().config;
-  const newConfig = { ...previousConfig, ...patch };
-  useAppStore.getState().setConfig(newConfig);
-
-  try {
-    await invoke('save_config', { config: newConfig });
-  } catch (error) {
-    // 只回滚本次乐观更新，避免覆盖随后产生的配置变更。
-    if (useAppStore.getState().config === newConfig) {
-      useAppStore.getState().setConfig(previousConfig);
-    }
-    await showAlert(
-      tStatic('settings.common.saveFailed'),
-      error instanceof Error ? error.message : String(error),
-    );
-  }
-}
+import type {
+  AppConfig,
+  ShellConfig,
+  EditorConfig,
+  TerminalEncoding,
+  HookRegistration,
+} from '../types';
 
 interface Props {
   open: boolean;
@@ -48,7 +42,240 @@ interface Props {
   initialPage?: SettingsPage;
 }
 
-export type SettingsPage = 'terminal' | 'system' | 'font' | 'ai-notification' | 'shortcuts' | 'about';
+/**
+ * 设置分页 id。**旧 id 一律保留**（`terminal` / `system` / `font` / `ai-notification`），
+ * 拆页时只把内容挪走、不改 key —— 外部深链（`initialPage`）不会因为重排失效。
+ */
+export type SettingsPage =
+  | 'terminal'
+  | 'clipboard'
+  | 'appearance'
+  | 'font'
+  | 'ai-notification'
+  | 'ai-hook'
+  | 'system'
+  | 'editor'
+  | 'shortcuts'
+  | 'about';
+
+// ─── 通用原语 ───
+//
+// 设置项的三种形态（开关 / 数字 / 单选段）此前在各页各写一遍，同一个 toggle 的
+// 15 行 JSX 复制了十来份，改一处样式要翻遍全文件。这里收成三个组件，
+// 各页只描述「这项设置是什么」。
+
+/** 写一份 config 补丁并落盘。所有设置页共用，避免每页各抄一份 setConfig+save。 */
+function useConfigPatch() {
+  const setConfig = useAppStore((s) => s.setConfig);
+
+  return useCallback(
+    (patch: Partial<AppConfig>) => {
+      const previousConfig = useAppStore.getState().config;
+      const newConfig = { ...previousConfig, ...patch };
+      setConfig(newConfig);
+
+      void saveConfigToDisk(newConfig).catch(async (error) => {
+        // 只回滚本次乐观更新，避免覆盖后续配置变更。
+        if (useAppStore.getState().config === newConfig) {
+          setConfig(previousConfig);
+        }
+        await showAlert(
+          tStatic('settings.common.saveFailed'),
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+
+      return newConfig;
+    },
+    [setConfig],
+  );
+}
+
+/** 分节：标题 + 若干设置行。页面根节点用 space-y-6 隔开各节。 */
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="space-y-2">
+      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em]">{title}</div>
+      {children}
+    </section>
+  );
+}
+
+/** 分节末尾的补充说明。 */
+function Hint({ children }: { children: ReactNode }) {
+  return <div className="text-sm text-[var(--text-muted)]">{children}</div>;
+}
+
+/** 一行设置：左侧标题 + 说明，右侧控件。 */
+function SettingRow({
+  title,
+  desc,
+  disabled,
+  children,
+}: {
+  title: ReactNode;
+  desc?: ReactNode;
+  /** 置灰并屏蔽交互（依赖某个开关的从属项） */
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={`flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] transition-opacity ${
+        disabled ? 'opacity-50 pointer-events-none' : ''
+      }`}
+    >
+      <div className="flex-1 min-w-0">
+        <div className="text-base text-[var(--text-primary)]">{title}</div>
+        {desc !== undefined && <div className="text-sm text-[var(--text-muted)]">{desc}</div>}
+      </div>
+      <div className="flex-shrink-0">{children}</div>
+    </div>
+  );
+}
+
+function Toggle({
+  checked,
+  onChange,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      className={`relative w-9 h-5 rounded-full transition-colors ${
+        checked ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
+      }`}
+      onClick={() => !disabled && onChange(!checked)}
+    >
+      <span
+        className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
+          checked ? 'translate-x-[18px]' : 'translate-x-0.5'
+        }`}
+      />
+    </button>
+  );
+}
+
+function ToggleRow({
+  title,
+  desc,
+  checked,
+  onChange,
+  disabled,
+  busy,
+}: {
+  title: ReactNode;
+  desc?: ReactNode;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  /** 正在提交（开关本身仍可见可点，只是这一刻不响应） */
+  busy?: boolean;
+}) {
+  return (
+    <SettingRow title={title} desc={desc} disabled={disabled}>
+      <Toggle checked={checked} onChange={onChange} disabled={busy} />
+    </SettingRow>
+  );
+}
+
+/**
+ * 数字设置行。输入期间只改草稿，失焦/回车才归一并提交 ——
+ * 边打字边 clamp 会让「1000」在敲到「1」时就被吃掉。
+ * `clamp` 返回 null 表示这次输入无效，回落到已保存值。
+ */
+function NumberRow({
+  title,
+  desc,
+  value,
+  min,
+  max,
+  step,
+  float,
+  clamp,
+  onCommit,
+  disabled,
+}: {
+  title: ReactNode;
+  desc?: ReactNode;
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  float?: boolean;
+  clamp?: (n: number) => number | null;
+  onCommit: (v: number) => void;
+  disabled?: boolean;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const n = float ? parseFloat(draft) : parseInt(draft, 10);
+    const normalize =
+      clamp ??
+      ((v: number) =>
+        Number.isFinite(v) && v >= (min ?? 0) ? Math.min(v, max ?? Number.MAX_SAFE_INTEGER) : null);
+    const next = normalize(n) ?? value;
+    setDraft(String(next));
+    if (next !== value) onCommit(next);
+  };
+
+  return (
+    <SettingRow title={title} desc={desc} disabled={disabled}>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        className="w-24 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono text-right"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+      />
+    </SettingRow>
+  );
+}
+
+/** 单选段控件（主题 / 皮肤这类互斥选项）。 */
+function ChoiceGroup<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex gap-2">
+      {options.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          className={`flex-1 py-2 rounded-[var(--radius-sm)] text-base transition-all ${
+            value === opt.value
+              ? 'bg-[var(--accent-muted)] text-[var(--accent)] border border-[var(--accent)]'
+              : 'bg-[var(--bg-base)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)]'
+          }`}
+          onClick={() => onChange(opt.value)}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 // ─── ShellRow（终端设置子组件）───
 
@@ -270,12 +497,12 @@ function EditorRow({
   );
 }
 
-// ─── TerminalSettings（终端设置页）───
+// ─── TerminalSettings（终端 › Shell）───
 
 function TerminalSettings() {
   const t = useT();
   const config = useAppStore((s) => s.config);
-  const setConfig = useAppStore((s) => s.setConfig);
+  const patchConfig = useConfigPatch();
 
   const [shells, setShells] = useState<ShellConfig[]>([]);
   const [defaultShell, setDefaultShell] = useState('');
@@ -284,21 +511,16 @@ function TerminalSettings() {
   const [newCommand, setNewCommand] = useState('');
   const [newArgs, setNewArgs] = useState('');
 
-  const longPasteEnabled = config.longPasteToFile ?? true;
-  const smartCopyPasteEnabled = config.smartCopyPaste ?? false;
+  const savedScrollback = resolveScrollback(config.terminalScrollback);
   const terminalDepthUiEnabled = config.terminalDepthUi ?? true;
-  const savedLineThreshold = config.longPasteLineThreshold ?? 10;
-  const savedCharThreshold = config.longPasteCharThreshold ?? 2000;
   const terminalLogEnabled = config.terminalLogEnabled ?? false;
   const terminalEncoding = normalizeTerminalEncoding(config.terminalEncoding);
   const savedTerminalLogPath = config.terminalLogPath ?? '';
   const savedTerminalLogMaxSizeMb = config.terminalLogMaxSizeMb ?? 10;
-  const [lineThresholdInput, setLineThresholdInput] = useState(String(savedLineThreshold));
-  const [charThresholdInput, setCharThresholdInput] = useState(String(savedCharThreshold));
   const [terminalLogPathInput, setTerminalLogPathInput] = useState(savedTerminalLogPath);
-  const [terminalLogMaxSizeInput, setTerminalLogMaxSizeInput] = useState(String(savedTerminalLogMaxSizeMb));
-  const savedRemotePasteDir = config.remotePasteDir ?? DEFAULT_REMOTE_PASTE_DIR;
-  const [remotePasteDirInput, setRemotePasteDirInput] = useState(savedRemotePasteDir);
+  const [terminalLogMaxSizeInput, setTerminalLogMaxSizeInput] = useState(
+    String(savedTerminalLogMaxSizeMb),
+  );
 
   useEffect(() => {
     setShells([...config.availableShells]);
@@ -307,28 +529,19 @@ function TerminalSettings() {
   }, [config]);
 
   useEffect(() => {
-    setLineThresholdInput(String(savedLineThreshold));
-    setCharThresholdInput(String(savedCharThreshold));
     setTerminalLogPathInput(savedTerminalLogPath);
     setTerminalLogMaxSizeInput(String(savedTerminalLogMaxSizeMb));
-    setRemotePasteDirInput(savedRemotePasteDir);
-  }, [
-    savedLineThreshold,
-    savedCharThreshold,
-    savedTerminalLogPath,
-    savedTerminalLogMaxSizeMb,
-    savedRemotePasteDir,
-  ]);
+  }, [savedTerminalLogPath, savedTerminalLogMaxSizeMb]);
 
-  const save = useCallback(async (updatedShells: ShellConfig[], updatedDefault: string) => {
-    const newConfig = {
-      ...useAppStore.getState().config,
-      availableShells: updatedShells,
-      defaultShell: updatedDefault,
-    };
-    setConfig(newConfig);
-    await invoke('save_config', { config: newConfig });
-  }, [setConfig]);
+  const save = useCallback(
+    (updatedShells: ShellConfig[], updatedDefault: string) => {
+      patchConfig({
+        availableShells: updatedShells,
+        defaultShell: updatedDefault,
+      });
+    },
+    [patchConfig],
+  );
 
   const handleAdd = () => {
     if (!newName.trim() || !newCommand.trim()) return;
@@ -372,28 +585,12 @@ function TerminalSettings() {
     save(shells, name);
   };
 
-  const handleLongPasteEnabledChange = (enabled: boolean) => {
-    void saveConfigPatch({ longPasteToFile: enabled });
-  };
-
-  const handleTerminalDepthUiEnabledChange = (enabled: boolean) => {
-    void saveConfigPatch({ terminalDepthUi: enabled });
-  };
-
-  const handleTerminalLogEnabledChange = (enabled: boolean) => {
-    void saveConfigPatch({ terminalLogEnabled: enabled });
-  };
-
-  const handleTerminalEncodingChange = (encoding: TerminalEncoding) => {
-    void saveConfigPatch({ terminalEncoding: normalizeTerminalEncoding(encoding) });
-  };
-
   const commitTerminalLogPath = () => {
     const trimmed = terminalLogPathInput.trim();
     setTerminalLogPathInput(trimmed);
     const nextPath = trimmed || undefined;
     if ((savedTerminalLogPath || undefined) !== nextPath) {
-      void saveConfigPatch({ terminalLogPath: nextPath });
+      patchConfig({ terminalLogPath: nextPath });
     }
   };
 
@@ -410,353 +607,291 @@ function TerminalSettings() {
     });
     if (typeof selected === 'string' && selected.trim()) {
       setTerminalLogPathInput(selected);
-      void saveConfigPatch({ terminalLogPath: selected });
+      patchConfig({ terminalLogPath: selected });
     }
   };
 
   const commitTerminalLogMaxSize = () => {
-    const n = parseInt(terminalLogMaxSizeInput, 10);
-    const clamped = Number.isFinite(n) && n > 0
-      ? Math.min(Math.max(n, 1), 10240)
+    const parsed = parseInt(terminalLogMaxSizeInput, 10);
+    const next = Number.isFinite(parsed) && parsed > 0
+      ? Math.min(Math.max(parsed, 1), 10240)
       : savedTerminalLogMaxSizeMb;
-    setTerminalLogMaxSizeInput(String(clamped));
-    if (clamped !== savedTerminalLogMaxSizeMb) {
-      void saveConfigPatch({ terminalLogMaxSizeMb: clamped });
+    setTerminalLogMaxSizeInput(String(next));
+    if (next !== savedTerminalLogMaxSizeMb) {
+      patchConfig({ terminalLogMaxSizeMb: next });
     }
   };
 
-  const commitLineThreshold = () => {
-    const n = parseInt(lineThresholdInput, 10);
-    const clamped = Number.isFinite(n) && n >= 0 ? Math.min(n, 100000) : savedLineThreshold;
-    setLineThresholdInput(String(clamped));
-    if (clamped !== savedLineThreshold) {
-      void saveConfigPatch({ longPasteLineThreshold: clamped });
-    }
-  };
+  return (
+    <div className="space-y-6">
+      <Section title={t("settings.terminal.availableTerminals")}>
+        {shells.map((shell, idx) => (
+          <ShellRow
+            key={`${shell.name}-${idx}`}
+            shell={shell}
+            isDefault={shell.name === defaultShell}
+            onSetDefault={() => handleSetDefault(shell.name)}
+            onDelete={() => handleDelete(idx)}
+            onUpdate={(s) => handleUpdate(idx, s)}
+          />
+        ))}
 
-  const commitCharThreshold = () => {
-    const n = parseInt(charThresholdInput, 10);
-    const clamped = Number.isFinite(n) && n >= 0 ? Math.min(n, 10000000) : savedCharThreshold;
-    setCharThresholdInput(String(clamped));
-    if (clamped !== savedCharThreshold) {
-      void saveConfigPatch({ longPasteCharThreshold: clamped });
-    }
-  };
+        {adding ? (
+          <div className="flex flex-col gap-2 p-3 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--accent)] border-dashed">
+            <div className="flex gap-2">
+              <input
+                className="flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)]"
+                placeholder={t("settings.terminal.newNamePlaceholder")}
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                autoFocus
+              />
+              <input
+                className="flex-[2] bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
+                placeholder={t("settings.terminal.newCommandPlaceholder")}
+                value={newCommand}
+                onChange={(e) => setNewCommand(e.target.value)}
+              />
+            </div>
+            <div className="flex gap-2 items-center">
+              <input
+                className="flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
+                placeholder={t("settings.terminal.newArgsPlaceholder")}
+                value={newArgs}
+                onChange={(e) => setNewArgs(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+              />
+              <button
+                className="px-3 py-1 text-base bg-[var(--accent)] text-[var(--bg-base)] rounded-[var(--radius-sm)] hover:opacity-90 transition-opacity"
+                onClick={handleAdd}
+              >
+                {t("settings.common.add")}
+              </button>
+              <button
+                className="px-3 py-1 text-base text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                onClick={() => setAdding(false)}
+              >
+                {t("settings.common.cancel")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            className="w-full py-2.5 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-base text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all"
+            onClick={() => setAdding(true)}
+          >
+            {t("settings.terminal.addTerminal")}
+          </button>
+        )}
+
+        <Hint>{t("settings.terminal.defaultHint")}</Hint>
+      </Section>
+
+      <Section title={t("settings.terminal.appearance")}>
+        <SettingRow
+          title={t("settings.terminal.encodingTitle")}
+          desc={t("settings.terminal.encodingDesc")}
+        >
+          <select
+            className="min-w-40 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)]"
+            value={terminalEncoding}
+            onChange={(event) => {
+              patchConfig({
+                terminalEncoding: normalizeTerminalEncoding(
+                  event.target.value as TerminalEncoding,
+                ),
+              });
+            }}
+          >
+            {TERMINAL_ENCODING_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </SettingRow>
+        <ToggleRow
+          title={t("settings.terminal.depthUiTitle")}
+          desc={t("settings.terminal.depthUiDesc")}
+          checked={terminalDepthUiEnabled}
+          onChange={(enabled) => patchConfig({ terminalDepthUi: enabled })}
+        />
+      </Section>
+
+      <Section title={t("settings.terminal.behavior")}>
+        <NumberRow
+          title={t("settings.terminal.scrollback")}
+          desc={t("settings.terminal.scrollbackDesc")}
+          value={savedScrollback}
+          min={0}
+          max={MAX_SCROLLBACK}
+          step={1000}
+          onCommit={(v) => {
+            // 立即对已开终端生效:调小时 xterm 当场裁掉多余历史并释放内存,
+            // 内存吃紧的用户不用重启就能看到效果
+            updateAllTerminalScrollback(v);
+            patchConfig({ terminalScrollback: v });
+          }}
+        />
+      </Section>
+
+      <Section title={t("settings.terminal.logTerminal")}>
+        <ToggleRow
+          title={t("settings.terminal.logTerminalTitle")}
+          desc={t("settings.terminal.logTerminalDesc")}
+          checked={terminalLogEnabled}
+          onChange={(enabled) => patchConfig({ terminalLogEnabled: enabled })}
+        />
+        <SettingRow
+          title={t("settings.terminal.logOutputTo")}
+          desc={t("settings.terminal.logOutputToDesc")}
+        >
+          <div className="flex items-center gap-2 min-w-0 w-[220px]">
+            <input
+              className="min-w-0 flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
+              placeholder="terminal.log"
+              value={terminalLogPathInput}
+              onChange={(event) => setTerminalLogPathInput(event.target.value)}
+              onBlur={commitTerminalLogPath}
+              onKeyDown={(event) =>
+                event.key === 'Enter' && (event.target as HTMLInputElement).blur()
+              }
+            />
+            <button
+              type="button"
+              className="px-3 py-1 text-base bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all flex-shrink-0"
+              onClick={() => void handleChooseTerminalLogPath()}
+            >
+              ...
+            </button>
+          </div>
+        </SettingRow>
+        <SettingRow
+          title={t("settings.terminal.logMaxSize")}
+          desc={t("settings.terminal.logMaxSizeDesc")}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              max={10240}
+              className="w-24 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono text-right"
+              value={terminalLogMaxSizeInput}
+              onChange={(event) => setTerminalLogMaxSizeInput(event.target.value)}
+              onBlur={commitTerminalLogMaxSize}
+              onKeyDown={(event) =>
+                event.key === 'Enter' && (event.target as HTMLInputElement).blur()
+              }
+            />
+            <span className="text-base text-[var(--text-muted)]">MB</span>
+          </div>
+        </SettingRow>
+        <Hint>{t("settings.terminal.logFooter")}</Hint>
+      </Section>
+    </div>
+  );
+}
+
+// ─── ClipboardSettings（终端 › 复制粘贴）───
+
+function ClipboardSettings() {
+  const t = useT();
+  const config = useAppStore((s) => s.config);
+  const patchConfig = useConfigPatch();
+
+  const smartCopyPasteEnabled = config.smartCopyPaste ?? false;
+  const longPasteEnabled = config.longPasteToFile ?? true;
+  const savedAutoCopySecs = config.selectionAutoCopySecs ?? 1;
+  const savedLineThreshold = config.longPasteLineThreshold ?? 10;
+  const savedCharThreshold = config.longPasteCharThreshold ?? 2000;
+  const savedRemotePasteDir = config.remotePasteDir ?? DEFAULT_REMOTE_PASTE_DIR;
+
+  const [remotePasteDirInput, setRemotePasteDirInput] = useState(savedRemotePasteDir);
+  useEffect(() => {
+    setRemotePasteDirInput(savedRemotePasteDir);
+  }, [savedRemotePasteDir]);
 
   const commitRemotePasteDir = () => {
     // 清空 = 回默认值（而不是落一个空串让后端每次去兜底）。
     // `..` 的拒绝在后端 resolve_paste_dir，这里只做归一，避免两处判定漂移。
     const next = remotePasteDirInput.trim() || DEFAULT_REMOTE_PASTE_DIR;
     setRemotePasteDirInput(next);
-    if (next !== savedRemotePasteDir) {
-      void saveConfigPatch({ remotePasteDir: next });
-    }
+    if (next !== savedRemotePasteDir) patchConfig({ remotePasteDir: next });
   };
 
   return (
-    <div className="space-y-2">
-      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.terminal.availableTerminals")}
-      </div>
-      {shells.map((shell, idx) => (
-        <ShellRow
-          key={`${shell.name}-${idx}`}
-          shell={shell}
-          isDefault={shell.name === defaultShell}
-          onSetDefault={() => handleSetDefault(shell.name)}
-          onDelete={() => handleDelete(idx)}
-          onUpdate={(s) => handleUpdate(idx, s)}
+    <div className="space-y-6">
+      <Section title={t("settings.clipboard.copyPaste")}>
+        <ToggleRow
+          title={t("settings.clipboard.smartCopyPasteTitle")}
+          desc={t("settings.clipboard.smartCopyPasteDesc")}
+          checked={smartCopyPasteEnabled}
+          onChange={(v) => patchConfig({ smartCopyPaste: v })}
         />
-      ))}
+        <NumberRow
+          title={t("settings.clipboard.autoCopyDwellTitle")}
+          desc={t("settings.clipboard.autoCopyDwellDesc")}
+          value={savedAutoCopySecs}
+          min={0.2}
+          step={0.5}
+          float
+          // 0 = 关闭该功能(静默覆盖剪贴板的行为必须可退出);非零值钳在 0.2~60s
+          clamp={(n) =>
+            !Number.isFinite(n) || n < 0 ? null : n === 0 ? 0 : Math.min(Math.max(n, 0.2), 60)
+          }
+          onCommit={(v) => patchConfig({ selectionAutoCopySecs: v })}
+        />
+      </Section>
 
-      {adding ? (
-        <div className="flex flex-col gap-2 p-3 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--accent)] border-dashed">
-          <div className="flex gap-2">
-            <input
-              className="flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)]"
-              placeholder={t("settings.terminal.newNamePlaceholder")}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              autoFocus
-            />
-            <input
-              className="flex-[2] bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
-              placeholder={t("settings.terminal.newCommandPlaceholder")}
-              value={newCommand}
-              onChange={(e) => setNewCommand(e.target.value)}
-            />
+      <Section title={t("settings.clipboard.longPaste")}>
+        <ToggleRow
+          title={t("settings.clipboard.longPasteTitle")}
+          desc={t("settings.clipboard.longPasteDesc")}
+          checked={longPasteEnabled}
+          onChange={(v) => patchConfig({ longPasteToFile: v })}
+        />
+        <NumberRow
+          title={t("settings.clipboard.lineThreshold")}
+          desc={t("settings.clipboard.lineThresholdDesc")}
+          value={savedLineThreshold}
+          min={0}
+          max={100000}
+          disabled={!longPasteEnabled}
+          onCommit={(v) => patchConfig({ longPasteLineThreshold: v })}
+        />
+        <NumberRow
+          title={t("settings.clipboard.charThreshold")}
+          desc={t("settings.clipboard.charThresholdDesc")}
+          value={savedCharThreshold}
+          min={0}
+          max={10000000}
+          disabled={!longPasteEnabled}
+          onCommit={(v) => patchConfig({ longPasteCharThreshold: v })}
+        />
+        <Hint>{t("settings.clipboard.longPasteFooter")}</Hint>
+      </Section>
+
+      <Section title={t("settings.clipboard.remotePaste")}>
+        <div className="px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
+          <div className="text-base text-[var(--text-primary)]">
+            {t("settings.clipboard.remotePasteDir")}
           </div>
-          <div className="flex gap-2 items-center">
-            <input
-              className="flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
-              placeholder={t("settings.terminal.newArgsPlaceholder")}
-              value={newArgs}
-              onChange={(e) => setNewArgs(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-            />
-            <button
-              className="px-3 py-1 text-base bg-[var(--accent)] text-[var(--bg-base)] rounded-[var(--radius-sm)] hover:opacity-90 transition-opacity"
-              onClick={handleAdd}
-            >
-              {t("settings.common.add")}
-            </button>
-            <button
-              className="px-3 py-1 text-base text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-              onClick={() => setAdding(false)}
-            >
-              {t("settings.common.cancel")}
-            </button>
+          <div className="text-sm text-[var(--text-muted)] mb-2">
+            {t("settings.clipboard.remotePasteDirDesc")}
           </div>
-        </div>
-      ) : (
-        <button
-          className="w-full py-2.5 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-base text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all"
-          onClick={() => setAdding(true)}
-        >
-          {t("settings.terminal.addTerminal")}
-        </button>
-      )}
-
-      <div className="pt-3 text-sm text-[var(--text-muted)]">
-        {t("settings.terminal.defaultHint")}
-      </div>
-
-      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.terminal.appearance")}
-      </div>
-
-      <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="flex-1 min-w-0">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.encodingTitle")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.encodingDesc")}</div>
-        </div>
-        <select
-          className="min-w-40 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)]"
-          value={terminalEncoding}
-          onChange={(e) => handleTerminalEncodingChange(e.target.value as TerminalEncoding)}
-        >
-          {TERMINAL_ENCODING_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
-        </select>
-      </div>
-
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="pr-4">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.depthUiTitle")}</div>
-          <div className="text-sm text-[var(--text-muted)]">
-            {t("settings.terminal.depthUiDesc")}
-          </div>
-        </div>
-        <button
-          type="button"
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            terminalDepthUiEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => handleTerminalDepthUiEnabledChange(!terminalDepthUiEnabled)}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              terminalDepthUiEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.terminal.logTerminal")}
-      </div>
-
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="pr-4">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.logTerminalTitle")}</div>
-          <div className="text-sm text-[var(--text-muted)]">
-            {t("settings.terminal.logTerminalDesc")}
-          </div>
-        </div>
-        <button
-          type="button"
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            terminalLogEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => handleTerminalLogEnabledChange(!terminalLogEnabled)}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              terminalLogEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="flex-1 min-w-0">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.logOutputTo")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.logOutputToDesc")}</div>
-        </div>
-        <div className="flex items-center gap-2 min-w-0 flex-[1.4]">
           <input
-            className="min-w-0 flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
-            placeholder="terminal.log"
-            value={terminalLogPathInput}
-            onChange={(e) => setTerminalLogPathInput(e.target.value)}
-            onBlur={commitTerminalLogPath}
+            type="text"
+            spellCheck={false}
+            placeholder={DEFAULT_REMOTE_PASTE_DIR}
+            className="w-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
+            value={remotePasteDirInput}
+            onChange={(e) => setRemotePasteDirInput(e.target.value)}
+            onBlur={commitRemotePasteDir}
             onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
           />
-          <button
-            type="button"
-            className="px-3 py-1 text-base bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all flex-shrink-0"
-            onClick={() => void handleChooseTerminalLogPath()}
-          >
-            ...
-          </button>
         </div>
-      </div>
-
-      <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="flex-1 min-w-0">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.logMaxSize")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.logMaxSizeDesc")}</div>
-        </div>
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            min={1}
-            max={10240}
-            className="w-24 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono text-right"
-            value={terminalLogMaxSizeInput}
-            onChange={(e) => setTerminalLogMaxSizeInput(e.target.value)}
-            onBlur={commitTerminalLogMaxSize}
-            onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-          />
-          <span className="text-base text-[var(--text-muted)]">MB</span>
-        </div>
-      </div>
-
-      <div className="pt-1 text-sm text-[var(--text-muted)]">
-        {t("settings.terminal.logFooter")}
-      </div>
-
-      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.terminal.copyPaste")}
-      </div>
-
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="pr-4">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.smartCopyPasteTitle")}</div>
-          <div className="text-sm text-[var(--text-muted)]">
-            {t("settings.terminal.smartCopyPasteDesc")}
-          </div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            smartCopyPasteEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => saveConfigPatch({ smartCopyPaste: !smartCopyPasteEnabled })}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              smartCopyPasteEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.terminal.longPaste")}
-      </div>
-
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="pr-4">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.longPasteTitle")}</div>
-          <div className="text-sm text-[var(--text-muted)]">
-            {t("settings.terminal.longPasteDesc")}
-          </div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            longPasteEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => handleLongPasteEnabledChange(!longPasteEnabled)}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              longPasteEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      <div
-        className={`flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] transition-opacity ${
-          longPasteEnabled ? '' : 'opacity-50 pointer-events-none'
-        }`}
-      >
-        <div className="flex-1 min-w-0">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.lineThreshold")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.lineThresholdDesc")}</div>
-        </div>
-        <input
-          type="number"
-          min={0}
-          className="w-24 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono text-right"
-          value={lineThresholdInput}
-          onChange={(e) => setLineThresholdInput(e.target.value)}
-          onBlur={commitLineThreshold}
-          onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-        />
-      </div>
-
-      <div
-        className={`flex items-center justify-between gap-3 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] transition-opacity ${
-          longPasteEnabled ? '' : 'opacity-50 pointer-events-none'
-        }`}
-      >
-        <div className="flex-1 min-w-0">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.terminal.charThreshold")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.terminal.charThresholdDesc")}</div>
-        </div>
-        <input
-          type="number"
-          min={0}
-          className="w-24 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono text-right"
-          value={charThresholdInput}
-          onChange={(e) => setCharThresholdInput(e.target.value)}
-          onBlur={commitCharThreshold}
-          onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-        />
-      </div>
-
-      <div className="pt-1 text-sm text-[var(--text-muted)]">
-        {t("settings.terminal.longPasteFooter")}
-      </div>
-
-      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.terminal.remotePaste")}
-      </div>
-
-      <div className="px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="text-base text-[var(--text-primary)]">
-          {t("settings.terminal.remotePasteDir")}
-        </div>
-        <div className="text-sm text-[var(--text-muted)] mb-2">
-          {t("settings.terminal.remotePasteDirDesc")}
-        </div>
-        <input
-          type="text"
-          spellCheck={false}
-          placeholder={DEFAULT_REMOTE_PASTE_DIR}
-          className="w-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
-          value={remotePasteDirInput}
-          onChange={(e) => setRemotePasteDirInput(e.target.value)}
-          onBlur={commitRemotePasteDir}
-          onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-        />
-      </div>
-
-      <div className="pt-1 text-sm text-[var(--text-muted)]">
-        {t("settings.terminal.remotePasteFooter")}
-      </div>
+        <Hint>{t("settings.clipboard.remotePasteFooter")}</Hint>
+      </Section>
     </div>
   );
 }
@@ -799,294 +934,100 @@ function FontSizeSlider({
   );
 }
 
-// ─── SystemSettings（系统设置页）───
+// ─── AppearanceSettings（外观 › 主题与语言）───
 
-function SystemSettings() {
+function AppearanceSettings() {
   const t = useT();
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
 
-  const [editors, setEditors] = useState<EditorConfig[]>([]);
-  const [defaultEditorName, setDefaultEditorName] = useState('');
-  const [addingEditor, setAddingEditor] = useState(false);
-  const [newEditorName, setNewEditorName] = useState('');
-  const [newEditorCommand, setNewEditorCommand] = useState('');
-
-  useEffect(() => {
-    setEditors([...config.editors]);
-    setDefaultEditorName(config.defaultEditor ?? '');
-    setAddingEditor(false);
-  }, [config]);
-
-  const saveEditors = useCallback(async (updatedEditors: EditorConfig[], updatedDefault: string) => {
-    const newConfig = {
-      ...useAppStore.getState().config,
-      editors: updatedEditors,
-      defaultEditor: updatedDefault || undefined,
-    };
-    setConfig(newConfig);
-    await invoke('save_config', { config: newConfig });
-  }, [setConfig]);
-
-  const handleAddEditor = useCallback(() => {
-    if (!newEditorName.trim() || !newEditorCommand.trim()) return;
-    const trimmedName = newEditorName.trim();
-    if (editors.some((e) => e.name === trimmedName)) {
-      alert(t("settings.system.editorExistsAlert", { name: trimmedName }));
-      return;
-    }
-    const editor: EditorConfig = {
-      name: trimmedName,
-      command: newEditorCommand.trim(),
-    };
-    const updated = [...editors, editor];
-    setEditors(updated);
-    setAddingEditor(false);
-    setNewEditorName('');
-    setNewEditorCommand('');
-    const def = defaultEditorName || editor.name;
-    setDefaultEditorName(def);
-    saveEditors(updated, def);
-  }, [editors, defaultEditorName, newEditorName, newEditorCommand, saveEditors, t]);
-
-  const handleDeleteEditor = useCallback((idx: number) => {
-    const updated = editors.filter((_, i) => i !== idx);
-    setEditors(updated);
-    const def = updated.find((e) => e.name === defaultEditorName)
-      ? defaultEditorName
-      : updated[0]?.name ?? '';
-    setDefaultEditorName(def);
-    saveEditors(updated, def);
-  }, [editors, defaultEditorName, saveEditors]);
-
-  const handleUpdateEditor = useCallback((idx: number, editor: EditorConfig) => {
-    const oldName = editors[idx].name;
-    if (editor.name !== oldName && editors.some((e, i) => i !== idx && e.name === editor.name)) {
-      alert(t("settings.system.editorExistsAlert", { name: editor.name }));
-      return;
-    }
-    const wasDefault = oldName === defaultEditorName;
-    const updated = editors.map((e, i) => (i === idx ? editor : e));
-    setEditors(updated);
-    const def = wasDefault ? editor.name : defaultEditorName;
-    setDefaultEditorName(def);
-    saveEditors(updated, def);
-  }, [editors, defaultEditorName, saveEditors, t]);
-
-  const handleSetDefaultEditor = useCallback((name: string) => {
-    setDefaultEditorName(name);
-    saveEditors(editors, name);
-  }, [editors, saveEditors]);
-
-  const handleBrowseEditorPath = useCallback(async (onSelect: (path: string) => void) => {
-    const isWindows = navigator.userAgent.includes('Windows');
-    const selected = await openDialog({
-      title: t("settings.system.browseDialogTitle"),
-      multiple: false,
-      directory: false,
-      filters: isWindows
-        ? [{ name: t("settings.system.executableFilter"), extensions: ['exe'] }]
-        : undefined,
-    });
-    if (typeof selected === 'string' && selected.trim()) {
-      onSelect(selected);
-    }
-  }, [t]);
-
   const handleThemeChange = useCallback((theme: 'auto' | 'light' | 'dark') => {
-    const newConfig = { ...useAppStore.getState().config, theme };
+    // 外置皮肤的明暗由 appearance 定死:切主题 = 退出皮肤回内置
+    clearCustomTheme();
+    const newConfig = { ...useAppStore.getState().config, theme, customThemeId: undefined };
     setConfig(newConfig);
     applyTheme(theme);
     updateAllTerminalThemes(newConfig.terminalFollowTheme ?? true);
-    invoke('save_config', { config: newConfig });
+    saveConfigToDisk(newConfig);
+  }, [setConfig]);
+
+  const handleSkinChange = useCallback((skin: 'none' | 'blueprint' | 'fluent2') => {
+    clearCustomTheme();
+    const newConfig = {
+      ...useAppStore.getState().config,
+      skin,
+      customThemeId: undefined,
+    };
+    setConfig(newConfig);
+    applyTheme(newConfig.theme ?? 'auto');
+    updateAllTerminalThemes(newConfig.terminalFollowTheme);
+    saveConfigToDisk(newConfig);
   }, [setConfig]);
 
   const handleTerminalFollowThemeChange = useCallback((follow: boolean) => {
     const newConfig = { ...useAppStore.getState().config, terminalFollowTheme: follow };
     setConfig(newConfig);
     updateAllTerminalThemes(follow);
-    invoke('save_config', { config: newConfig });
-  }, [setConfig]);
-
-  const handleSkinChange = useCallback((skin: 'none' | 'blueprint' | 'fluent2') => {
-    const currentConfig = useAppStore.getState().config;
-    const newConfig = { ...currentConfig, skin };
-    setConfig(newConfig);
-    updateAllTerminalThemes(newConfig.terminalFollowTheme);
-    invoke('save_config', { config: newConfig });
+    saveConfigToDisk(newConfig);
   }, [setConfig]);
 
   return (
     <div className="space-y-6">
-      {/* 界面语言 */}
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <span className="text-base text-[var(--text-primary)]">{t("settings.system.languageLabel")}</span>
-        <LanguageToggle />
-      </div>
+      <Section title={t("settings.appearance.language")}>
+        <SettingRow title={t("settings.appearance.languageLabel")}>
+          <LanguageToggle />
+        </SettingRow>
+      </Section>
 
-      {/* 主题模式 */}
-      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.system.theme")}
-      </div>
+      <Section title={t("settings.appearance.theme")}>
+        <ChoiceGroup
+          value={(config.customThemeId ? '' : config.theme) as typeof config.theme}
+          options={[
+            { value: 'dark', label: t("settings.appearance.themeDark") },
+            { value: 'light', label: t("settings.appearance.themeLight") },
+            { value: 'auto', label: t("settings.appearance.themeAuto") },
+          ]}
+          onChange={handleThemeChange}
+        />
+        <ToggleRow
+          title={t("settings.appearance.terminalFollowTheme")}
+          desc={t("settings.appearance.terminalFollowThemeDesc")}
+          checked={config.terminalFollowTheme}
+          onChange={handleTerminalFollowThemeChange}
+        />
+      </Section>
 
-      <div className="flex gap-2 mb-4">
-        {([
-          { value: 'dark' as const, label: t("settings.system.themeDark") },
-          { value: 'light' as const, label: t("settings.system.themeLight") },
-          { value: 'auto' as const, label: t("settings.system.themeAuto") },
-        ]).map((opt) => (
-          <button
-            key={opt.value}
-            className={`flex-1 py-2 rounded-[var(--radius-sm)] text-base transition-all ${
-              config.theme === opt.value
-                ? 'bg-[var(--accent-muted)] text-[var(--accent)] border border-[var(--accent)]'
-                : 'bg-[var(--bg-base)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)]'
-            }`}
-            onClick={() => handleThemeChange(opt.value)}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
+      <Section title={t("settings.appearance.skin")}>
+        <ChoiceGroup
+          value={(config.customThemeId ? '' : config.skin) as typeof config.skin}
+          options={[
+            { value: 'none', label: t("settings.appearance.skinNone") },
+            { value: 'blueprint', label: t("settings.appearance.skinBlueprint") },
+            { value: 'fluent2', label: 'Fluent 2' },
+          ]}
+          onChange={handleSkinChange}
+        />
+        <Hint>{t("settings.appearance.skinDesc")}</Hint>
+      </Section>
 
-      {/* 皮肤 */}
-      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2 mt-4">
-        {t("settings.system.skin")}
-      </div>
-
-      <div className="flex gap-2 mb-4">
-        {([
-          { value: 'none' as const, label: t("settings.system.skinNone") },
-          { value: 'blueprint' as const, label: t("settings.system.skinBlueprint") },
-          { value: 'fluent2' as const, label: 'Fluent 2' },
-        ]).map((opt) => (
-          <button
-            key={opt.value}
-            className={`flex-1 py-2 rounded-[var(--radius-sm)] text-base transition-all ${
-              config.skin === opt.value
-                ? 'bg-[var(--accent-muted)] text-[var(--accent)] border border-[var(--accent)]'
-                : 'bg-[var(--bg-base)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)]'
-            }`}
-            onClick={() => handleSkinChange(opt.value)}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
-
-      {/* 终端跟随主题 */}
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] mb-6">
-        <div>
-          <div className="text-base text-[var(--text-primary)]">{t("settings.system.terminalFollowTheme")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.system.terminalFollowThemeDesc")}</div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors ${
-            config.terminalFollowTheme ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => handleTerminalFollowThemeChange(!config.terminalFollowTheme)}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              config.terminalFollowTheme ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      {/* 外部编辑器 */}
-      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.system.externalEditor")}
-      </div>
-
-      <div className="space-y-2 mb-6">
-        {editors.map((editor, idx) => (
-          <EditorRow
-            key={`${editor.name}-${idx}`}
-            editor={editor}
-            isDefault={editor.name === defaultEditorName}
-            onSetDefault={() => handleSetDefaultEditor(editor.name)}
-            onDelete={() => handleDeleteEditor(idx)}
-            onUpdate={(e) => handleUpdateEditor(idx, e)}
-            onBrowse={handleBrowseEditorPath}
-          />
-        ))}
-
-        {addingEditor ? (
-          <div className="flex flex-col gap-2 p-3 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--accent)] border-dashed">
-            <div className="flex gap-2">
-              <input
-                className="flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)]"
-                placeholder={t("settings.system.newEditorNamePlaceholder")}
-                value={newEditorName}
-                onChange={(e) => setNewEditorName(e.target.value)}
-                autoFocus
-              />
-            </div>
-            <div className="flex gap-2 items-center">
-              <input
-                className="flex-[2] bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
-                placeholder={t("settings.system.newEditorCommandPlaceholder")}
-                value={newEditorCommand}
-                onChange={(e) => setNewEditorCommand(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleAddEditor()}
-              />
-              <button
-                type="button"
-                className="px-3 py-1 text-base bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all flex-shrink-0"
-                onClick={() => handleBrowseEditorPath((p) => setNewEditorCommand(p))}
-              >
-                ...
-              </button>
-              <button
-                className="px-3 py-1 text-base bg-[var(--accent)] text-[var(--bg-base)] rounded-[var(--radius-sm)] hover:opacity-90 transition-opacity"
-                onClick={handleAddEditor}
-              >
-                {t("settings.common.add")}
-              </button>
-              <button
-                className="px-3 py-1 text-base text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-                onClick={() => setAddingEditor(false)}
-              >
-                {t("settings.common.cancel")}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button
-            className="w-full py-2.5 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-base text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all"
-            onClick={() => setAddingEditor(true)}
-          >
-            {t("settings.system.addEditor")}
-          </button>
-        )}
-
-        <div className="pt-1 text-sm text-[var(--text-muted)]">
-          {t("settings.system.editorDefaultHint")}
-        </div>
-      </div>
+      <CustomThemePacksSection />
     </div>
   );
 }
 
-// ─── FontSettings（字体设置页）───
+// ─── FontSettings（外观 › 字体）───
 
 function FontSettings() {
   const t = useT();
   const config = useAppStore((s) => s.config);
   const setConfig = useAppStore((s) => s.setConfig);
+  const patchConfig = useConfigPatch();
 
   const handleUiFontSizeChange = useCallback((size: number) => {
     const newConfig = { ...useAppStore.getState().config, uiFontSize: size };
     setConfig(newConfig);
     document.documentElement.style.fontSize = `${size}px`;
-    invoke('save_config', { config: newConfig });
-  }, [setConfig]);
-
-  const handleTerminalFontSizeChange = useCallback((size: number) => {
-    const newConfig = { ...useAppStore.getState().config, terminalFontSize: size };
-    setConfig(newConfig);
-    invoke('save_config', { config: newConfig });
+    saveConfigToDisk(newConfig);
   }, [setConfig]);
 
   const handleUiFontFamilyChange = useCallback((value: string) => {
@@ -1097,98 +1038,61 @@ function FontSettings() {
     };
     setConfig(newConfig);
     applyUiFontFamily(trimmed || undefined);
-    invoke('save_config', { config: newConfig });
-  }, [setConfig]);
-
-  const handleTerminalFontFamilyChange = useCallback((value: string) => {
-    const trimmed = value.trim();
-    const newConfig = {
-      ...useAppStore.getState().config,
-      terminalFontFamily: trimmed || undefined,
-    };
-    setConfig(newConfig);
-    invoke('save_config', { config: newConfig });
+    saveConfigToDisk(newConfig);
   }, [setConfig]);
 
   const terminalLigaturesEnabled = config.terminalLigatures ?? false;
-  const handleTerminalLigaturesChange = useCallback((enabled: boolean) => {
-    const newConfig = { ...useAppStore.getState().config, terminalLigatures: enabled };
-    setConfig(newConfig);
-    invoke('save_config', { config: newConfig });
-  }, [setConfig]);
 
   return (
     <div className="space-y-6">
-      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.font.fontSize")}
-      </div>
+      <Section title={t("settings.font.fontSize")}>
+        <FontSizeSlider
+          label={t("settings.font.uiFontSize")}
+          value={config.uiFontSize ?? 13}
+          min={10}
+          max={20}
+          onChange={handleUiFontSizeChange}
+        />
+        <FontSizeSlider
+          label={t("settings.font.terminalFontSize")}
+          value={config.terminalFontSize ?? 14}
+          min={10}
+          max={24}
+          onChange={(v) => patchConfig({ terminalFontSize: v })}
+        />
+        <Hint>{t("settings.font.fontSizeFooter")}</Hint>
+      </Section>
 
-      <FontSizeSlider
-        label={t("settings.font.uiFontSize")}
-        value={config.uiFontSize ?? 13}
-        min={10}
-        max={20}
-        onChange={handleUiFontSizeChange}
-      />
+      <Section title={t("settings.font.font")}>
+        <FontFamilyInput
+          label={t("settings.font.uiFont")}
+          value={config.uiFontFamily ?? ''}
+          placeholder="'DM Sans', system-ui, sans-serif"
+          onChange={handleUiFontFamilyChange}
+        />
+        <FontFamilyInput
+          label={t("settings.font.terminalFont")}
+          value={config.terminalFontFamily ?? ''}
+          placeholder={DEFAULT_TERMINAL_FONT_FAMILY}
+          onChange={(v) => patchConfig({ terminalFontFamily: v.trim() || undefined })}
+        />
+        <Hint>
+          {t("settings.font.fontFamilyFooterPrefix")}<span className="font-mono">'JetBrainsMono Nerd Font', monospace</span>{t("settings.font.fontFamilyFooterSuffix")}
+        </Hint>
+      </Section>
 
-      <FontSizeSlider
-        label={t("settings.font.terminalFontSize")}
-        value={config.terminalFontSize ?? 14}
-        min={10}
-        max={24}
-        onChange={handleTerminalFontSizeChange}
-      />
-
-      <div className="pt-3 text-sm text-[var(--text-muted)]">
-        {t("settings.font.fontSizeFooter")}
-      </div>
-
-      <div className="pt-4 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.font.font")}
-      </div>
-
-      <FontFamilyInput
-        label={t("settings.font.uiFont")}
-        value={config.uiFontFamily ?? ''}
-        placeholder="'DM Sans', system-ui, sans-serif"
-        onChange={handleUiFontFamilyChange}
-      />
-
-      <FontFamilyInput
-        label={t("settings.font.terminalFont")}
-        value={config.terminalFontFamily ?? ''}
-        placeholder={DEFAULT_TERMINAL_FONT_FAMILY}
-        onChange={handleTerminalFontFamilyChange}
-      />
-
-      <div className="pt-3 text-sm text-[var(--text-muted)]">
-        {t("settings.font.fontFamilyFooterPrefix")}<span className="font-mono">'JetBrainsMono Nerd Font', monospace</span>{t("settings.font.fontFamilyFooterSuffix")}
-      </div>
-
-      <div className="pt-6 text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.font.ligatures")}
-      </div>
-
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="pr-4">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.font.ligaturesTitle")}</div>
-          <div className="text-sm text-[var(--text-muted)]">
-            {t("settings.font.ligaturesDescPrefix")}<span className="font-mono">==</span> <span className="font-mono">=&gt;</span> <span className="font-mono">!=</span> <span className="font-mono">-&gt;</span>{t("settings.font.ligaturesDescSuffix")}
-          </div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            terminalLigaturesEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => handleTerminalLigaturesChange(!terminalLigaturesEnabled)}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              terminalLigaturesEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
+      <Section title={t("settings.font.ligatures")}>
+        <ToggleRow
+          title={t("settings.font.ligaturesTitle")}
+          desc={
+            <>
+              {t("settings.font.ligaturesDescPrefix")}<span className="font-mono">==</span> <span className="font-mono">=&gt;</span> <span className="font-mono">!=</span> <span className="font-mono">-&gt;</span>{t("settings.font.ligaturesDescSuffix")}
+            </>
+          }
+          checked={terminalLigaturesEnabled}
+          onChange={(v) => patchConfig({ terminalLigatures: v })}
+        />
+      </Section>
     </div>
   );
 }
@@ -1234,7 +1138,7 @@ function FontFamilyInput({
   );
 }
 
-// ─── AiNotificationSettings（AI 完成通知页）───
+// ─── AiHookSettings（AI › Hook 事件）───
 
 function AiHookSettings() {
   const t = useT();
@@ -1243,6 +1147,9 @@ function AiHookSettings() {
   const hookEnabled = config.hookEnabled ?? false;
 
   const [hookStatus, setHookStatus] = useState<{ port: number; running: boolean } | null>(null);
+  const [registrations, setRegistrations] = useState<HookRegistration[]>([]);
+  /** 本次注册/卸载作用于哪几家；null = 还没按注册现状初始化过 */
+  const [selected, setSelected] = useState<Set<string> | null>(null);
   const [registering, setRegistering] = useState(false);
   const [unregistering, setUnregistering] = useState(false);
   const [toggling, setToggling] = useState(false);
@@ -1250,17 +1157,36 @@ function AiHookSettings() {
   const [snippetData, setSnippetData] = useState<{
     claude: { file: string; content: string };
     codex: { files: { file: string; content: string; note?: string }[] };
+    grok: { files: { file: string; content: string; note?: string }[] };
   } | null>(null);
   const [showSnippet, setShowSnippet] = useState(false);
-  const [snippetTab, setSnippetTab] = useState<'claude' | 'codex'>('claude');
+  const [snippetTab, setSnippetTab] = useState<'claude' | 'codex' | 'grok'>('claude');
 
   const refreshHookStatus = useCallback(() => {
     invoke<{ port: number; running: boolean }>('get_hook_status').then(setHookStatus);
   }, []);
 
+  /** 拉三家的注册现状；首次拉到时据此定默认勾选（见 setSelected 的注释） */
+  const refreshRegistrations = useCallback(() => {
+    invoke<HookRegistration[]>('get_ai_hook_registrations')
+      .then((list) => {
+        setRegistrations(list);
+        setSelected((prev) => {
+          if (prev) return prev;
+          // 默认勾选「已经装了的那几家」——用户再点一次注册就是补齐新事件，
+          // 不会顺手往没在用的 CLI 里写配置。一家都没装过（首次使用）则全选，
+          // 保住「一键注册」的原有体验。
+          const installed = list.filter((r) => r.registered > 0).map((r) => r.agent);
+          return new Set(installed.length > 0 ? installed : list.map((r) => r.agent));
+        });
+      })
+      .catch(() => setRegistrations([]));
+  }, []);
+
   useEffect(() => {
     refreshHookStatus();
-  }, [refreshHookStatus]);
+    refreshRegistrations();
+  }, [refreshHookStatus, refreshRegistrations]);
 
   const handleToggleHook = useCallback(async (enabled: boolean) => {
     setToggling(true);
@@ -1268,7 +1194,7 @@ function AiHookSettings() {
       await invoke('toggle_hook_server', { enabled });
       const newConfig = { ...useAppStore.getState().config, hookEnabled: enabled };
       setConfig(newConfig);
-      await invoke('save_config', { config: newConfig });
+      await saveConfigToDisk(newConfig);
       refreshHookStatus();
     } catch (e: unknown) {
       setResultMsg(e instanceof Error ? e.message : String(e));
@@ -1277,31 +1203,45 @@ function AiHookSettings() {
     }
   }, [setConfig, refreshHookStatus]);
 
-  const handleRegister = useCallback(async () => {
-    setRegistering(true);
-    setResultMsg('');
-    try {
-      const msg = await invoke<string>('register_ai_hooks');
-      setResultMsg(msg);
-    } catch (e: unknown) {
-      setResultMsg(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRegistering(false);
-    }
+  const agents = useMemo(() => [...(selected ?? [])], [selected]);
+
+  const toggleAgent = useCallback((agent: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev ?? []);
+      if (next.has(agent)) next.delete(agent);
+      else next.add(agent);
+      return next;
+    });
   }, []);
 
-  const handleUnregister = useCallback(async () => {
-    setUnregistering(true);
-    setResultMsg('');
-    try {
-      const msg = await invoke<string>('unregister_ai_hooks');
-      setResultMsg(msg);
-    } catch (e: unknown) {
-      setResultMsg(e instanceof Error ? e.message : String(e));
-    } finally {
-      setUnregistering(false);
-    }
-  }, []);
+  const runHookAction = useCallback(
+    async (cmd: 'register_ai_hooks' | 'unregister_ai_hooks', setBusy: (v: boolean) => void) => {
+      setBusy(true);
+      setResultMsg('');
+      try {
+        // agents 显式传：后端对空/缺省会回落成三家全上，而这里空选择
+        // 由按钮 disabled 挡住，两边不会互相误解
+        const msg = await invoke<string>(cmd, { agents });
+        setResultMsg(msg);
+      } catch (e: unknown) {
+        setResultMsg(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
+        refreshRegistrations();
+      }
+    },
+    [agents, refreshRegistrations],
+  );
+
+  const handleRegister = useCallback(
+    () => runHookAction('register_ai_hooks', setRegistering),
+    [runHookAction],
+  );
+
+  const handleUnregister = useCallback(
+    () => runHookAction('unregister_ai_hooks', setUnregistering),
+    [runHookAction],
+  );
 
   const handleShowSnippet = useCallback(async () => {
     if (showSnippet) {
@@ -1312,7 +1252,7 @@ function AiHookSettings() {
       const data = await invoke<typeof snippetData>('get_hook_config_snippet');
       setSnippetData(data);
       setShowSnippet(true);
-    } catch (e: unknown) {
+    } catch {
       setSnippetData(null);
       setShowSnippet(true);
     }
@@ -1324,28 +1264,13 @@ function AiHookSettings() {
         {t("settings.aiHook.title")}
       </div>
 
-      {/* Hook 服务器开关 */}
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div className="pr-4">
-          <div className="text-base text-[var(--text-primary)]">{t("settings.aiHook.enableHook")}</div>
-          <div className="text-sm text-[var(--text-muted)]">
-            {t("settings.aiHook.enableHookDesc")}
-          </div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            hookEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => !toggling && handleToggleHook(!hookEnabled)}
-          disabled={toggling}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              hookEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
+      <ToggleRow
+        title={t("settings.aiHook.enableHook")}
+        desc={t("settings.aiHook.enableHookDesc")}
+        checked={hookEnabled}
+        onChange={handleToggleHook}
+        busy={toggling}
+      />
 
       {/* 错误消息始终可见（不受开关置灰影响） */}
       {resultMsg && (
@@ -1368,22 +1293,71 @@ function AiHookSettings() {
           </div>
         </div>
 
+        {/* 按 CLI 选择注入目标：三家的配置文件互不相干，只装自己在用的那家 */}
+        <div className="rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] overflow-hidden">
+          <div className="px-3 pt-2.5 pb-1 text-sm text-[var(--text-muted)]">
+            {t("settings.aiHook.targetsLabel")}
+          </div>
+          {registrations.map((r) => {
+            const checked = selected?.has(r.agent) ?? false;
+            const state =
+              r.registered === 0
+                ? { text: t("settings.aiHook.stateAbsent"), color: 'var(--text-muted)' }
+                : r.registered < r.total
+                  ? {
+                      text: t("settings.aiHook.stateStale", { n: r.registered, total: r.total }),
+                      color: 'var(--color-warning)',
+                    }
+                  : {
+                      text: t("settings.aiHook.stateReady", { n: r.total }),
+                      color: 'var(--color-success)',
+                    };
+            return (
+              <label
+                key={r.agent}
+                className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-[var(--border-subtle)] transition-colors"
+              >
+                <input
+                  type="checkbox"
+                  className="accent-[var(--accent)] cursor-pointer"
+                  checked={checked}
+                  onChange={() => toggleAgent(r.agent)}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-base text-[var(--text-primary)]">{r.label}</div>
+                  <div className="text-sm text-[var(--text-muted)] truncate" title={r.file}>
+                    {r.file}
+                  </div>
+                </div>
+                <span className="text-sm shrink-0" style={{ color: state.color }}>
+                  {state.text}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+
         <div className="flex gap-2">
           <button
             className="flex-1 py-2 bg-[var(--accent)] text-[var(--bg-base)] rounded-[var(--radius-sm)] text-base hover:opacity-90 transition-opacity disabled:opacity-50"
             onClick={handleRegister}
-            disabled={registering}
+            disabled={registering || agents.length === 0}
           >
             {registering ? t("settings.aiHook.registering") : t("settings.aiHook.register")}
           </button>
           <button
             className="flex-1 py-2 bg-[var(--bg-base)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] text-base hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all disabled:opacity-50"
             onClick={handleUnregister}
-            disabled={unregistering}
+            disabled={unregistering || agents.length === 0}
           >
             {unregistering ? t("settings.aiHook.unregistering") : t("settings.aiHook.unregister")}
           </button>
         </div>
+        {agents.length === 0 && (
+          <div className="text-sm text-[var(--text-muted)] text-center">
+            {t("settings.aiHook.noTargetSelected")}
+          </div>
+        )}
 
         <button
           className="w-full py-2 text-base text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors"
@@ -1395,7 +1369,7 @@ function AiHookSettings() {
         {showSnippet && snippetData && (
           <div className="rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] overflow-hidden">
             <div className="flex border-b border-[var(--border-subtle)]">
-              {(['claude', 'codex'] as const).map((tab) => (
+              {(['claude', 'codex', 'grok'] as const).map((tab) => (
                 <button
                   key={tab}
                   className={`flex-1 py-1.5 text-sm transition-colors ${
@@ -1405,7 +1379,7 @@ function AiHookSettings() {
                   }`}
                   onClick={() => setSnippetTab(tab)}
                 >
-                  {tab === 'claude' ? 'Claude Code' : 'Codex'}
+                  {tab === 'claude' ? 'Claude Code' : tab === 'codex' ? 'Codex' : 'Grok'}
                 </button>
               ))}
             </div>
@@ -1416,7 +1390,7 @@ function AiHookSettings() {
                   {snippetData.claude.content}
                 </>
               ) : (
-                snippetData.codex.files.map((f, i) => (
+                (snippetTab === 'codex' ? snippetData.codex : snippetData.grok).files.map((f, i) => (
                   <div key={f.file} className={i > 0 ? 'mt-3 pt-3 border-t border-[var(--border-subtle)]' : ''}>
                     <div className="text-[var(--text-secondary)] mb-1">
                       {f.file}{f.note ? ` (${f.note})` : ''}
@@ -1429,19 +1403,18 @@ function AiHookSettings() {
           </div>
         )}
 
-        <div className="pt-1 text-sm text-[var(--text-muted)]">
-          {t("settings.aiHook.footer")}
-        </div>
+        <Hint>{t("settings.aiHook.footer")}</Hint>
       </div>
     </div>
   );
 }
 
-// ─── AiNotificationSettings（AI 完成通知页）───
+// ─── AiNotificationSettings（AI › 通知提醒）───
 
 function AiNotificationSettings() {
   const t = useT();
   const config = useAppStore((s) => s.config);
+  const patchConfig = useConfigPatch();
 
   const handleSoundPathChange = useCallback(async () => {
     const selected = await openDialog({
@@ -1451,86 +1424,42 @@ function AiNotificationSettings() {
       filters: [{ name: t("settings.aiNotification.audioFilter"), extensions: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a'] }],
     });
     if (typeof selected === 'string' && selected.trim()) {
-      void saveConfigPatch({ aiCompletionSoundPath: selected });
+      patchConfig({ aiCompletionSoundPath: selected });
     }
-  }, [saveConfigPatch, t]);
+  }, [patchConfig, t]);
 
   return (
-    <div className="space-y-2">
-      <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em] mb-2">
-        {t("settings.aiNotification.method")}
-      </div>
+    <div className="space-y-6">
+      <Section title={t("settings.aiNotification.method")}>
+        <ToggleRow
+          title={t("settings.aiNotification.popup")}
+          desc={t("settings.aiNotification.popupDesc")}
+          checked={config.aiCompletionPopup}
+          onChange={(v) => patchConfig({ aiCompletionPopup: v })}
+        />
+        <ToggleRow
+          title={t("settings.aiNotification.taskbarFlash")}
+          desc={t("settings.aiNotification.taskbarFlashDesc")}
+          checked={config.aiCompletionTaskbarFlash}
+          onChange={(v) => patchConfig({ aiCompletionTaskbarFlash: v })}
+        />
+        <ToggleRow
+          title={t("settings.aiNotification.sound")}
+          desc={t("settings.aiNotification.soundDesc")}
+          checked={config.aiCompletionSound}
+          onChange={(v) => patchConfig({ aiCompletionSound: v })}
+        />
 
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div>
-          <div className="text-base text-[var(--text-primary)]">{t("settings.aiNotification.popup")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.aiNotification.popupDesc")}</div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            config.aiCompletionPopup ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => saveConfigPatch({ aiCompletionPopup: !config.aiCompletionPopup })}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              config.aiCompletionPopup ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div>
-          <div className="text-base text-[var(--text-primary)]">{t("settings.aiNotification.taskbarFlash")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.aiNotification.taskbarFlashDesc")}</div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            config.aiCompletionTaskbarFlash ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => saveConfigPatch({ aiCompletionTaskbarFlash: !config.aiCompletionTaskbarFlash })}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              config.aiCompletionTaskbarFlash ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      <div className="flex items-center justify-between px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-        <div>
-          <div className="text-base text-[var(--text-primary)]">{t("settings.aiNotification.sound")}</div>
-          <div className="text-sm text-[var(--text-muted)]">{t("settings.aiNotification.soundDesc")}</div>
-        </div>
-        <button
-          className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-            config.aiCompletionSound ? 'bg-[var(--accent)]' : 'bg-[var(--border-strong)]'
-          }`}
-          onClick={() => saveConfigPatch({ aiCompletionSound: !config.aiCompletionSound })}
-        >
-          <span
-            className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white transition-transform ${
-              config.aiCompletionSound ? 'translate-x-[18px]' : 'translate-x-0.5'
-            }`}
-          />
-        </button>
-      </div>
-
-      <div
-        className={`transition-opacity ${
-          config.aiCompletionSound ? '' : 'opacity-50 pointer-events-none'
-        }`}
-      >
-        <div className="flex items-center gap-2 px-3 py-2.5 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)]">
-          <div className="flex-1 min-w-0">
-            <div className="text-base text-[var(--text-primary)]">{t("settings.aiNotification.customSound")}</div>
-            <div className="text-sm text-[var(--text-muted)] font-mono truncate">
+        <SettingRow
+          title={t("settings.aiNotification.customSound")}
+          desc={
+            <span className="font-mono block truncate">
               {config.aiCompletionSoundPath || t("settings.aiNotification.defaultSound")}
-            </div>
-          </div>
-          <div className="flex items-center gap-1 flex-shrink-0">
+            </span>
+          }
+          disabled={!config.aiCompletionSound}
+        >
+          <div className="flex items-center gap-1">
             <button
               className="px-2.5 py-1 text-sm bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all"
               onClick={() => playNotificationSound(config.aiCompletionSoundPath)}
@@ -1547,22 +1476,244 @@ function AiNotificationSettings() {
             {config.aiCompletionSoundPath && (
               <button
                 className="px-2.5 py-1 text-sm text-[var(--text-muted)] hover:text-[var(--color-error)] transition-colors"
-                onClick={() => saveConfigPatch({ aiCompletionSoundPath: undefined })}
+                onClick={() => patchConfig({ aiCompletionSoundPath: undefined })}
               >
                 {t("settings.aiNotification.clear")}
               </button>
             )}
           </div>
-        </div>
-      </div>
+        </SettingRow>
 
-      <div className="pt-3 text-sm text-[var(--text-muted)]">
-        {t("settings.aiNotification.footer")}
-      </div>
+        <Hint>{t("settings.aiNotification.footer")}</Hint>
+      </Section>
 
-      <div className="pt-6">
-        <AiHookSettings />
-      </div>
+      <Section title={t("settings.aiNotification.trigger")}>
+        <ToggleRow
+          title={t("settings.aiNotification.attention")}
+          desc={t("settings.aiNotification.attentionDesc")}
+          checked={config.aiAttentionNotify}
+          onChange={(v) => patchConfig({ aiAttentionNotify: v })}
+        />
+        <Hint>{t("settings.aiNotification.attentionFooter")}</Hint>
+      </Section>
+    </div>
+  );
+}
+
+// ─── SystemSettings（系统 › 常规）───
+
+function SystemSettings() {
+  const t = useT();
+  const config = useAppStore((s) => s.config);
+  const patchConfig = useConfigPatch();
+
+  const trayEnabled = config.trayStatusEnabled ?? true;
+  const trayClickFocus = config.trayClickFocus ?? true;
+  const savedTrayMax = config.trayMaxProjects ?? 5;
+  // 缺省开启:保持旧行为,老配置升级上来不改变启动表现
+  const aiAutoResume = config.aiAutoResume ?? true;
+
+  return (
+    <div className="space-y-6">
+      <Section title={t("settings.system.trayGroup")}>
+        <ToggleRow
+          title={t("settings.system.trayStatusTitle")}
+          desc={t("settings.system.trayStatusDesc")}
+          checked={trayEnabled}
+          onChange={(v) => patchConfig({ trayStatusEnabled: v })}
+        />
+        {trayEnabled && (
+          <>
+            <ToggleRow
+              title={t("settings.system.trayClickFocusTitle")}
+              desc={t("settings.system.trayClickFocusDesc")}
+              checked={trayClickFocus}
+              onChange={(v) => patchConfig({ trayClickFocus: v })}
+            />
+            <NumberRow
+              title={t("settings.system.trayMaxTitle")}
+              desc={t("settings.system.trayMaxDesc")}
+              value={savedTrayMax}
+              min={1}
+              max={20}
+              onCommit={(v) => patchConfig({ trayMaxProjects: v })}
+            />
+          </>
+        )}
+      </Section>
+
+      <Section title={t("settings.system.startupGroup")}>
+        <ToggleRow
+          title={t("settings.system.aiAutoResumeTitle")}
+          desc={t("settings.system.aiAutoResumeDesc")}
+          checked={aiAutoResume}
+          onChange={(v) => patchConfig({ aiAutoResume: v })}
+        />
+      </Section>
+    </div>
+  );
+}
+
+// ─── EditorSettings（系统 › 外部编辑器）───
+
+function EditorSettings() {
+  const t = useT();
+  const config = useAppStore((s) => s.config);
+  const setConfig = useAppStore((s) => s.setConfig);
+
+  const [editors, setEditors] = useState<EditorConfig[]>([]);
+  const [defaultEditorName, setDefaultEditorName] = useState('');
+  const [addingEditor, setAddingEditor] = useState(false);
+  const [newEditorName, setNewEditorName] = useState('');
+  const [newEditorCommand, setNewEditorCommand] = useState('');
+
+  useEffect(() => {
+    setEditors([...config.editors]);
+    setDefaultEditorName(config.defaultEditor ?? '');
+    setAddingEditor(false);
+  }, [config]);
+
+  const saveEditors = useCallback(async (updatedEditors: EditorConfig[], updatedDefault: string) => {
+    const newConfig = {
+      ...useAppStore.getState().config,
+      editors: updatedEditors,
+      defaultEditor: updatedDefault || undefined,
+    };
+    setConfig(newConfig);
+    await saveConfigToDisk(newConfig);
+  }, [setConfig]);
+
+  const handleAddEditor = useCallback(() => {
+    if (!newEditorName.trim() || !newEditorCommand.trim()) return;
+    const trimmedName = newEditorName.trim();
+    if (editors.some((e) => e.name === trimmedName)) {
+      alert(t("settings.editor.editorExistsAlert", { name: trimmedName }));
+      return;
+    }
+    const editor: EditorConfig = {
+      name: trimmedName,
+      command: newEditorCommand.trim(),
+    };
+    const updated = [...editors, editor];
+    setEditors(updated);
+    setAddingEditor(false);
+    setNewEditorName('');
+    setNewEditorCommand('');
+    const def = defaultEditorName || editor.name;
+    setDefaultEditorName(def);
+    saveEditors(updated, def);
+  }, [editors, defaultEditorName, newEditorName, newEditorCommand, saveEditors, t]);
+
+  const handleDeleteEditor = useCallback((idx: number) => {
+    const updated = editors.filter((_, i) => i !== idx);
+    setEditors(updated);
+    const def = updated.find((e) => e.name === defaultEditorName)
+      ? defaultEditorName
+      : updated[0]?.name ?? '';
+    setDefaultEditorName(def);
+    saveEditors(updated, def);
+  }, [editors, defaultEditorName, saveEditors]);
+
+  const handleUpdateEditor = useCallback((idx: number, editor: EditorConfig) => {
+    const oldName = editors[idx].name;
+    if (editor.name !== oldName && editors.some((e, i) => i !== idx && e.name === editor.name)) {
+      alert(t("settings.editor.editorExistsAlert", { name: editor.name }));
+      return;
+    }
+    const wasDefault = oldName === defaultEditorName;
+    const updated = editors.map((e, i) => (i === idx ? editor : e));
+    setEditors(updated);
+    const def = wasDefault ? editor.name : defaultEditorName;
+    setDefaultEditorName(def);
+    saveEditors(updated, def);
+  }, [editors, defaultEditorName, saveEditors, t]);
+
+  const handleSetDefaultEditor = useCallback((name: string) => {
+    setDefaultEditorName(name);
+    saveEditors(editors, name);
+  }, [editors, saveEditors]);
+
+  const handleBrowseEditorPath = useCallback(async (onSelect: (path: string) => void) => {
+    const isWindows = navigator.userAgent.includes('Windows');
+    const selected = await openDialog({
+      title: t("settings.editor.browseDialogTitle"),
+      multiple: false,
+      directory: false,
+      filters: isWindows
+        ? [{ name: t("settings.editor.executableFilter"), extensions: ['exe'] }]
+        : undefined,
+    });
+    if (typeof selected === 'string' && selected.trim()) {
+      onSelect(selected);
+    }
+  }, [t]);
+
+  return (
+    <div className="space-y-6">
+      <Section title={t("settings.editor.externalEditor")}>
+        {editors.map((editor, idx) => (
+          <EditorRow
+            key={`${editor.name}-${idx}`}
+            editor={editor}
+            isDefault={editor.name === defaultEditorName}
+            onSetDefault={() => handleSetDefaultEditor(editor.name)}
+            onDelete={() => handleDeleteEditor(idx)}
+            onUpdate={(e) => handleUpdateEditor(idx, e)}
+            onBrowse={handleBrowseEditorPath}
+          />
+        ))}
+
+        {addingEditor ? (
+          <div className="flex flex-col gap-2 p-3 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--accent)] border-dashed">
+            <div className="flex gap-2">
+              <input
+                className="flex-1 bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)]"
+                placeholder={t("settings.editor.newEditorNamePlaceholder")}
+                value={newEditorName}
+                onChange={(e) => setNewEditorName(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-2 items-center">
+              <input
+                className="flex-[2] bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] px-2 py-1 text-base outline-none focus:border-[var(--accent)] font-mono"
+                placeholder={t("settings.editor.newEditorCommandPlaceholder")}
+                value={newEditorCommand}
+                onChange={(e) => setNewEditorCommand(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleAddEditor()}
+              />
+              <button
+                type="button"
+                className="px-3 py-1 text-base bg-[var(--bg-elevated)] text-[var(--text-secondary)] border border-[var(--border-default)] rounded-[var(--radius-sm)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all flex-shrink-0"
+                onClick={() => handleBrowseEditorPath((p) => setNewEditorCommand(p))}
+              >
+                ...
+              </button>
+              <button
+                className="px-3 py-1 text-base bg-[var(--accent)] text-[var(--bg-base)] rounded-[var(--radius-sm)] hover:opacity-90 transition-opacity"
+                onClick={handleAddEditor}
+              >
+                {t("settings.common.add")}
+              </button>
+              <button
+                className="px-3 py-1 text-base text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                onClick={() => setAddingEditor(false)}
+              >
+                {t("settings.common.cancel")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            className="w-full py-2.5 border border-dashed border-[var(--border-default)] rounded-[var(--radius-md)] text-base text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-all"
+            onClick={() => setAddingEditor(true)}
+          >
+            {t("settings.editor.addEditor")}
+          </button>
+        )}
+
+        <Hint>{t("settings.editor.editorDefaultHint")}</Hint>
+      </Section>
     </div>
   );
 }
@@ -1655,9 +1806,7 @@ function AboutSettings() {
         </div>
       )}
 
-      <div className="pt-3 text-sm text-[var(--text-muted)]">
-        {t("settings.about.footer")}
-      </div>
+      <Hint>{t("settings.about.footer")}</Hint>
     </div>
   );
 }
@@ -1704,23 +1853,390 @@ function ShortcutsSettings() {
           </div>
         </div>
       ))}
-      <div className="pt-3 text-sm text-[var(--text-muted)]">
-        {t("settings.shortcuts.footer")}
+      <Hint>{t("settings.shortcuts.footer")}</Hint>
+    </div>
+  );
+}
+
+// ─── CustomThemePacksSection（外置主题包，嵌在系统设置的主题/皮肤下方）───
+
+function ThemeCard({
+  name,
+  colors,
+  imageUrl,
+  focusX,
+  focusY,
+  active,
+  subtitle,
+  onSelect,
+  onDelete,
+}: {
+  name: string;
+  colors: { background: string; panel: string; accent: string; text: string; muted?: string };
+  imageUrl?: string;
+  focusX?: number;
+  focusY?: number;
+  active: boolean;
+  subtitle?: string;
+  onSelect: () => void;
+  onDelete?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`group/card flex flex-col gap-2 p-3 rounded-[var(--radius-md)] text-left transition-all border ${
+        active
+          ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
+          : 'border-[var(--border-default)] bg-[var(--bg-base)] hover:border-[var(--accent)]'
+      }`}
+      onClick={onSelect}
+    >
+      {/* 缩小版实际效果:背景图 + 压暗层 + 迷你侧栏/终端界面 */}
+      <div
+        className="relative w-full h-24 rounded-[var(--radius-sm)] border border-[var(--border-subtle)] overflow-hidden"
+        style={{ backgroundColor: colors.background }}
+      >
+        {imageUrl && (
+          <div
+            className="absolute inset-0"
+            style={{
+              backgroundImage: `url("${imageUrl}")`,
+              backgroundSize: 'cover',
+              backgroundPosition: `${(focusX ?? 0.5) * 100}% ${(focusY ?? 0.5) * 100}%`,
+            }}
+          />
+        )}
+        {/* 压暗层,与真实氛围层同款(35%) */}
+        <div
+          className="absolute inset-0"
+          style={{ backgroundColor: `color-mix(in srgb, ${colors.background} 35%, transparent)` }}
+        />
+        {/* 迷你侧栏(72% 半透明面板) */}
+        <div
+          className="absolute left-1.5 top-1.5 bottom-1.5 w-12 rounded-sm px-1.5 py-1 space-y-1"
+          style={{ backgroundColor: `color-mix(in srgb, ${colors.panel} 72%, transparent)` }}
+        >
+          <div className="h-1 w-8 rounded-full" style={{ backgroundColor: colors.accent }} />
+          <div className="h-1 w-6 rounded-full opacity-60" style={{ backgroundColor: colors.text }} />
+          <div className="h-1 w-7 rounded-full opacity-40" style={{ backgroundColor: colors.text }} />
+        </div>
+        {/* 迷你终端区(60% 着色 + 提示符) */}
+        <div
+          className="absolute left-[3.9rem] right-1.5 top-1.5 bottom-1.5 rounded-sm px-1.5 py-1"
+          style={{ backgroundColor: `color-mix(in srgb, ${colors.background} 60%, transparent)` }}
+        >
+          <div className="text-[10px] leading-tight font-mono" style={{ color: colors.accent }}>
+            ❯ <span style={{ color: colors.text }}>Aa 字</span>
+          </div>
+          <div className="mt-0.5 h-1 w-10 rounded-full opacity-50" style={{ backgroundColor: colors.text }} />
+        </div>
       </div>
+      <div className="flex items-start justify-between gap-2 min-w-0">
+        <div className="min-w-0">
+          <div className={`text-base truncate ${active ? 'text-[var(--accent)]' : 'text-[var(--text-primary)]'}`}>
+            {name}
+          </div>
+          {subtitle && <div className="text-sm text-[var(--text-muted)] truncate">{subtitle}</div>}
+        </div>
+        {onDelete && (
+          <span
+            role="button"
+            className="hidden group-hover/card:block px-1 text-sm text-[var(--text-muted)] hover:text-[var(--color-error)] transition-colors flex-shrink-0"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          >
+            ✕
+          </span>
+        )}
+      </div>
+    </button>
+  );
+}
+
+function CustomThemePacksSection() {
+  const t = useT();
+  const config = useAppStore((s) => s.config);
+  const setConfig = useAppStore((s) => s.setConfig);
+  const [packs, setPacks] = useState<ThemePackMeta[]>([]);
+  const [thumbUrls, setThumbUrls] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  /** 成功提示（生成示例皮肤）；与 error 互斥展示 */
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // 缩略图走 asset 探活/base64 兜底通道(asset 协议在部分 WebView 环境不可用,
+  // CSS 背景加载失败是静默的),逐个就绪逐个上屏
+  useEffect(() => {
+    let cancelled = false;
+    for (const pack of packs) {
+      if (!pack.def.image) continue;
+      resolveThemeAssetUrl(pack.dir, pack.themeId, pack.def.image)
+        .then((url) => {
+          if (!cancelled) setThumbUrls((prev) => ({ ...prev, [pack.themeId]: url }));
+        })
+        .catch((e) => console.warn(`皮肤 ${pack.themeId} 缩略图加载失败:`, e));
+    }
+    return () => { cancelled = true; };
+  }, [packs]);
+
+  const refresh = useCallback(() => {
+    setError(null);
+    setNotice(null);
+    listThemePacks().then(setPacks).catch((e) => setError(String(e)));
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const selectCustom = useCallback(async (pack: ThemePackMeta) => {
+    setError(null);
+    try {
+      await loadAndApplyCustomTheme(pack.themeId);
+    } catch (e) {
+      setError(t('settings.themes.applyFailed', { detail: String(e) }));
+      return;
+    }
+    const cur = useAppStore.getState().config;
+    const newConfig = { ...cur, customThemeId: pack.themeId };
+    setConfig(newConfig);
+    updateAllTerminalThemes(newConfig.terminalFollowTheme ?? true);
+    saveConfigToDisk(newConfig);
+  }, [setConfig, t]);
+
+  const importPack = useCallback(async () => {
+    setError(null);
+    const selected = await openDialog({
+      title: t('settings.themes.importDialogTitle'),
+      directory: true,
+      multiple: false,
+    });
+    if (typeof selected !== 'string' || !selected.trim()) return;
+    try {
+      const themeId = await invoke<string>('import_theme_pack', { srcDir: selected });
+      // 同名覆盖导入换掉的是同一批文件名，缓存不清缩略图还是上一版
+      invalidateThemeAssets(themeId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [refresh, t]);
+
+  const importZip = useCallback(async () => {
+    setError(null);
+    const selected = await openDialog({
+      title: t('settings.themes.importZipDialogTitle'),
+      directory: false,
+      multiple: false,
+      filters: [{ name: 'Zip', extensions: ['zip'] }],
+    });
+    if (typeof selected !== 'string' || !selected.trim()) return;
+    try {
+      const themeId = await invoke<string>('import_theme_pack_zip', { zipPath: selected });
+      invalidateThemeAssets(themeId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [refresh, t]);
+
+  const deletePack = useCallback(async (pack: ThemePackMeta) => {
+    if (!window.confirm(t('settings.themes.deleteConfirm', { name: pack.def.name }))) return;
+    setError(null);
+    const cur = useAppStore.getState().config;
+    // 先退出该主题（clearCustomTheme 内含 unwatch）再删目录：反过来的话
+    // notify 的目录句柄还开着，被删目录在 Windows 上处于 delete-pending，
+    // 紧接着重导入同名主题会撞 ERROR_ACCESS_DENIED。
+    const wasActive = cur.customThemeId === pack.themeId;
+    if (wasActive) clearCustomTheme();
+    invalidateThemeAssets(pack.themeId);
+    try {
+      await invoke('delete_theme_pack', { themeId: pack.themeId });
+    } catch (e) {
+      setError(String(e));
+      // 删失败就把主题装回去，避免用户界面上皮肤没了、目录还在
+      if (wasActive) void loadAndApplyCustomTheme(pack.themeId).catch(() => {});
+      return;
+    }
+    if (wasActive) {
+      const newConfig = { ...cur, customThemeId: undefined };
+      setConfig(newConfig);
+      applyTheme(newConfig.theme ?? 'auto');
+      updateAllTerminalThemes(newConfig.terminalFollowTheme ?? true);
+      saveConfigToDisk(newConfig);
+    }
+    refresh();
+  }, [refresh, setConfig, t]);
+
+  const openThemesDir = useCallback(async () => {
+    try {
+      const dir = await invoke<string>('get_themes_dir');
+      await revealItemInDir(dir);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // 生成示例皮肤:内容与仓库 docs/theme-pack-example/ 同一份(编译期嵌入),
+  // 包内 README.md 就是字段说明。落盘后照常热重载,用户改完保存即见效
+  const createExample = useCallback(async () => {
+    setError(null);
+    setNotice(null);
+    try {
+      const themeId = await invoke<string>('create_example_theme_pack');
+      refresh();
+      setNotice(t('settings.themes.exampleCreated', { id: themeId }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [refresh, t]);
+
+  return (
+    <div className="mb-4">
+      {/* 五个按钮 + 标题在 680px 弹窗里已经贴边(英文文案更长),允许换行不挤压 */}
+      <div className="flex flex-wrap items-center justify-between gap-y-2 mb-2 mt-4">
+        <div className="text-base text-[var(--text-muted)] uppercase tracking-[0.1em]">
+          {t('settings.themes.customSection')}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all"
+            onClick={importPack}
+          >
+            {t('settings.themes.addPack')}
+          </button>
+          <button
+            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all"
+            onClick={importZip}
+          >
+            {t('settings.themes.importZip')}
+          </button>
+          <button
+            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all"
+            onClick={createExample}
+            title={t('settings.themes.createExampleHint')}
+          >
+            {t('settings.themes.createExample')}
+          </button>
+          <button
+            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all"
+            onClick={openThemesDir}
+          >
+            {t('settings.themes.openDir')}
+          </button>
+          <button
+            className="px-2 py-1 text-sm rounded-[var(--radius-sm)] text-[var(--text-secondary)] border border-[var(--border-default)] hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all"
+            onClick={refresh}
+          >
+            {t('settings.themes.refresh')}
+          </button>
+        </div>
+      </div>
+      {packs.length === 0 ? (
+        <div className="px-3 py-4 rounded-[var(--radius-md)] bg-[var(--bg-base)] border border-[var(--border-subtle)] text-sm text-[var(--text-muted)]">
+          {t('settings.themes.empty')}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          {packs.map((pack) => (
+            <ThemeCard
+              key={pack.themeId}
+              name={pack.def.name}
+              subtitle={pack.themeId}
+              colors={{
+                background: pack.def.colors.background,
+                panel: pack.def.colors.panel,
+                accent: pack.def.colors.accent,
+                text: pack.def.colors.text,
+              }}
+              imageUrl={thumbUrls[pack.themeId]}
+              focusX={pack.def.art?.focusX}
+              focusY={pack.def.art?.focusY}
+              active={config.customThemeId === pack.themeId}
+              onSelect={() => void selectCustom(pack)}
+              onDelete={() => void deletePack(pack)}
+            />
+          ))}
+        </div>
+      )}
+      {error && (
+        <div className="mt-2 px-3 py-2 rounded-[var(--radius-sm)] border border-[var(--color-error)] text-sm text-[var(--color-error)]">
+          {error}
+        </div>
+      )}
+      {notice && !error && (
+        <div className="mt-2 px-3 py-2 rounded-[var(--radius-sm)] border border-[var(--color-success)] text-sm text-[var(--color-success)]">
+          {notice}
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── SettingsModal（主弹窗）───
 
-const MENU_ITEMS: { key: SettingsPage; labelKey: string }[] = [
-  { key: 'terminal', labelKey: 'settings.menu.terminal' },
-  { key: 'system', labelKey: 'settings.menu.system' },
-  { key: 'font', labelKey: 'settings.menu.font' },
-  { key: 'ai-notification', labelKey: 'settings.menu.aiNotification' },
-  { key: 'shortcuts', labelKey: 'settings.menu.shortcuts' },
-  { key: 'about', labelKey: 'settings.menu.about' },
+/**
+ * 两级侧栏：分组标题（不可点）+ 分页。
+ *
+ * 平铺 6 页时「系统设置」一页塞了语言、托盘三项、自动续接、主题、皮肤、
+ * 终端跟随主题、外部编辑器 —— 找一个开关要滚半页。按主题归组后每页只剩
+ * 一屏左右，代价是侧栏多了 4 行标题，比滚动找开关划算。
+ */
+type MenuGroup = {
+  /** 空串 = 无标题分组（快捷键/关于这类顶级项），渲染成一条分隔线 */
+  titleKey: string;
+  items: { key: SettingsPage; labelKey: string }[];
+};
+
+const MENU_GROUPS: MenuGroup[] = [
+  {
+    titleKey: 'settings.menu.groupTerminal',
+    items: [
+      { key: 'terminal', labelKey: 'settings.menu.shell' },
+      { key: 'clipboard', labelKey: 'settings.menu.clipboard' },
+    ],
+  },
+  {
+    titleKey: 'settings.menu.groupAppearance',
+    items: [
+      { key: 'appearance', labelKey: 'settings.menu.appearance' },
+      { key: 'font', labelKey: 'settings.menu.font' },
+    ],
+  },
+  {
+    titleKey: 'settings.menu.groupAi',
+    items: [
+      { key: 'ai-notification', labelKey: 'settings.menu.aiNotification' },
+      { key: 'ai-hook', labelKey: 'settings.menu.aiHook' },
+    ],
+  },
+  {
+    titleKey: 'settings.menu.groupSystem',
+    items: [
+      { key: 'system', labelKey: 'settings.menu.general' },
+      { key: 'editor', labelKey: 'settings.menu.editor' },
+    ],
+  },
+  {
+    titleKey: '',
+    items: [
+      { key: 'shortcuts', labelKey: 'settings.menu.shortcuts' },
+      { key: 'about', labelKey: 'settings.menu.about' },
+    ],
+  },
 ];
+
+/** 上下键在扁平化后的分页序列里移动，跳过分组标题。 */
+const MENU_ITEMS = MENU_GROUPS.flatMap((g) => g.items);
+
+const PAGES: Record<SettingsPage, () => ReactNode> = {
+  terminal: TerminalSettings,
+  clipboard: ClipboardSettings,
+  appearance: AppearanceSettings,
+  font: FontSettings,
+  'ai-notification': AiNotificationSettings,
+  'ai-hook': AiHookSettings,
+  system: SystemSettings,
+  editor: EditorSettings,
+  shortcuts: ShortcutsSettings,
+  about: AboutSettings,
+};
 
 export function SettingsModal({ open, onClose, initialPage }: Props) {
   const t = useT();
@@ -1730,12 +2246,14 @@ export function SettingsModal({ open, onClose, initialPage }: Props) {
     if (open) setActivePage(initialPage ?? 'terminal');
   }, [open, initialPage]);
 
+  const ActivePage = PAGES[activePage] ?? TerminalSettings;
+
   return (
     <Modal
       open={open}
       onClose={onClose}
       title={t("settings.title")}
-      panelClassName="w-[640px] max-h-[80vh]"
+      panelClassName="w-[680px] max-h-[80vh]"
     >
       {/* 左右布局 */}
       <div className="flex flex-1 overflow-hidden">
@@ -1744,7 +2262,7 @@ export function SettingsModal({ open, onClose, initialPage }: Props) {
           role="tablist"
           aria-orientation="vertical"
           aria-label={t("settings.title")}
-          className="w-[160px] flex-shrink-0 border-r border-[var(--border-subtle)] py-3 px-2 space-y-0.5"
+          className="w-[172px] flex-shrink-0 border-r border-[var(--border-subtle)] py-3 px-2 overflow-y-auto"
           onKeyDown={(e) => {
             if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
             e.preventDefault();
@@ -1759,37 +2277,49 @@ export function SettingsModal({ open, onClose, initialPage }: Props) {
             });
           }}
         >
-          {MENU_ITEMS.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              role="tab"
-              data-page={item.key}
-              aria-selected={activePage === item.key}
-              tabIndex={activePage === item.key ? 0 : -1}
-              className={`w-full flex items-center gap-2 px-3 py-2 rounded-[var(--radius-sm)] cursor-pointer text-base text-left transition-all duration-150 ${
-                activePage === item.key
-                  ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
-              }`}
-              onClick={() => setActivePage(item.key)}
-            >
-              {activePage === item.key && (
-                <span className="w-0.5 h-4 rounded-full bg-[var(--accent)] flex-shrink-0" />
+          {MENU_GROUPS.map((group, gi) => (
+            <div key={group.titleKey || `g${gi}`} role="presentation" className="space-y-0.5">
+              {group.titleKey ? (
+                <div
+                  role="presentation"
+                  className={`px-3 pb-1 text-sm text-[var(--text-muted)] uppercase tracking-[0.1em] ${gi > 0 ? 'pt-4' : ''}`}
+                >
+                  {t(group.titleKey)}
+                </div>
+              ) : (
+                <div role="presentation" className="mx-3 my-2 border-t border-[var(--border-subtle)]" />
               )}
-              <span>{t(item.labelKey)}</span>
-            </button>
+              {group.items.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  role="tab"
+                  data-page={item.key}
+                  aria-selected={activePage === item.key}
+                  tabIndex={activePage === item.key ? 0 : -1}
+                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-[var(--radius-sm)] cursor-pointer text-base text-left transition-all duration-150 ${
+                    activePage === item.key
+                      ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border-subtle)]'
+                  }`}
+                  onClick={() => setActivePage(item.key)}
+                >
+                  {/* 未选中时留位不留色：切页时标签文字不会横向抖一下 */}
+                  <span
+                    className={`w-0.5 h-4 rounded-full flex-shrink-0 ${
+                      activePage === item.key ? 'bg-[var(--accent)]' : 'bg-transparent'
+                    }`}
+                  />
+                  <span className="truncate">{t(item.labelKey)}</span>
+                </button>
+              ))}
+            </div>
           ))}
         </div>
 
         {/* 右侧内容 */}
         <div className="flex-1 overflow-y-auto px-5 py-4" role="tabpanel">
-          {activePage === 'terminal' && <TerminalSettings />}
-          {activePage === 'system' && <SystemSettings />}
-          {activePage === 'font' && <FontSettings />}
-          {activePage === 'ai-notification' && <AiNotificationSettings />}
-          {activePage === 'shortcuts' && <ShortcutsSettings />}
-          {activePage === 'about' && <AboutSettings />}
+          <ActivePage />
         </div>
       </div>
     </Modal>

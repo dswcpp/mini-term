@@ -313,7 +313,10 @@ struct FsChangePayload {
 }
 
 pub struct FsWatcherManager {
-    watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
+    // 值为 (watcher, 引用计数)：压缩链让多个前端节点可能 watch 同一路径
+    // （链中段与其真实 TreeNode），无计数时后注册者会顶掉前者的 watcher、
+    // 先注销者会把仍在用的 watcher 一并摘除
+    watchers: Arc<Mutex<HashMap<String, (RecommendedWatcher, usize)>>>,
 }
 
 impl FsWatcherManager {
@@ -331,6 +334,15 @@ pub fn watch_directory(
     path: String,
     project_path: String,
 ) -> Result<(), String> {
+    // 已有同路径 watcher：仅计数 +1，不重建（notify 后端重复注册同一路径浪费句柄）
+    {
+        let mut watchers = state.watchers.lock().unwrap();
+        if let Some(entry) = watchers.get_mut(&path) {
+            entry.1 += 1;
+            return Ok(());
+        }
+    }
+
     let watch_path = PathBuf::from(&path);
     let project_path_clone = project_path.clone();
     let app_clone = app.clone();
@@ -356,7 +368,13 @@ pub fn watch_directory(
         .map_err(|e| e.to_string())?;
 
     let mut watchers = state.watchers.lock().unwrap();
-    watchers.insert(path, watcher);
+    // 竞态兜底：抢先检查后、insert 前若有并发注册者已写入，则沿用其 watcher 只递增计数
+    match watchers.get_mut(&path) {
+        Some(entry) => entry.1 += 1,
+        None => {
+            watchers.insert(path, (watcher, 1));
+        }
+    }
     Ok(())
 }
 
@@ -366,9 +384,13 @@ pub struct FileContentResult {
     pub content: String,
     pub is_binary: bool,
     pub too_large: bool,
+    /// 实际文本编码；二进制或超限内容无法判定时为 None。
+    pub encoding: Option<&'static str>,
 }
 
 const MAX_FILE_VIEW_SIZE: u64 = 1_048_576; // 1MB
+const FILE_ENCODING_UTF8: &str = "utf-8";
+const FILE_ENCODING_GB18030: &str = "gb18030";
 const C_CPP_SOURCE_EXTENSIONS: &[&str] = &[
     "c", "h", "cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++", "ipp", "inl", "tpp",
 ];
@@ -393,6 +415,7 @@ fn decode_file_preview_content(path: &Path, bytes: Vec<u8>) -> FileContentResult
             content: String::new(),
             is_binary: true,
             too_large: false,
+            encoding: None,
         };
     }
 
@@ -401,6 +424,7 @@ fn decode_file_preview_content(path: &Path, bytes: Vec<u8>) -> FileContentResult
             content: s,
             is_binary: false,
             too_large: false,
+            encoding: Some(FILE_ENCODING_UTF8),
         },
         Err(e) if is_c_cpp_source_file(path) => {
             let (content, _encoding_used, had_errors) = GB18030.decode(e.as_bytes());
@@ -409,12 +433,14 @@ fn decode_file_preview_content(path: &Path, bytes: Vec<u8>) -> FileContentResult
                     content: String::new(),
                     is_binary: true,
                     too_large: false,
+                    encoding: None,
                 }
             } else {
                 FileContentResult {
                     content: content.into_owned(),
                     is_binary: false,
                     too_large: false,
+                    encoding: Some(FILE_ENCODING_GB18030),
                 }
             }
         }
@@ -422,6 +448,7 @@ fn decode_file_preview_content(path: &Path, bytes: Vec<u8>) -> FileContentResult
             content: String::new(),
             is_binary: true,
             too_large: false,
+            encoding: None,
         },
     }
 }
@@ -438,10 +465,43 @@ pub fn read_file_content(project_root: String, path: String) -> Result<FileConte
             content: String::new(),
             is_binary: false,
             too_large: true,
+            encoding: None,
         });
     }
     let bytes = fs::read(&p).map_err(|e| e.to_string())?;
     Ok(decode_file_preview_content(&p, bytes))
+}
+
+#[tauri::command]
+pub fn write_file_content(
+    project_root: String,
+    path: String,
+    content: String,
+    encoding: Option<String>,
+) -> Result<(), String> {
+    // 缺省保持旧调用方的 UTF-8 行为；编辑器会回传读取时识别到的编码，
+    // 避免 GB18030 源文件保存后被静默转换为 UTF-8。
+    let encoded = match encoding.as_deref().unwrap_or(FILE_ENCODING_UTF8) {
+        FILE_ENCODING_UTF8 => content.into_bytes(),
+        FILE_ENCODING_GB18030 => {
+            let (bytes, _encoding_used, had_errors) = GB18030.encode(&content);
+            if had_errors {
+                return Err("内容无法编码为 GB18030".to_string());
+            }
+            bytes.into_owned()
+        }
+        other => return Err(format!("不支持的文件编码: {other}")),
+    };
+
+    // 与读侧同一上限，按最终落盘字节数判断，避免多字节文本被误拒绝。
+    if encoded.len() as u64 > MAX_FILE_VIEW_SIZE {
+        return Err("内容过大(>1MB),拒绝写入".to_string());
+    }
+    let p = verify_under_project_root(&project_root, &path, true)?;
+    if !p.is_file() {
+        return Err(format!("不是文件: {}", path));
+    }
+    atomic_write(&p, &encoded).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -468,7 +528,12 @@ pub fn unwatch_directory(
     path: String,
 ) -> Result<(), String> {
     let mut watchers = state.watchers.lock().unwrap();
-    watchers.remove(&path);
+    if let Some(entry) = watchers.get_mut(&path) {
+        entry.1 -= 1;
+        if entry.1 == 0 {
+            watchers.remove(&path);
+        }
+    }
     Ok(())
 }
 
@@ -605,6 +670,7 @@ mod tests {
 
         assert!(!result.is_binary);
         assert!(!result.too_large);
+        assert_eq!(result.encoding, Some(FILE_ENCODING_UTF8));
         assert!(result.content.contains("return 0"));
     }
 
@@ -617,6 +683,7 @@ mod tests {
 
         assert!(!result.is_binary);
         assert!(!result.too_large);
+        assert_eq!(result.encoding, Some(FILE_ENCODING_GB18030));
         assert!(result.content.contains("中文注释"));
     }
 
@@ -744,6 +811,122 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn write_file_content_writes_inside_project() {
+        let (root, file) = make_test_project();
+        write_file_content(
+            root.to_string_lossy().to_string(),
+            file.to_string_lossy().to_string(),
+            "新内容\r\n第二行".to_string(),
+            None,
+        )
+        .unwrap();
+        // CRLF 原样落盘:行尾保真由前端编辑器负责,后端不做任何归一
+        assert_eq!(fs::read_to_string(&file).unwrap(), "新内容\r\n第二行");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_file_content_preserves_gb18030_source_encoding() {
+        let (root, _) = make_test_project();
+        let file = root.join("main.cpp");
+        let original = "// 中文注释\nint main() {}\n";
+        let (original_bytes, _encoding_used, had_errors) = GB18030.encode(original);
+        assert!(!had_errors);
+        fs::write(&file, original_bytes.as_ref()).unwrap();
+
+        let loaded = read_file_content(
+            root.to_string_lossy().to_string(),
+            file.to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert_eq!(loaded.encoding, Some(FILE_ENCODING_GB18030));
+
+        let updated = format!("{}// 已编辑\n", loaded.content);
+        write_file_content(
+            root.to_string_lossy().to_string(),
+            file.to_string_lossy().to_string(),
+            updated.clone(),
+            loaded.encoding.map(String::from),
+        )
+        .unwrap();
+
+        let (expected, _encoding_used, had_errors) = GB18030.encode(&updated);
+        assert!(!had_errors);
+        assert_eq!(fs::read(&file).unwrap(), expected.into_owned());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_file_content_checks_gb18030_encoded_byte_size() {
+        let (root, file) = make_test_project();
+        // UTF-8 为 1.5MB，GB18030 为 1MB；上限应按实际落盘编码判断。
+        let content = "中".repeat(500_000);
+        assert!(content.len() as u64 > MAX_FILE_VIEW_SIZE);
+        let (encoded, _encoding_used, had_errors) = GB18030.encode(&content);
+        assert!(!had_errors);
+        let encoded_len = encoded.len() as u64;
+        assert!(encoded_len <= MAX_FILE_VIEW_SIZE);
+        drop(encoded);
+
+        write_file_content(
+            root.to_string_lossy().to_string(),
+            file.to_string_lossy().to_string(),
+            content,
+            Some(FILE_ENCODING_GB18030.to_string()),
+        )
+        .unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().len(), encoded_len);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_file_content_rejects_escape() {
+        let (root, _) = make_test_project();
+        let escape = root.join("..").join("evil-write.txt");
+        let err = write_file_content(
+            root.to_string_lossy().to_string(),
+            escape.to_string_lossy().to_string(),
+            "x".to_string(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("不在项目根目录内") || err.contains("不可访问"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_file_content_rejects_directory() {
+        let (root, _) = make_test_project();
+        // 目标是目录时应报语义明确的错误,而不是走到 rename 覆盖目录
+        let err = write_file_content(
+            root.to_string_lossy().to_string(),
+            root.to_string_lossy().to_string(),
+            "x".to_string(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("不是文件"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_file_content_rejects_oversize() {
+        let (root, file) = make_test_project();
+        let before = fs::read(&file).unwrap();
+        let err = write_file_content(
+            root.to_string_lossy().to_string(),
+            file.to_string_lossy().to_string(),
+            "a".repeat((MAX_FILE_VIEW_SIZE + 1) as usize),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("过大"));
+        // 拒绝发生在写入之前,原文件必须一字未动
+        assert_eq!(fs::read(&file).unwrap(), before);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

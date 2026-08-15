@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Allotment } from 'allotment';
 import { useAppStore } from '../store';
+import { useOverlayPresence } from '../hooks/useOverlayMotion';
 import { Modal } from './Modal';
 import { useT } from '../i18n';
 import type { GitFileStatus, GitDiffResult, DiffLine, VcsKind } from '../types';
@@ -161,6 +162,7 @@ export function DiffModal({ open, onClose, projectPath, status, staged, vcsKind 
   const [error, setError] = useState('');
   const terminalFontSize = useAppStore((s) => s.config.terminalFontSize) || 14;
   const effectiveVcsKind = vcsKind ?? status.vcsKind ?? 'git';
+  const present = useOverlayPresence(open);
 
   useEffect(() => {
     if (!open) return;
@@ -179,7 +181,8 @@ export function DiffModal({ open, onClose, projectPath, status, staged, vcsKind 
       .finally(() => setLoading(false));
   }, [open, projectPath, status.path, staged, effectiveVcsKind]);
 
-  if (!open) return null;
+  // 关闭后不立刻塌掉子树，留给 Modal 播退场动画
+  if (!present) return null;
 
   const fileName = status.path.split('/').pop() ?? status.path;
 

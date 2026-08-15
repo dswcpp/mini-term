@@ -44,12 +44,42 @@
   --color-error-muted: rgba(212, 96, 90, 0.15);
   --shadow-overlay: 0 8px 32px rgba(0,0,0,0.5), 0 0 1px rgba(255,255,255,0.05);
 
+  /* 代码编辑器语法色板（CodeEditor.tsx 的 HighlightStyle 引用）。
+     全部转引应用现有色板：换皮肤（light/blueprint/fluent2）时这些引用
+     自动跟着目标皮肤的取值走，无需每套皮肤重定义；需要单独调某套皮肤的
+     语法色时,在对应皮肤选择器里覆盖 --syn-* 即可 */
+  --syn-keyword: var(--color-ai);
+  --syn-string: var(--color-success);
+  --syn-number: var(--color-warning);
+  --syn-function: var(--color-file);
+  --syn-type: var(--color-folder);
+  --syn-property: var(--color-info);
+  --syn-tag: var(--color-error);
+  --syn-comment: var(--text-muted);
+  --syn-operator: var(--text-secondary);
+
   /* Sizing */
   --radius-sm: 4px;
   --radius-md: 6px;
 
+  /* 浮层进出场动效。进场比出场慢一档：出现要看得见「从哪来」，
+     消失只需干脆让路，拖长了会显得应用反应迟钝。 */
+  --motion-overlay-in: 0.24s;
+  --motion-overlay-out: 0.14s;
+  --motion-menu-in: 0.16s;
+  /* 切终端要比开弹窗更快：这是高频操作，慢一点就变成「卡了一下」 */
+  --motion-terminal-swap: 0.2s;
+  --motion-tab-indicator: 0.22s;
+  --motion-pane-enter: 0.26s;
+  /* Git 面板区块折叠/展开(flex-grow 补间) */
+  --motion-section-toggle: 0.22s;
+  /* easeOutExpo：起步快、尾段缓，收尾有「停稳」的手感（不是弹跳） */
+  --ease-overlay-in: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-overlay-out: cubic-bezier(0.4, 0, 0.9, 0.6);
+
   /* App font family (overridable via uiFontFamily config) */
-  --app-font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  /* 'DM Sans Variable' 是 @fontsource-variable 打包字体的 family 名；保留 'DM Sans' 兼容用户本机安装的同名字体 */
+  --app-font-family: 'DM Sans Variable', 'DM Sans', system-ui, -apple-system, sans-serif;
   --app-font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
 }
 
@@ -116,6 +146,18 @@ html, body, #root {
 .xterm-viewport,
 .xterm-screen {
   background-color: var(--bg-terminal) !important;
+}
+
+/* 背景图主题下终端内层全透明：--bg-terminal 是半透明 rgba,防白屏规则 +
+   TerminalInstance/TerminalArea 容器共 5 层叠乘会把背景图盖死。
+   着色只保留 TerminalArea 容器一层,防闪兜底由其后的背景图 + 压暗层承担 */
+:root[data-custom-theme-bg] .xterm,
+:root[data-custom-theme-bg] .xterm-viewport,
+:root[data-custom-theme-bg] .xterm-screen {
+  background-color: transparent !important;
+}
+:root[data-custom-theme-bg] [data-terminal-drop] {
+  background-color: transparent;
 }
 
 /* ===== 文件拖拽到终端：拖拽期间禁用终端区 pointer-events，让鼠标事件穿透到 drop-zone ===== */
@@ -225,6 +267,18 @@ body.ssh-conn-dragging {
   opacity: 0.55;
 }
 
+/* 自定义背景图只保留 TerminalArea 的单层着色，避免 depth 表面再次叠加遮罩。
+   !important 用于压过 light + terminal-tone 组合选择器的更高优先级。 */
+:root[data-custom-theme-bg] .terminal-depth-shell {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+:root[data-custom-theme-bg] .terminal-depth-shell::before,
+:root[data-custom-theme-bg] .terminal-depth-shell::after {
+  content: none !important;
+}
+
 /* ===== Subtle noise texture overlay ===== */
 #root::before {
   content: '';
@@ -283,11 +337,6 @@ body.ssh-conn-dragging {
   50% { opacity: 0.2; transform: scale(0.75); }
 }
 
-@keyframes slideIn {
-  from { opacity: 0; transform: scale(0.96); }
-  to { opacity: 1; transform: scale(1); }
-}
-
 .animate-glow {
   animation: subtleGlow 2s ease-in-out infinite;
 }
@@ -296,9 +345,137 @@ body.ssh-conn-dragging {
   animation: alertBlink 0.8s ease-in-out infinite;
 }
 
-.animate-slide-in {
-  animation: slideIn 0.12s ease-out;
+/* 使用统计主体入场：首次数据就绪时轻微上浮淡入（不加 forwards，
+   动画结束即回落到无 transform，避免制造 containing block） */
+@keyframes usageFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
 }
+
+.usage-fade-in {
+  animation: usageFadeIn 0.35s ease-out;
+}
+
+/* ===== 浮层进出场 =====
+   所有弹窗/菜单/抽屉共用同一组关键帧，手感在应用里保持一致：
+   遮罩淡入淡出，面板在淡入的同时从上方一点点落下并放大到位。
+
+   只有**出场**用 `forwards`：它需要停在末帧，等 JS 把 DOM 摘掉，
+   否则动画一跑完就闪回原样。进场绝不能加 —— 残留的 `transform: scale(1)`
+   会让面板一直是 containing block，把子树里的 `position: fixed` 拽进面板。 */
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes overlayFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes modalPopIn {
+  from { opacity: 0; transform: translateY(-18px) scale(0.94); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes modalPopOut {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-10px) scale(0.97); }
+}
+
+/* 菜单/浮条：位移更小、更快 —— 它们贴着触发点出现，大幅位移会「飞」 */
+@keyframes menuPopIn {
+  from { opacity: 0; transform: translateY(-6px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes drawerSlideIn {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+/* 切换 pane（同一分屏格子里换终端）时，新终端淡入并轻抬一点。
+   位移只有 6px 且不加 forwards —— 动画一结束 transform 就撤掉，
+   xterm 的 canvas 不会长期停在合成层上，鼠标选区的坐标换算也不受影响。 */
+@keyframes terminalSwapIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes drawerSlideOut {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+
+/* 新分出来的 pane：淡入 + 轻微放大到位，让「这里多了一块」看得出来。
+   缩放幅度压到 0.97 —— 再大就会让 xterm 的 canvas 在这几帧里明显发虚。 */
+@keyframes paneEnter {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* 抽屉里 Sessions ↔ Git 换面板：横向带一点位移，方向感比纯淡入强 */
+@keyframes panelSwapIn {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.overlay-backdrop {
+  animation: overlayFadeIn var(--motion-overlay-in) var(--ease-overlay-in);
+}
+
+.overlay-panel {
+  animation: modalPopIn var(--motion-overlay-in) var(--ease-overlay-in);
+}
+
+.overlay-backdrop.is-closing {
+  animation: overlayFadeOut var(--motion-overlay-out) var(--ease-overlay-out) forwards;
+}
+
+.overlay-panel.is-closing {
+  animation: modalPopOut var(--motion-overlay-out) var(--ease-overlay-out) forwards;
+}
+
+.overlay-menu {
+  animation: menuPopIn var(--motion-menu-in) var(--ease-overlay-in);
+}
+
+.overlay-drawer {
+  animation: drawerSlideIn var(--motion-overlay-in) var(--ease-overlay-in);
+}
+
+.overlay-drawer.is-closing {
+  animation: drawerSlideOut var(--motion-overlay-out) var(--ease-overlay-out) forwards;
+  pointer-events: none;
+}
+
+.terminal-swap-in {
+  animation: terminalSwapIn var(--motion-terminal-swap) var(--ease-overlay-in);
+}
+
+.pane-enter {
+  animation: paneEnter var(--motion-pane-enter) var(--ease-overlay-in);
+}
+
+.panel-swap-in {
+  animation: panelSwapIn var(--motion-terminal-swap) var(--ease-overlay-in);
+}
+
+/* Git 面板的折叠区块：补间 flex-grow，高度随之收放（区块 flex-basis 恒为 0，
+   高度全由 grow 决定，两块同时补间时总和不变、不会跳）。
+   拖拽调比例期间由 .is-resizing 关掉补间，否则跟不上鼠标。 */
+.git-section-body {
+  transition: flex-grow var(--motion-section-toggle) var(--ease-overlay-in);
+}
+
+.git-section-body.is-resizing {
+  transition: none;
+}
+
+.git-section-chevron {
+  transition: transform var(--motion-section-toggle) var(--ease-overlay-in);
+}
+
 
 /* AI 运行中的状态点。形状是 spinner（底圈 + 一段亮弧），就得真的转起来；
    匀速旋转也比呼吸/闪烁更贴「正在进行」的语义，且不抢注意力。
@@ -337,6 +514,70 @@ body.ssh-conn-dragging {
   .animate-spin {
     animation-duration: 2.4s !important;
     animation-iteration-count: infinite !important;
+  }
+
+  /* 例外：浮层的**进出场**照常播完整动画，不受本段影响。
+     Windows 上「关闭窗口动画」（SPI_GETCLIENTAREAANIMATION=FALSE）就会让
+     WebView2 落进 reduce 分支 —— 走到这里的多半不是前庭敏感用户，而是把系统
+     视觉效果调成「最佳性能」的人，他们并不想让应用里的转场也一起消失。
+     弹窗凭空出现/消失反而让人分不清界面刚发生了什么。
+     只覆盖 duration：通配规则动的就是它（name/fill-mode 原样保留，
+     所以退场的 forwards 仍在，动画结束前不会闪回）。 */
+  .overlay-backdrop,
+  .overlay-panel,
+  .overlay-drawer,
+  .prompt-overlay,
+  .prompt-dialog {
+    animation-duration: var(--motion-overlay-in) !important;
+  }
+
+  .overlay-menu,
+  .ctx-menu {
+    animation-duration: var(--motion-menu-in) !important;
+  }
+
+  /* 同理：切终端 / 分屏 / 换面板的动画与 tab 指示条的滑动也照常播 */
+  .terminal-swap-in,
+  .panel-swap-in {
+    animation-duration: var(--motion-terminal-swap) !important;
+  }
+
+  .pane-enter {
+    animation-duration: var(--motion-pane-enter) !important;
+  }
+
+  .overlay-drawer.is-closing {
+    animation-duration: var(--motion-overlay-out) !important;
+  }
+
+  .drawer-tab-indicator {
+    transition-duration: var(--motion-tab-indicator) !important;
+  }
+
+  /* 同理：Git 面板区块的折叠/展开照常播（.is-resizing 的 transition:none
+     把 property 清空了，这条 duration 覆盖对拖拽期间不起作用，仍旧跟手） */
+  .git-section-body,
+  .git-section-chevron {
+    transition-duration: var(--motion-section-toggle) !important;
+  }
+
+  .overlay-backdrop.is-closing,
+  .overlay-panel.is-closing,
+  .prompt-overlay.is-closing,
+  .prompt-overlay.is-closing .prompt-dialog {
+    animation-duration: var(--motion-overlay-out) !important;
+  }
+
+  /* 例外：用量统计面板的数据动效照常播。KPI 数字滚动与图表生长是 JS 驱动
+     （rAF / recharts），通配规则本就拦不住；把同面板的 CSS 侧（入场渐显、
+     排行条宽度补间）一并豁免，避免同一面板半动半静的割裂。理由同浮层：
+     落进 reduce 分支的多半是关掉系统视觉效果的人，不是前庭敏感用户。 */
+  .usage-fade-in {
+    animation-duration: 0.35s !important;
+  }
+
+  .usage-rank-bar {
+    transition-duration: 0.5s !important;
   }
 }
 
@@ -444,6 +685,9 @@ body.ssh-conn-dragging {
 }
 .toast-icon--info { background: var(--color-info); }
 .toast-icon--error { background: var(--color-error); }
+/* AI 待确认:与项目行/托盘的黄灯同色,和绿色的「已完成」区分开 */
+.toast-icon--attention { background: var(--color-warning); }
+.toast-card--attention { border-left-color: var(--color-warning); }
 
 .toast-body { flex: 1; min-width: 0; }
 .toast-name {
@@ -483,10 +727,18 @@ body.ssh-conn-dragging {
   backdrop-filter: blur(12px);
   padding: 4px;
   z-index: 50;
-  animation: slideIn 0.12s ease-out;
+  /* 菜单出现在鼠标位置：以左上角为原点展开，看上去是「从光标里长出来」，
+     而不是整块凭空缩放。菜单被视口边缘翻转时原点随之改（见 .ctx-menu-flip-*） */
+  transform-origin: top left;
+  animation: menuPopIn var(--motion-menu-in) var(--ease-overlay-in);
   transition: background-color 0.25s ease, color 0.25s ease,
               border-color 0.25s ease, box-shadow 0.25s ease;
 }
+
+/* 贴边翻转后菜单在光标的左侧/上方，展开原点要跟着换到那一角 */
+.ctx-menu.flip-x { transform-origin: top right; }
+.ctx-menu.flip-y { transform-origin: bottom left; }
+.ctx-menu.flip-x.flip-y { transform-origin: bottom right; }
 
 .ctx-menu-item {
   min-width: 190px;
@@ -647,6 +899,7 @@ body.ssh-conn-dragging {
   justify-content: center;
   background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(4px);
+  animation: overlayFadeIn var(--motion-overlay-in) var(--ease-overlay-in);
 }
 
 .prompt-dialog {
@@ -656,9 +909,20 @@ body.ssh-conn-dragging {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-overlay);
   padding: 20px;
-  animation: slideIn 0.12s ease-out;
+  animation: modalPopIn var(--motion-overlay-in) var(--ease-overlay-in);
   transition: background-color 0.25s ease, color 0.25s ease,
               border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+/* 关闭：整块（遮罩 + 对话框）一起退场，DOM 由 prompt.ts 在动画结束后移除。
+   期间禁掉命中，免得动画那 0.14s 里还能点到已经"关掉"的按钮 */
+.prompt-overlay.is-closing {
+  animation: overlayFadeOut var(--motion-overlay-out) var(--ease-overlay-out) forwards;
+  pointer-events: none;
+}
+
+.prompt-overlay.is-closing .prompt-dialog {
+  animation: modalPopOut var(--motion-overlay-out) var(--ease-overlay-out) forwards;
 }
 
 .prompt-title {
@@ -1170,6 +1434,11 @@ body.ssh-conn-dragging {
   opacity: 0;
 }
 
+/* 背景图主题激活时噪点层归零，避免在图片上蒙沙（参照 blueprint 先例） */
+:root[data-custom-theme-bg] #root::before {
+  opacity: 0;
+}
+
 :root[data-skin="blueprint"][data-theme="light"] {
   --bg-base: #f0f4f8;
   --bg-surface: #e8eef4;
@@ -1292,3 +1561,12 @@ body.ssh-conn-dragging {
   --radius-md: 8px;
 }
 
+
+/* === 图标体系主题钩子 ===
+   单色图标(lucide / lobehub Mono)一律 currentColor,天然跟随主题 CSS 变量;
+   彩色图标(文件类型 .mt-icon-file / 品牌 .mt-icon-brand / 技术栈 .mt-icon-tech)
+   统一挂 .mt-icon,主题/皮肤在此整体调滤镜统一气质。
+   将来的主题包在这里按 [data-theme-pack="…"] 追加覆盖即可。 */
+[data-skin="blueprint"] .mt-icon {
+  filter: saturate(0.75);
+}

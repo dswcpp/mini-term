@@ -1,14 +1,17 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { useAppStore } from '../store';
 import { useTauriEvent } from '../hooks/useTauriEvent';
-import { FileViewerModal } from './FileViewerModal';
+import { useOverlayPresence, useOverlayValue } from '../hooks/useOverlayMotion';
 import { showContextMenu } from '../utils/contextMenu';
 import { MOD_LABEL } from '../utils/platform';
 import { Modal } from './Modal';
 import { useT } from '../i18n';
 import type { SearchResultItem, SearchResultsPayload, SearchCompletePayload } from '../types';
+
+// 懒加载：FileViewerModal 连带 CodeMirror + react-markdown（数百 KB），首次预览文件才拉 chunk
+const FileViewerModal = lazy(() => import('./FileViewerModal').then((m) => ({ default: m.FileViewerModal })));
 
 // ── Keyword highlight helper ──
 
@@ -117,6 +120,8 @@ export function SearchModal({ open, onClose }: SearchModalProps) {
   const [viewHighlightLine, setViewHighlightLine] = useState<number | undefined>();
   const inputRef = useRef<HTMLInputElement>(null);
   const searchIdRef = useRef<string | null>(null);
+  const present = useOverlayPresence(open);
+  const [viewFile, viewFileOpen] = useOverlayValue(viewFilePath);
 
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const config = useAppStore((s) => s.config);
@@ -216,7 +221,8 @@ export function SearchModal({ open, onClose }: SearchModalProps) {
     [project],
   );
 
-  if (!open) return null;
+  // 关闭后不立刻塌掉子树，留给 Modal 播退场动画
+  if (!present) return null;
 
   return (
     <Modal
@@ -344,14 +350,17 @@ export function SearchModal({ open, onClose }: SearchModalProps) {
           {status === 'idle' && <span>{t('search.shortcutHint', { mod: MOD_LABEL })}</span>}
         </div>
 
-      {viewFilePath && project && (
-        <FileViewerModal
-          open={!!viewFilePath}
-          onClose={() => setViewFilePath(null)}
-          filePath={viewFilePath}
-          projectRoot={project.path}
-          highlightLine={viewHighlightLine}
-        />
+      {/* 预览路径置空后再多留一会儿（useOverlayValue），预览窗才有时间淡出 */}
+      {viewFile && project && (
+        <Suspense fallback={null}>
+          <FileViewerModal
+            open={viewFileOpen}
+            onClose={() => setViewFilePath(null)}
+            filePath={viewFile}
+            projectRoot={project.path}
+            highlightLine={viewHighlightLine}
+          />
+        </Suspense>
       )}
     </Modal>
   );

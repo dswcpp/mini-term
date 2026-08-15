@@ -67,6 +67,15 @@ pub struct AppConfig {
     pub terminal_log_path: Option<String>,
     #[serde(default = "default_terminal_log_max_size_mb")]
     pub terminal_log_max_size_mb: u64,
+    /// 每个终端保留的回滚行数(scrollback)。
+    ///
+    /// 这是 WebView renderer 内存的大头:xterm 每行按 `Uint32Array(cols * 3)`
+    /// 分配,即 cols × 12 字节,120 列约 1.5KB/行。原先硬编码 10 万行意味着
+    /// 单个终端最高吃掉 150-250MB,而终端只在关 pane 时才销毁(切项目不销毁),
+    /// 多项目多分屏叠加足以把 renderer 撑到 OOM。默认降到 1 万行(≈15MB/终端),
+    /// 需要更长历史的用户可自行调高。
+    #[serde(default = "default_terminal_scrollback")]
+    pub terminal_scrollback: u32,
     #[serde(default)]
     pub layout_sizes: Option<Vec<f64>>,
     #[serde(default)]
@@ -85,6 +94,10 @@ pub struct AppConfig {
     pub ai_completion_sound: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_completion_sound_path: Option<String>,
+    /// AI 转入「待确认」时是否也走完成通知的三个通道（弹框 / 任务栏 / 提示音）。
+    /// 旧配置没有该字段，`default_true` 让升级上来的用户默认拿到提醒
+    #[serde(default = "default_true")]
+    pub ai_attention_notify: bool,
     #[serde(default)]
     pub editors: Vec<EditorConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +132,24 @@ pub struct AppConfig {
     pub hook_enabled: bool,
     #[serde(default)]
     pub smart_copy_paste: bool,
+    /// 拖选按住不动自动复制的静止时长(秒)。`None` = 前端默认 1s。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_auto_copy_secs: Option<f64>,
+    /// 状态栏(系统托盘 / 菜单栏)项目状态灯总开关。`None` = 前端默认开启。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tray_status_enabled: Option<bool>,
+    /// 托盘右键菜单最多显示的活跃项目数。`None` = 前端默认 5。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tray_max_projects: Option<u32>,
+    /// 左键点状态栏图标时是否顺带定位到「下一个该处理」的会话。
+    /// `None` = 前端默认开启;关掉则只唤起窗口，不改变当前视图。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tray_click_focus: Option<bool>,
+    /// 启动恢复布局后是否自动续接上次的 AI 会话（往 pane 写 resume 命令）。
+    /// `None` = 前端默认开启（保持旧行为）。关掉只是不写命令，会话身份仍随布局
+    /// 持久化，重新打开开关后下次启动照样能续上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_auto_resume: Option<bool>,
     #[serde(default)]
     pub ssh_connections: Vec<SshConnection>,
     /// 显式创建的 SSH 分组名（允许空分组存在）。连接上的 group 字段仍是归属的
@@ -128,6 +159,10 @@ pub struct AppConfig {
     /// 移动端中转配置(docs/adr/0001)。None = 未启用;序列化时省略保持文件干净。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mobile_relay: Option<MobileRelayConfig>,
+    /// 激活的外置主题包 id（themes/ 下目录名）。None = 内置外观模式;
+    /// 激活时 theme/skin 保持不动，退出自定义主题可无损回落。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_theme_id: Option<String>,
 }
 
 /// 移动端中转体系的持久化配置。
@@ -203,6 +238,26 @@ pub struct SavedPane {
     /// 工作目录覆盖(worktree 终端):有值则替代项目根作为 PTY cwd
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// 退出时该 pane 正在跑的 AI 会话(hook 上报的精确身份)。
+    /// 重启恢复布局后据此写入 `claude --resume` / `codex resume` 续接会话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_session: Option<SavedAiSession>,
+}
+
+/// SavedPane 里持久化的 AI 会话身份。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedAiSession {
+    /// 来源 agent(claude-code / codex),缺省按 Claude 处理
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// 会话的启动目录。`claude --resume` 只认「启动目录」对应的会话桶,起于子
+    /// 目录的会话在项目根恢复会报 No conversation found。缺这个字段时 serde 会
+    /// 静默丢弃前端写进 savedLayout 的 cwd,hook 第一手上报的启动目录与
+    /// lookup_ai_session_cwd 的反查结果都存不下来,每次重启只能重查一遍。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,13 +311,20 @@ pub struct ProjectConfig {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// 需求描述,显示在项目名后的灰色小字。`None` = 不显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub saved_layout: Option<SavedProjectLayout>,
     #[serde(default)]
     pub expanded_dirs: Vec<String>,
-    /// 是否已为该项目启用 SSH MCP（向项目目录写入了 Claude / Codex 的 MCP 注册配置）。
+    /// 是否已为该项目启用 SSH 工具（字段名保留 MCP 以兼容存量配置）。
     #[serde(default)]
     pub ssh_mcp_enabled: bool,
+    /// CLI/daemon 项目能力令牌。随机生成并写入项目 SKILL.md，用于不可伪造地
+    /// 解析该项目的 SSH 连接范围；旧配置缺失时在下次保存「关联 SSH」时迁移。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_cli_token: Option<String>,
     /// 该项目的 agent 可访问的 SSH 连接 id 列表（「关联 SSH」设定的范围）。
     /// `None` = 未设置 → 默认全部连接可见。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +344,9 @@ pub struct ProjectConfig {
     /// 子项目(worktree「设为项目」):有值 = 挂在该项目 id 下渲染,不在 projectTree 里
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_project_id: Option<String>,
+    /// 项目类型徽标覆盖:`None` = 前端自动探测,"none" = 不显示,其余为技术栈 key。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +369,9 @@ fn default_ui_font_size() -> f64 {
 }
 fn default_terminal_font_size() -> f64 {
     14.0
+}
+fn default_terminal_scrollback() -> u32 {
+    10000
 }
 fn default_theme() -> String {
     "auto".into()
@@ -363,6 +431,7 @@ impl Default for AppConfig {
             terminal_log_enabled: false,
             terminal_log_path: None,
             terminal_log_max_size_mb: default_terminal_log_max_size_mb(),
+            terminal_scrollback: default_terminal_scrollback(),
             layout_sizes: None,
             middle_column_sizes: None,
             theme: default_theme(),
@@ -372,6 +441,7 @@ impl Default for AppConfig {
             ai_completion_taskbar_flash: default_ai_completion_taskbar_flash(),
             ai_completion_sound: true,
             ai_completion_sound_path: None,
+            ai_attention_notify: true,
             editors: vec![],
             default_editor: None,
             vscode_path: None,
@@ -385,9 +455,15 @@ impl Default for AppConfig {
             last_active_project_id: None,
             hook_enabled: false,
             smart_copy_paste: false,
+            selection_auto_copy_secs: None,
+            tray_status_enabled: None,
+            tray_max_projects: None,
+            tray_click_focus: None,
+            ai_auto_resume: None,
             ssh_connections: vec![],
             ssh_groups: vec![],
             mobile_relay: None,
+            custom_theme_id: None,
         }
     }
 }
@@ -634,23 +710,132 @@ fn migrate_config(mut config: AppConfig) -> AppConfig {
 }
 
 /// 从磁盘加载并迁移配置。供后端内部调用(例如 editor.rs 读取 vscode_path)。
-pub fn read_config(app: &AppHandle) -> AppConfig {
-    let path = config_path(app);
-    match fs::read_to_string(&path) {
-        Ok(content) => migrate_config(serde_json::from_str(&content).unwrap_or_default()),
-        Err(_) => migrate_config(AppConfig::default()),
+/// 容错版:任何读取/解析失败都回退默认——内部调用方只是取个别字段,
+/// 不会写盘,吞错无害。面向前端的 load_config 走下面的严格版。
+/// 读取并解析配置文件；主文件损坏时尝试上一代备份 .bak 自愈。
+/// `Ok(Some)` = 成功（可能来自备份）；`Ok(None)` = 主文件不存在（首次启动）；
+/// `Err` = 主文件损坏且备份不可用。load_config 与 read_config 共用，
+/// 保证「备份自愈」对前端与后台启动路径(hook/relay)同时生效。
+fn read_config_from(path: &Path) -> Result<Option<AppConfig>, String> {
+    match fs::read_to_string(path) {
+        Ok(content) => match serde_json::from_str(&content) {
+            Ok(parsed) => Ok(Some(migrate_config(parsed))),
+            Err(parse_err) => {
+                let bak = path.with_extension("json.bak");
+                match fs::read_to_string(&bak)
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok())
+                {
+                    Some(parsed) => {
+                        eprintln!(
+                            "[config] config.json 解析失败({}), 已用备份 {} 恢复",
+                            parse_err,
+                            bak.display()
+                        );
+                        Ok(Some(migrate_config(parsed)))
+                    }
+                    None => Err(format!(
+                        "配置文件损坏且备份不可用: {} ({})",
+                        path.display(),
+                        parse_err
+                    )),
+                }
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("配置文件读取失败: {} ({})", path.display(), e)),
     }
 }
 
+pub fn read_config(app: &AppHandle) -> AppConfig {
+    let path = config_path(app);
+    match read_config_from(&path) {
+        Ok(Some(config)) => config,
+        Ok(None) => migrate_config(AppConfig::default()),
+        Err(e) => {
+            // 后台(hook/relay)必须能启动,只在主+备均不可用时才按默认运行;
+            // 写盘由令牌把关,默认配置不会反向污染磁盘
+            eprintln!("[config] {e}; 后台本次按默认配置启动");
+            migrate_config(AppConfig::default())
+        }
+    }
+}
+
+/// 配置写盘令牌:load_config 每成功一次就轮换并把新值发给前端,
+/// save_config 必须携带当前令牌才允许写盘。不变量:**写盘的每一份配置,
+/// 必然派生自当次成功的 load_config**——
+/// - 页面尚未加载完(冷启动组件初始化的防抖保存、HMR 重载后的空白 store):
+///   没有令牌或握着旧页面的过期令牌,保存被拒;
+/// - 磁盘配置损坏导致加载失败:不发令牌,空默认配置永远拿不到写盘资格。
+/// 0 = 从未发放,恒拒绝。
+pub struct ConfigToken(pub std::sync::atomic::AtomicU64);
+
+/// load_config 的返回:配置 + 本次令牌
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedConfig {
+    pub config: AppConfig,
+    pub token: u64,
+}
+
+/// 严格加载:文件不存在 = 首次启动,正常返回默认配置;
+/// 文件存在但读不出/解析失败 = 先尝试用上一代备份 .bak 自愈,
+/// 备份也不行才返回错误——绝不把默认空配置伪装成加载成功
+/// (那会让前端拿着空配置开始运行,下一次保存就把磁盘覆盖了)。
 #[tauri::command]
-pub fn load_config(app: AppHandle) -> AppConfig {
-    read_config(&app)
+pub fn load_config(app: AppHandle) -> Result<LoadedConfig, String> {
+    crate::startup_trace::mark("load_config enter");
+    let path = config_path(&app);
+    let config = match read_config_from(&path)? {
+        Some(config) => config,
+        None => migrate_config(AppConfig::default()),
+    };
+
+    // 加载成功才轮换发放令牌;旧页面(HMR 重载前)的令牌随之作废
+    let token = match app.try_state::<ConfigToken>() {
+        Some(t) => {
+            t.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                .wrapping_add(1)
+        }
+        None => 0,
+    };
+    eprintln!("[config] load_config ok, token={}", token);
+    Ok(LoadedConfig { config, token })
+}
+
+/// save 前是否把现有主文件留作 .bak:仅内容仍可解析时才值得备份,
+/// 损坏的主文件绝不覆盖仍有抢救价值的上一代备份。
+fn should_backup(existing: Option<&str>) -> bool {
+    existing.is_some_and(|c| serde_json::from_str::<AppConfig>(c).is_ok())
 }
 
 #[tauri::command]
-pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
-    let path = config_path(&app);
+pub fn save_config(app: AppHandle, token: u64, config: AppConfig) -> Result<(), String> {
+    let current = app
+        .try_state::<ConfigToken>()
+        .map(|t| t.0.load(std::sync::atomic::Ordering::Acquire))
+        .unwrap_or(0);
+    if token == 0 || token != current {
+        eprintln!(
+            "[config] REJECT save: token {} != current {} (projects={})",
+            token,
+            current,
+            config.projects.len()
+        );
+        return Err("config token stale; reload config before saving".into());
+    }
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    let path = config_path(&app);
+    // 内容没变不写盘,也避免用相同内容覆盖掉仍有抢救价值的 .bak
+    let existing = fs::read_to_string(&path).ok();
+    if existing.as_deref() == Some(json.as_str()) {
+        return Ok(());
+    }
+    // 覆写前留一代备份,任何原因导致配置被写坏都可救回。
+    // 仅当现有主文件仍可解析时才备份——损坏的主文件绝不覆盖仍有抢救价值的 .bak
+    if should_backup(existing.as_deref()) {
+        let _ = fs::copy(&path, path.with_extension("json.bak"));
+    }
     // 原子写,避免写入中途崩溃留下截断的 config.json 导致全部用户配置丢失
     crate::fs::atomic_write(&path, json.as_bytes()).map_err(|e| e.to_string())
 }
@@ -918,6 +1103,7 @@ mod tests {
                                 custom_title: Some("Build".into()),
                                 terminal_encoding: Some("gbk".into()),
                                 cwd: None,
+                                ai_session: None,
                             }],
                         },
                         SavedSplitNode::Leaf {
@@ -927,6 +1113,7 @@ mod tests {
                                 custom_title: None,
                                 terminal_encoding: None,
                                 cwd: None,
+                                ai_session: None,
                             }],
                         },
                     ],
@@ -984,6 +1171,46 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn read_config_from_recovers_from_backup_when_main_corrupted() {
+        let root = unique_test_root("read-bak-recover");
+        let path = root.join("config.json");
+        fs::write(&path, "{ corrupted").unwrap();
+        let valid = serde_json::to_string(&AppConfig {
+            default_shell: "bak-shell".into(),
+            ..AppConfig::default()
+        })
+        .unwrap();
+        fs::write(root.join("config.json.bak"), &valid).unwrap();
+
+        let got = read_config_from(&path).unwrap().unwrap();
+        assert_eq!(got.default_shell, "bak-shell");
+    }
+
+    #[test]
+    fn read_config_from_errors_when_main_and_backup_both_unusable() {
+        let root = unique_test_root("read-bak-none");
+        let path = root.join("config.json");
+        fs::write(&path, "{ corrupted").unwrap();
+        assert!(read_config_from(&path).is_err());
+    }
+
+    #[test]
+    fn read_config_from_none_when_missing() {
+        let root = unique_test_root("read-missing");
+        assert!(read_config_from(&root.join("config.json"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn corrupted_main_never_backed_up() {
+        assert!(!should_backup(Some("{ corrupted")));
+        assert!(!should_backup(None));
+        let valid = serde_json::to_string(&AppConfig::default()).unwrap();
+        assert!(should_backup(Some(&valid)));
     }
 
     #[test]

@@ -14,14 +14,18 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { LigaturesAddon } from '@xterm/addon-ligatures';
 import type { SearchAddon } from '@xterm/addon-search';
 import { activateUnicodeWidth } from './terminalUnicodeWidth';
+import { quantizeCharMeasurement } from './terminalCharMeasure';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { readText, readImage, writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { useAppStore } from '../store';
+import { useAppStore, clearPaneAttentionByPty } from '../store';
 import type { PtyOutputPayload } from '../types';
 import { getResolvedTheme } from './themeManager';
+import { BUILTIN_TERMINAL_THEMES, DARK_TERMINAL_THEME } from './builtinThemes';
+import { getCustomTerminalTheme, isTransparentThemeActive } from './themePackManager';
 import { createPtyWriteQueue } from './ptyWriteQueue';
 import { getCurrentLineSnapshotFromBuffer } from './terminalSnapshot';
+import { DEFAULT_SCROLLBACK, MAX_SCROLLBACK, resolveScrollback } from './terminalScrollback';
 import { resolvePasteTarget, mapPastedFilePath, type PasteTarget } from './pastePath';
 import { t } from '../i18n';
 
@@ -31,13 +35,29 @@ export interface CachedTerminal {
   wrapper: HTMLDivElement;
 }
 
+/** 全角字符的确定性 CJK 回退，追加在任何终端字体栈末尾。
+ *
+ *  少了它，全角标点交给引擎启发式回退，而 DOM 渲染器的网格正确性依赖
+ *  「测量与渲染选中同一字体」：WidthCache 对单字符**孤立**测量，行渲染则按
+ *  **上下文**逐段选字体。实测 WebView2 上两者对全角标点（U+FF0C 等）会选出
+ *  不同结果——孤立测量未落到 CJK 字体（量出半角步进 8.625px），行内渲染跟着
+ *  相邻汉字落到全角字体（14px），letter-spacing 按错误测量补 +7.4px，每个
+ *  全角标点比 WebGL 宽出 6~7px；汉字是 Han script，两种场景必然同一回退，
+ *  所以只有标点出问题。显式列出 CJK 字体后两条路径都走确定的字体匹配，
+ *  不再依赖引擎回退。Chrome / 桌面 Edge 实测无此分歧，但显式栈对其无害。 */
+const CJK_FALLBACK_FONTS = "'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', monospace";
+
 export const DEFAULT_TERMINAL_FONT_FAMILY =
-  "'JetBrainsMono Nerd Font', 'CaskaydiaCove Nerd Font', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace";
+  `'JetBrainsMono Nerd Font', 'CaskaydiaCove Nerd Font', 'JetBrains Mono', 'Cascadia Code', Consolas, ${CJK_FALLBACK_FONTS}`;
 
 export function resolveTerminalFontFamily(value: string | undefined): string {
   const trimmed = value?.trim();
-  return trimmed ? trimmed : DEFAULT_TERMINAL_FONT_FAMILY;
+  // 用户自选字体同样补 CJK 回退；若用户字体自带 CJK（如更纱黑体），
+  // CSS 按先到先得取用户字体，追加项自然失效
+  return trimmed ? `${trimmed}, ${CJK_FALLBACK_FONTS}` : DEFAULT_TERMINAL_FONT_FAMILY;
 }
+
+export { DEFAULT_SCROLLBACK, MAX_SCROLLBACK, resolveScrollback };
 
 interface CachedEntry extends CachedTerminal {
   cleanup: () => void;
@@ -49,171 +69,36 @@ interface CachedEntry extends CachedTerminal {
   searchAddon?: SearchAddon;
 }
 
-export const DARK_TERMINAL_THEME = {
-  background: '#0a0908',
-  foreground: '#d8d4cc',
-  cursor: '#c8805a',
-  cursorAccent: '#0a0908',
-  selectionBackground: '#c8805a30',
-  selectionForeground: '#e5e0d8',
-  black: '#2a2824',
-  red: '#d4605a',
-  green: '#6bb87a',
-  yellow: '#d4a84a',
-  blue: '#6896c8',
-  magenta: '#b08cd4',
-  cyan: '#7dcfb8',
-  white: '#d8d4cc',
-  brightBlack: '#5c5850',
-  brightRed: '#e07060',
-  brightGreen: '#80d090',
-  brightYellow: '#e0b860',
-  brightBlue: '#80aad8',
-  brightMagenta: '#c0a0e0',
-  brightCyan: '#90e0c8',
-  brightWhite: '#e5e0d8',
-};
-
-export const LIGHT_TERMINAL_THEME = {
-  background: '#fafafa',
-  foreground: '#1a1a1a',
-  cursor: '#b06830',
-  cursorAccent: '#fafafa',
-  selectionBackground: '#b0683030',
-  selectionForeground: '#1a1a1a',
-  black: '#1a1a1a',
-  red: '#c0392b',
-  green: '#2d8a46',
-  yellow: '#b08620',
-  blue: '#2860a0',
-  magenta: '#8a5cb8',
-  cyan: '#1a8a6a',
-  white: '#808080',
-  brightBlack: '#666666',
-  brightRed: '#e04030',
-  brightGreen: '#38a058',
-  brightYellow: '#c89830',
-  brightBlue: '#3870b8',
-  brightMagenta: '#a070d0',
-  brightCyan: '#28a080',
-  brightWhite: '#a0a0a0',
-};
-
-export const BLUEPRINT_TERMINAL_THEME = {
-  background: '#060e1c',
-  foreground: '#d9e2ec',
-  cursor: '#22d3ee',
-  cursorAccent: '#060e1c',
-  selectionBackground: 'rgba(34,211,238,0.2)',
-  selectionForeground: '#f8fafc',
-  black: '#0a1628',
-  red: '#ef4444',
-  green: '#22c55e',
-  yellow: '#f97316',
-  blue: '#60a5fa',
-  magenta: '#a78bfa',
-  cyan: '#22d3ee',
-  white: '#e2e8f0',
-  brightBlack: '#1a365d',
-  brightRed: '#f87171',
-  brightGreen: '#4ade80',
-  brightYellow: '#fb923c',
-  brightBlue: '#93c5fd',
-  brightMagenta: '#c4b5fd',
-  brightCyan: '#67e8f9',
-  brightWhite: '#f8fafc',
-};
-
-export const BLUEPRINT_LIGHT_TERMINAL_THEME = {
-  background: '#f5f8fb',
-  foreground: '#0f172a',
-  cursor: '#0e7490',
-  cursorAccent: '#f5f8fb',
-  selectionBackground: 'rgba(14,116,144,0.15)',
-  selectionForeground: '#0f172a',
-  black: '#1e293b',
-  red: '#dc2626',
-  green: '#15803d',
-  yellow: '#c2410c',
-  blue: '#1d4ed8',
-  magenta: '#7c3aed',
-  cyan: '#0e7490',
-  white: '#94a3b8',
-  brightBlack: '#475569',
-  brightRed: '#ef4444',
-  brightGreen: '#22c55e',
-  brightYellow: '#f97316',
-  brightBlue: '#3b82f6',
-  brightMagenta: '#8b5cf6',
-  brightCyan: '#14b8a6',
-  brightWhite: '#64748b',
-};
-
-export const FLUENT2_TERMINAL_THEME = {
-  background: '#15181f',
-  foreground: '#e8e8e8',
-  cursor: '#4cc2ff',
-  cursorAccent: '#15181f',
-  selectionBackground: 'rgba(76,194,255,0.22)',
-  selectionForeground: '#ffffff',
-  black: '#1f1f1f',
-  red: '#f87171',
-  green: '#6ccb5f',
-  yellow: '#fce100',
-  blue: '#4cc2ff',
-  magenta: '#c8a2ff',
-  cyan: '#61d6d6',
-  white: '#e8e8e8',
-  brightBlack: '#767676',
-  brightRed: '#ff9594',
-  brightGreen: '#80e16e',
-  brightYellow: '#ffe555',
-  brightBlue: '#6fcdff',
-  brightMagenta: '#d3b4ff',
-  brightCyan: '#88e0e0',
-  brightWhite: '#ffffff',
-};
-
-export const FLUENT2_LIGHT_TERMINAL_THEME = {
-  background: '#fafbfd',
-  foreground: '#1a1a1a',
-  cursor: '#0067c0',
-  cursorAccent: '#fafbfd',
-  selectionBackground: 'rgba(0,103,192,0.18)',
-  selectionForeground: '#1a1a1a',
-  black: '#1a1a1a',
-  red: '#c42b1c',
-  green: '#107c10',
-  yellow: '#b89500',
-  blue: '#0067c0',
-  magenta: '#8764b8',
-  cyan: '#038387',
-  white: '#767676',
-  brightBlack: '#4a4a4a',
-  brightRed: '#d13438',
-  brightGreen: '#13a10e',
-  brightYellow: '#c19c00',
-  brightBlue: '#3b9eff',
-  brightMagenta: '#b146c2',
-  brightCyan: '#3a96dd',
-  brightWhite: '#ffffff',
-};
+// 6 套内置终端配色已收敛到 builtinThemes.ts（主题描述层），这里保留出口兼容既有导入
+export { DARK_TERMINAL_THEME, LIGHT_TERMINAL_THEME, BLUEPRINT_TERMINAL_THEME, BLUEPRINT_LIGHT_TERMINAL_THEME, FLUENT2_TERMINAL_THEME, FLUENT2_LIGHT_TERMINAL_THEME } from './builtinThemes';
 
 export function getTerminalTheme(terminalFollowTheme: boolean): typeof DARK_TERMINAL_THEME {
   if (!terminalFollowTheme) return DARK_TERMINAL_THEME;
+  // 自定义主题激活时优先返回其推导/声明的终端配色
+  const custom = getCustomTerminalTheme();
+  if (custom) return custom;
   const skin = useAppStore.getState().config.skin;
   if (skin === 'blueprint') {
     return getResolvedTheme() === 'light'
-      ? BLUEPRINT_LIGHT_TERMINAL_THEME
-      : BLUEPRINT_TERMINAL_THEME;
+      ? BUILTIN_TERMINAL_THEMES['blueprint-light']
+      : BUILTIN_TERMINAL_THEMES.blueprint;
   }
   if (skin === 'fluent2') {
     return getResolvedTheme() === 'light'
-      ? FLUENT2_LIGHT_TERMINAL_THEME
-      : FLUENT2_TERMINAL_THEME;
+      ? BUILTIN_TERMINAL_THEMES['fluent2-light']
+      : BUILTIN_TERMINAL_THEMES.fluent2;
   }
-  if (getResolvedTheme() === 'light') return LIGHT_TERMINAL_THEME;
+  if (getResolvedTheme() === 'light') return BUILTIN_TERMINAL_THEMES.light;
   return DARK_TERMINAL_THEME;
+}
+
+/** 终端要不要按背景图皮肤透明化。
+ *
+ *  比 `isTransparentThemeActive()` 多一个「终端跟随主题」的闸：关掉它时终端用的
+ *  是固定的内置 DARK 配色，背景本来就不透明，wrapper 再透明也透不出氛围层 ——
+ *  只剩下白丢 WebGL（透明背景走 DOM 渲染）这一个后果。 */
+function terminalTransparencyActive(): boolean {
+  return (useAppStore.getState().config.terminalFollowTheme ?? true) && isTransparentThemeActive();
 }
 
 const cache = new Map<number, CachedEntry>();
@@ -230,17 +115,70 @@ export function isAiPty(ptyId: number): boolean {
   return aiPtyIds.has(ptyId);
 }
 
+/**
+ * 输出流控。
+ *
+ * xterm 的 `write()` 是异步解析的:数据先进它内部的 WriteBuffer,再按每帧 12ms
+ * 的预算慢慢消化。后端此前以 16ms 为节拍无条件推送,谁也不管前端消化得完消化
+ * 不完 —— 一次 `cat 大文件` / 构建刷屏就能让 WriteBuffer 一路涨到 xterm 自己的
+ * 50MB 上限并**直接抛异常**(`write data discarded, use flow control...`),而在
+ * 抛之前,renderer 已经背着几十 MB 未解析的字符串了。
+ *
+ * 这里按 xterm 官方推荐的方式做闭环:用 write 的完成回调统计「已收到但还没解析
+ * 完」的字节数,越过高水位就让后端暂停投递,回落到低水位再恢复。后端暂停时
+ * 有界 channel 会迅速填满,reader 随之停止从 ConPTY 读,背压一路传导到刷屏的
+ * 进程本身 —— 和真实终端一样,慢终端会拖慢 `cat`,而不是把数据全缓存下来。
+ */
+const FLOW_HIGH_WATER = 4 * 1024 * 1024;
+const FLOW_LOW_WATER = 1 * 1024 * 1024;
+
+/** ptyId → 已 write 但回调尚未触发的字符数 */
+const pendingWriteBytes = new Map<number, number>();
+/** 当前已请求后端暂停的 pty(去重,避免每条输出都发一次 IPC) */
+const flowPausedPtys = new Set<number>();
+
+function setFlowPaused(ptyId: number, paused: boolean): void {
+  if (paused === flowPausedPtys.has(ptyId)) return;
+  if (paused) flowPausedPtys.add(ptyId);
+  else flowPausedPtys.delete(ptyId);
+  // 失败不回滚状态:后端有 MAX_FLOW_PAUSE 超时兜底,不会把 shell 永久卡住
+  void invoke('set_pty_flow_paused', { ptyId, paused }).catch(() => {});
+}
+
+function releasePending(ptyId: number, len: number): void {
+  const left = (pendingWriteBytes.get(ptyId) ?? 0) - len;
+  if (left > 0) pendingWriteBytes.set(ptyId, left);
+  else pendingWriteBytes.delete(ptyId);
+  if (left <= FLOW_LOW_WATER) setFlowPaused(ptyId, false);
+}
+
+/** 关 pane 时清掉流控簿记,并确保后端不会留着一个永远等不到 resume 的暂停标记 */
+function clearFlowState(ptyId: number): void {
+  pendingWriteBytes.delete(ptyId);
+  if (flowPausedPtys.has(ptyId)) setFlowPaused(ptyId, false);
+}
+
 let globalPtyListenerInit = false;
 function ensureGlobalPtyOutputListener() {
   if (globalPtyListenerInit) return;
   globalPtyListenerInit = true;
   void listen<PtyOutputPayload>('pty-output', (event) => {
-    const entry = cache.get(event.payload.ptyId);
+    const { ptyId, data } = event.payload;
+    const entry = cache.get(ptyId);
     if (!entry) return;
+
+    const pending = (pendingWriteBytes.get(ptyId) ?? 0) + data.length;
+    pendingWriteBytes.set(ptyId, pending);
+    if (pending >= FLOW_HIGH_WATER) setFlowPaused(ptyId, true);
+
     try {
-      entry.term.write(event.payload.data);
+      entry.term.write(data, () => releasePending(ptyId, data.length));
     } catch (error) {
-      logTerminalRuntimeError('pty-output write failed', error);
+      // xterm 的 WriteBuffer 越过 50MB 会 throw。此处不接住的话异常会逃进
+      // Tauri 的事件回调里(既救不回这段数据,又污染后续分发);而且回调永远
+      // 不会触发,计数器会卡在高位让该 pane 永久暂停。手动扣回并记一笔。
+      releasePending(ptyId, data.length);
+      console.error(`[pty ${ptyId}] 终端写入被丢弃(前端积压过多)`, error);
     }
   }).catch((error) => logTerminalRuntimeError('pty-output listener failed', error));
 }
@@ -321,8 +259,10 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
   wrapper.style.height = '100%';
 
   const theme = getTerminalTheme(useAppStore.getState().config.terminalFollowTheme ?? true);
-  // 预设背景色，防止首帧渲染前闪屏；始终跟随系统主题 CSS 变量
-  wrapper.style.backgroundColor = 'var(--bg-terminal)';
+  // 预设背景色，防止首帧渲染前闪屏；始终跟随系统主题 CSS 变量。
+  // 背景图主题下 wrapper 透明——着色已由 TerminalArea 容器的 --bg-terminal 承担，
+  // 再画一层会叠乘不透明度把背景图盖没
+  wrapper.style.backgroundColor = terminalTransparencyActive() ? 'transparent' : 'var(--bg-terminal)';
 
   const term = new Terminal({
     fontSize: useAppStore.getState().config.terminalFontSize ?? 14,
@@ -332,7 +272,7 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
     cursorBlink: true,
     cursorStyle: 'bar',
     cursorWidth: 2,
-    scrollback: 100000,
+    scrollback: resolveScrollback(useAppStore.getState().config.terminalScrollback),
     letterSpacing: 0,
     lineHeight: 1.35,
     theme,
@@ -342,6 +282,8 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
     // LigaturesAddon 内部用 registerCharacterJoiner（xterm.js proposed API），
     // 不开启 allowProposedApi 加载 addon 会抛 "You must set the allowProposedApi option to true"。
     allowProposedApi: true,
+    // 背景图主题激活时终端背景半透明，透出 #root 的氛围背景图（Phase 2）
+    allowTransparency: terminalTransparencyActive(),
   });
 
   const fitAddon = new FitAddon();
@@ -353,6 +295,10 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
   activateUnicodeWidth(term);
 
   term.open(wrapper);
+
+  // 字符宽度量化到整设备像素：让透明主题下的 DOM 渲染与 WebGL 格宽一致
+  // （WebGL floor / DOM 不 floor 的上游差异），详见 terminalCharMeasure.ts。
+  quantizeCharMeasurement(term);
 
   // 这里曾拦截 alternate screen 切换(DECSET/DECRST 47/1047/1049),把 TUI 输出摁在
   // 主缓冲区以保住 scrollback。前提"TUI 的清屏/重绘仅影响可视区域"只在一帧不高于
@@ -424,6 +370,13 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
     }
   });
 
+  // 用户真实按键 = 正在处理待确认事项,熄灭托盘黄灯。
+  // 挂 onKey 而非 onData:onData 还承载 TUI 查询的自动应答(光标位置/颜色
+  // 能力等)与鼠标序列,授权框弹出瞬间就会被这类"伪输入"误清(黄灯闪一下就没)
+  const onKeyDisp = term.onKey(() => {
+    clearPaneAttentionByPty(ptyId);
+  });
+
   // 终端 resize → 同步到 PTY
   const onResizeDisp = term.onResize(({ cols, rows }) => {
     resizePtySafely(ptyId, cols, rows);
@@ -434,6 +387,7 @@ export function getOrCreateTerminal(ptyId: number): CachedTerminal {
 
   const cleanup = () => {
     onDataDisp.dispose();
+    onKeyDisp.dispose();
     onResizeDisp.dispose();
     term.dispose();
   };
@@ -601,6 +555,9 @@ export function activateWebgl(ptyId: number): void {
   const entry = cache.get(ptyId);
   if (!entry || entry.webglLoaded) return;
   loadLigaturesIfEnabled(entry);
+  // WebGL 渲染器不支持透明背景(xterm 上游限制,canvas 会画满不透明底色):
+  // 背景图主题激活时留在 DOM 渲染,切回不透明主题由 updateAllTerminalThemes 恢复
+  if (terminalTransparencyActive()) return;
   loadWebgl(entry);
 }
 
@@ -641,6 +598,7 @@ export function disposeTerminal(ptyId: number): void {
   if (!entry) return;
   cache.delete(ptyId);
   aiPtyIds.delete(ptyId);
+  clearFlowState(ptyId);
   clearMarkerInstances(ptyId);
   entry.wrapper.remove();
   try {
@@ -700,8 +658,38 @@ export function clearMarkerInstances(ptyId: number): void {
 
 export function updateAllTerminalThemes(terminalFollowTheme: boolean): void {
   const theme = getTerminalTheme(terminalFollowTheme);
+  // 用传入的开关而不是 store 现值：调用方可能正拿着一个刚改还没落进 store 的值
+  const transparent = terminalFollowTheme && isTransparentThemeActive();
   for (const entry of cache.values()) {
+    // 个别 xterm 版本不允许运行时改 allowTransparency，失败只影响背景透出
+    // （新建终端仍会按正确值构造），不阻塞换主题
+    if (entry.term.options.allowTransparency !== transparent) {
+      try {
+        entry.term.options.allowTransparency = transparent;
+      } catch (e) {
+        console.warn('切换终端透明模式失败（仅影响背景透出）:', e);
+      }
+    }
+    // WebGL 渲染器不支持透明背景(canvas 画满不透明底色,直接盖住背景图):
+    // 透明主题下卸掉 WebGL 退回 DOM 渲染,切回不透明主题时对已挂载终端恢复
+    if (transparent && entry.webglLoaded) {
+      disposeWebgl(entry);
+    } else if (!transparent && !entry.webglLoaded && entry.wrapper.isConnected) {
+      loadLigaturesIfEnabled(entry);
+      loadWebgl(entry);
+    }
+    entry.wrapper.style.backgroundColor = transparent ? 'transparent' : 'var(--bg-terminal)';
     entry.term.options.theme = theme;
+    refreshTerminalViewport(entry.term);
+  }
+}
+
+/** 改设置后对已开的终端生效。调小时 xterm 会当场裁掉超出的历史并释放内存,
+ *  不必等重启 —— 这正是内存吃紧时用户最需要的那个即时效果。 */
+export function updateAllTerminalScrollback(value: number | undefined): void {
+  const scrollback = resolveScrollback(value);
+  for (const entry of cache.values()) {
+    entry.term.options.scrollback = scrollback;
   }
 }
 

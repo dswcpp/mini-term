@@ -1,20 +1,27 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ask, message } from '@tauri-apps/plugin-dialog';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
-import { useAppStore, isExpanded, toggleExpandedDir } from '../store';
+import { useAppStore, isExpanded, toggleExpandedDir, saveConfigToDisk } from '../store';
 import { useTauriEvent } from '../hooks/useTauriEvent';
+import { useOverlayValue } from '../hooks/useOverlayMotion';
 import { showContextMenu } from '../utils/contextMenu';
 import { showPrompt } from '../utils/prompt';
 import { isAiPty } from '../utils/terminalCache';
 import { MOD_LABEL } from '../utils/platform';
 import { DiffModal } from './DiffModal';
-import { FileViewerModal } from './FileViewerModal';
 import { getFileDragPath, initFileDrag, isFileDragging } from '../utils/fileDragState';
 import { getFileTreeCache, setFileTreeCache, projectCacheKey } from '../utils/projectDataCache';
+import { resolveFileIcon } from '../utils/fileIcon';
+import { useFileIcons } from '../hooks/useFileIcons';
+import { ensureDirKinds, getDirKind, useDirKindsVersion } from '../hooks/useProjectKinds';
+import { TechIcon } from './TechIcon';
 import { useT } from '../i18n';
 import type { FileEntry, FsChangePayload, GitFileStatus, PtyOutputPayload, VcsFileStatus } from '../types';
+
+// 懒加载：FileViewerModal 连带 CodeMirror + react-markdown（数百 KB），首次预览文件才拉 chunk
+const FileViewerModal = lazy(() => import('./FileViewerModal').then((m) => ({ default: m.FileViewerModal })));
 
 interface TreeNodeProps {
   entry: FileEntry;
@@ -89,6 +96,44 @@ function dispatchFileTreeRefresh(): void {
   window.dispatchEvent(new CustomEvent('file-tree-refresh'));
 }
 
+/**
+ * 单链目录汇总(IDE 的 compact middle packages):目录一路只有唯一子目录、
+ * 没有文件时,折叠成一行 `main/java/com/…`,path 指向链尾真实目录 ——
+ * 右键/展开都落在链尾,语义自洽。链上各段路径记入 chainPaths:展开时每段
+ * 都注册 watch(后端 NonRecursive),外部往中段塞文件也能收到 fs-change,
+ * 由持有该 entry 的上级重列并重新压缩。仅本地(远程 SFTP 逐级往返太贵,
+ * 调用方跳过);链中途遇到 ignored 目录即停。
+ */
+async function compactDirChains(entries: FileEntry[], projectRoot: string): Promise<FileEntry[]> {
+  return Promise.all(
+    entries.map(async (e) => {
+      if (!e.isDir || e.ignored) return e;
+      let name = e.name;
+      let path = e.path;
+      const chain = [e.path];
+      for (;;) {
+        // 链深上限:每深一层多一次串行 list_directory IPC(后端还要跑 gitignore
+        // 匹配),8 层已覆盖 Java 式深包名;更深的异常结构按普通目录展示
+        if (chain.length >= 8) break;
+        let kids: FileEntry[];
+        try {
+          kids = await invoke<FileEntry[]>('list_directory', { projectRoot, path });
+        } catch {
+          break;
+        }
+        if (kids.length === 1 && kids[0].isDir && !kids[0].ignored) {
+          name = `${name}/${kids[0].name}`;
+          path = kids[0].path;
+          chain.push(path);
+        } else {
+          break;
+        }
+      }
+      return name === e.name ? e : { ...e, name, path, chainPaths: chain };
+    }),
+  );
+}
+
 function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewFile, remoteConnectionId }: TreeNodeProps) {
   const t = useT();
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -122,7 +167,7 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
       projectRoot,
       path: entry.path,
     });
-    setChildren(entries);
+    setChildren(await compactDirChains(entries, projectRoot));
   }, [entry.path, projectRoot, remoteConnectionId]);
 
   const clearAutoExpandTimer = useCallback(() => {
@@ -143,14 +188,23 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
   // 目录监听生命周期:展开时注册 watcher,折叠 / 组件卸载 / 路径变化时自动注销。
   // 旧实现只在手动折叠当前节点时 unwatch,父级折叠或切换项目导致后代节点直接 unmount
   // 时其 watcher 永不释放,会持续累积 OS 文件监听句柄(inotify / ReadDirectoryChangesW)。
+  // 压缩链 entry 对链上每段都注册(watchKey 序列化链路径,链未变不重注册),
+  // 且折叠时也保持注册:后端 watcher 是 NonRecursive,折叠链的中段(a/b/c 的 b)
+  // 新增文件否则无人上报;fs-change 由展开的上级 startsWith 匹配重列并重新压缩
+  const watchKey = (entry.chainPaths ?? [entry.path]).join('\n');
+  const watchActive = expanded || entry.chainPaths !== undefined;
   useEffect(() => {
-    // 远程项目不做 notify 监听(SFTP 无监听通道);展开重拉 + 树顶手动刷新代替
-    if (!entry.isDir || !expanded || remoteConnectionId) return;
-    invoke('watch_directory', { path: entry.path, projectPath: projectRoot }).catch(() => {});
+    if (!entry.isDir || !watchActive || remoteConnectionId) return;
+    const paths = watchKey.split('\n');
+    for (const p of paths) {
+      invoke('watch_directory', { path: p, projectPath: projectRoot }).catch(() => {});
+    }
     return () => {
-      invoke('unwatch_directory', { path: entry.path }).catch(() => {});
+      for (const p of paths) {
+        invoke('unwatch_directory', { path: p }).catch(() => {});
+      }
     };
-  }, [expanded, entry.isDir, entry.path, projectRoot, remoteConnectionId]);
+  }, [watchActive, entry.isDir, watchKey, projectRoot, remoteConnectionId]);
 
   useEffect(() => {
     return () => clearAutoExpandTimer();
@@ -178,6 +232,9 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
       toggleExpandedDir(activeProjectId, entry.path, next);
     }
   }, [entry, expanded, loadingChildren, loadChildren, onViewFile, activeProjectId, remoteConnectionId]);
+
+  // 子工程识别只做第一级(根目录直接子目录):更深层的目录不再按工程显示,
+  // 树里层层技术栈图标反而喧宾夺主。探测由 FileTree 根组件统一触发。
 
   useTauriEvent<FsChangePayload>('fs-change', useCallback((payload: FsChangePayload) => {
     if (remoteConnectionId) return; // 远程项目无 watcher,fs-change 与本树无关
@@ -402,7 +459,22 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
             </span>
           )
         )}
-        {!entry.isDir && <span className="w-3 text-center text-[var(--text-muted)] text-xs">·</span>}
+        {(() => {
+          // 类型图标(baybreezy 懒加载):就绪前回退原有符号 —— 目录无图标、文件用 ·。
+          // gitignore 的置灰走父级 opacity,对 <img> 同样生效。
+          // 第一级目录若被识别为子工程(pom.xml/Cargo.toml/…),优先显示技术栈图标
+          if (entry.isDir && depth === 0 && !remoteConnectionId && !entry.ignored) {
+            const dirKind = getDirKind(entry.path);
+            if (dirKind) {
+              return <TechIcon kind={dirKind} size={14} className="flex-shrink-0" />;
+            }
+          }
+          const iconSrc = resolveFileIcon(entry.name, entry.isDir, entry.isDir && expanded);
+          if (iconSrc) {
+            return <img src={iconSrc} className="mt-icon mt-icon-file w-3.5 h-3.5 flex-shrink-0" alt="" aria-hidden draggable={false} />;
+          }
+          return entry.isDir ? null : <span className="w-3 text-center text-[var(--text-muted)] text-xs">·</span>;
+        })()}
         <span className="truncate" title={entry.name}>{entry.name}</span>
         {(() => {
           const rel = getRelativePath(entry.path, projectRoot).replace(/\\/g, '/');
@@ -468,6 +540,10 @@ function TreeNode({ entry, projectRoot, depth, gitStatusMap, onViewDiff, onViewF
 
 export function FileTree() {
   const t = useT();
+  // 触发文件类型图标懒加载,就绪时重渲染整树(TreeNode 未 memo,根重渲染即级联)
+  useFileIcons();
+  // 目录工程类型探测完成后重渲染,子工程文件夹换上技术栈图标
+  useDirKindsVersion();
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const config = useAppStore((s) => s.config);
   const setSearchModalOpen = useAppStore((s) => s.setSearchModalOpen);
@@ -506,7 +582,7 @@ export function FileTree() {
   const handleSwitchAndOpen = useCallback((editorName: string) => {
     const newConfig = { ...config, defaultEditor: editorName };
     useAppStore.getState().setConfig(newConfig);
-    invoke('save_config', { config: newConfig });
+    saveConfigToDisk(newConfig);
     handleOpenInEditor(editorName);
   }, [config, handleOpenInEditor]);
 
@@ -521,11 +597,19 @@ export function FileTree() {
   const [diffTarget, setDiffTarget] = useState<GitFileStatus | null>(null);
   const [viewFilePath, setViewFilePath] = useState<string | null>(null);
   const [rootMoveDropActive, setRootMoveDropActive] = useState(false);
+  const [viewFile, viewFileOpen] = useOverlayValue(viewFilePath);
+  const [diffFile, diffOpen] = useOverlayValue(diffTarget);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rootEntriesRef = useRef(rootEntries);
   rootEntriesRef.current = rootEntries;
   const gitStatusMapRef = useRef(gitStatusMap);
   gitStatusMapRef.current = gitStatusMap;
+
+  // 根目录一级子目录的子工程探测:不必展开就能在树里看到技术栈图标
+  useEffect(() => {
+    if (isRemote) return;
+    ensureDirKinds(rootEntries.filter((e) => e.isDir && !e.ignored).map((e) => e.path));
+  }, [rootEntries, isRemote]);
 
   const loadVcsStatus = useCallback(() => {
     if (!project || isRemote) return; // 远程项目跳过 VCS 状态(远程 VCS 二期)
@@ -571,13 +655,15 @@ export function FileTree() {
           projectRoot: projectPath,
           path: projectPath,
         });
-    listPromise.then((entries) => {
-      setRootEntries(entries);
-      rootEntriesRef.current = entries;
+    listPromise.then(async (entries) => {
+      // 本地做单链目录汇总;远程逐级 SFTP 往返太贵,保持原样
+      const finalEntries = remoteConnectionId ? entries : await compactDirChains(entries, projectPath);
+      setRootEntries(finalEntries);
+      rootEntriesRef.current = finalEntries;
       setLoading(false);
       setLoadError(null);
       setFileTreeCache(projectCacheKey(project), {
-        rootEntries: entries,
+        rootEntries: finalEntries,
         gitStatusMap: gitStatusMapRef.current,
       });
     }).catch((err) => {
@@ -640,7 +726,9 @@ export function FileTree() {
 
     const listPromise = invoke<FileEntry[]>('list_directory', { projectRoot: projectPath, path: projectPath });
     const statusPromise = invoke<VcsFileStatus[]>('get_vcs_status', { projectPath }).catch(() => [] as VcsFileStatus[]);
-    Promise.all([listPromise, statusPromise]).then(([entries, statuses]) => {
+    Promise.all([listPromise, statusPromise]).then(async ([rawEntries, statuses]) => {
+      if (cancelled) return;
+      const entries = await compactDirChains(rawEntries, projectPath);
       if (cancelled) return;
       const map = new Map<string, GitFileStatus>();
       for (const s of statuses) map.set(s.path, s);
@@ -677,7 +765,18 @@ export function FileTree() {
     const rest = changed.slice(root.length + 1);
     if (!rest.includes('/')) {
       loadRootEntries();
+      return;
     }
+    // 根级压缩链的非链尾段出现直接子项 → 压缩前提破坏(单链多出兄弟),
+    // 重列根目录以重新压缩;链尾子树的变化由链节点自身的 fs-change 处理
+    const midChainHit = rootEntriesRef.current.some((e) =>
+      e.chainPaths?.some((p, i, arr) => {
+        if (i === arr.length - 1) return false;
+        const np = normalize(p);
+        return changed.startsWith(np + '/') && !changed.slice(np.length + 1).includes('/');
+      }),
+    );
+    if (midChainHit) loadRootEntries();
   }, [project?.path, isRemote, loadRootEntries]));
 
   useEffect(() => {
@@ -783,7 +882,7 @@ export function FileTree() {
   }
 
   return (
-    <div data-panel className="h-full bg-[var(--bg-surface)] flex flex-col border-l border-[var(--border-subtle)] select-none">
+    <div data-panel data-mt-part="filetree" className="h-full bg-[var(--bg-surface)] flex flex-col border-l border-[var(--border-subtle)] select-none">
       <div data-panel-header className="px-3 pt-3 pb-1.5 flex items-center justify-between gap-2 flex-shrink-0">
         <span className="text-sm text-[var(--text-muted)] uppercase tracking-[0.12em] font-medium truncate">
           {t('panels.filesOf', { project: project.name })}
@@ -910,21 +1009,24 @@ export function FileTree() {
           </>
         )}
       </div>
-      {viewFilePath && project && (
-        <FileViewerModal
-          open={!!viewFilePath}
-          onClose={() => setViewFilePath(null)}
-          filePath={viewFilePath}
-          projectRoot={project.path}
-        />
+      {/* 两个弹窗的数据源置空后都再多留一会儿（useOverlayValue），退场动画才播得完 */}
+      {viewFile && project && (
+        <Suspense fallback={null}>
+          <FileViewerModal
+            open={viewFileOpen}
+            onClose={() => setViewFilePath(null)}
+            filePath={viewFile}
+            projectRoot={project.path}
+          />
+        </Suspense>
       )}
-      {diffTarget && (
+      {diffFile && (
         <DiffModal
-          open={!!diffTarget}
+          open={diffOpen}
           onClose={() => setDiffTarget(null)}
           projectPath={project.path}
-          status={diffTarget}
-          vcsKind={diffTarget.vcsKind}
+          status={diffFile}
+          vcsKind={diffFile.vcsKind}
         />
       )}
     </div>

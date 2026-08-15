@@ -1,13 +1,22 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
-import { saveLayoutToConfig, useAppStore } from '../store';
+import {
+  useAppStore,
+  clearPaneResumePendingByPty,
+  setPaneAiSessionByPty,
+  saveLayoutToConfig,
+} from '../store';
 import { TerminalInstance } from './TerminalInstance';
 import { StatusDot } from './StatusDot';
+import { BrandIcon } from './BrandIcon';
 import { MarkerList } from './MarkerList';
+import { PaneTabPreview } from './PaneTabPreview';
 import { showContextMenu } from '../utils/contextMenu';
-import { disposeTerminal } from '../utils/terminalCache';
-import { createProjectPty, isRemoteProject, remotePaneLabel } from '../utils/remoteProject';
+import { inferVendor } from '../utils/inferVendor';
+import { paneShowsAiSession, resolveAutoResumeCommand } from '../utils/aiResume';
+import { disposeTerminal, writePtyInput } from '../utils/terminalCache';
+import { createProjectPty, isRemoteProject, paneDisplayLabel } from '../utils/remoteProject';
 import { findPaneById, updateLeafOfPane } from '../utils/layoutOps';
 import {
   activatePane,
@@ -80,11 +89,12 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
   const activePane = node.panes.find((p) => p.id === node.activePaneId) ?? node.panes[0];
 
   // SSH 远程项目:所有 pane 统一按远程方式启动(布局恢复亦然);
-  // pane 显示名用连接名(恢复布局时 shellName 会被映射为本地 shell 名,不可信)。
+  // pane 显示名走 paneDisplayLabel 统一口径(恢复布局时 shellName 会被映射为本地 shell 名,不可信)。
   const project = config.projects.find((p) => p.id === projectId);
   const remote = isRemoteProject(project);
-  const remoteLabel = project && remote ? remotePaneLabel(project) : undefined;
-  const paneLabel = (pane: PaneState) => pane.customTitle || (remote ? remoteLabel! : pane.shellName);
+  const paneLabel = (pane: PaneState) => paneDisplayLabel(pane, project);
+  // 缺省开启;既决定起 PTY 时写不写 resume,也决定待续接的 pane 亮不亮 AI 图标
+  const autoResumeEnabled = config.aiAutoResume ?? true;
 
   useEffect(() => {
     if (!activePane || activePane.ptyId !== undefined || activePane.status === 'error') return;
@@ -106,14 +116,81 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
       activePane.terminalEncoding ?? config.terminalEncoding,
     );
     hydratingPaneIds.add(activePane.id);
+    // 续接会话时 PTY 直接以会话记录的 cwd 启动:claude --resume 只认「启动目录」
+    // 对应的会话桶,起于子目录的会话在项目根恢复会报 No conversation found。
+    // 存量记录无 cwd 时向后端反查 jsonl(lookup_ai_session_cwd),查到随身份写回
+    // 持久化,下次重启免查;codex 会话不按目录分桶,无需反查。
+    //
+    // 与 resolveAutoResumeCommand 消费同一个 enabled:resumePending 在开关关闭时
+    // 是**刻意保留**的(见 aiResume.ts),只看它会让关掉自动续接的用户拿到「不写
+    // resume 命令、shell 却开在会话子目录里」的割裂结果。开关同样取现值而非
+    // autoResumeEnabled 快照(config 不在 effect deps 里,理由见下方 resumeCmd 处)。
+    const sessionRef =
+      (useAppStore.getState().config.aiAutoResume ?? true) && activePane.resumePending
+        ? activePane.aiSession
+        : undefined;
+    const resolveResumeCwd = async (): Promise<string | undefined> => {
+      if (remote || !sessionRef) return undefined;
+      if (sessionRef.cwd) return sessionRef.cwd;
+      if (sessionRef.agent === 'codex') return undefined;
+      if (!/^[A-Za-z0-9_-]+$/.test(sessionRef.sessionId)) return undefined;
+      const found = await invoke<string | null>('lookup_ai_session_cwd', {
+        sessionId: sessionRef.sessionId,
+      }).catch(() => null);
+      return found ?? undefined;
+    };
+    let resumeCwd: string | undefined;
     // 远程分支:create_pty 带 sshRemote,后端直接 spawn ssh 并预注册密码 autofill;
     // 本地分支:行为与既有链路一致(shell + cwd + envVars),pane 的 cwd 覆盖优先(worktree 终端)。
-    createProjectPty(project, shell, activePane.cwd, encoding)
+    resolveResumeCwd()
+      .then((cwd) => {
+        resumeCwd = cwd;
+        // pane 自己的 cwd 优先:那是用户显式给这个 pane 定的目录(worktree 终端
+        // 靠它),会话 cwd 只在 pane 没指定时兜底。反过来写会让续接把 worktree
+        // 终端带偏到会话记录的目录去。
+        const startCwd = activePane.cwd ?? cwd;
+        if (startCwd === undefined || startCwd === activePane.cwd) {
+          return createProjectPty(project, shell, startCwd, encoding);
+        }
+        // 会话 cwd 是持久化下来的旧值,目录可能在这期间没了(worktree 移除、
+        // 项目搬家)。那本是「续接得更准」的优化,不该把 pane 拖成 error ——
+        // 失败就退回项目默认目录重来一次,大不了 resume 找不到会话桶。
+        return createProjectPty(project, shell, startCwd, encoding).catch((e) => {
+          console.warn(`以会话目录 ${startCwd} 启动失败，回落项目默认目录:`, e);
+          resumeCwd = undefined;
+          return createProjectPty(project, shell, activePane.cwd, encoding);
+        });
+      })
       .then((ptyId) => {
         const layout = useAppStore.getState().projectStates.get(projectId)?.layout;
         const pane = layout ? findPaneById(layout, activePane.id) : null;
         if (pane && pane.ptyId === undefined) {
           setPanePty(projectId, activePane.id, ptyId);
+          // 恢复的布局带待续接标记 → 写 resume 命令续接上次会话(否决条件见
+          // resolveAutoResumeCommand:系统设置开关 / 待续接标记 / 远程 pane / id 白名单)。
+          // PTY 内核缓冲 stdin,shell 就绪前写入不丢(与移动端发起会话同一时序)。
+          // 只清 resumePending 标记、**保留 aiSession 身份**:codex resume 不会
+          // 重新上报 SessionStart,若写完把身份也清掉,第二次重启就断代恢复不了;
+          // claude 会上报新身份自然覆盖旧值。会话身份取 effect 闭包快照,
+          // 规避 monitor 在 create 与 write 之间发 idle 把身份抹掉的竞态。
+          const resumeCmd = resolveAutoResumeCommand({
+            // 开关取现值而非 autoResumeEnabled:config 不在 effect deps 里,
+            // 闭包快照可能已过期(用户在起 PTY 期间刚改了设置)
+            enabled: useAppStore.getState().config.aiAutoResume ?? true,
+            resumePending: pane.resumePending,
+            session: activePane.aiSession,
+            remote,
+          });
+          if (resumeCmd) {
+            clearPaneResumePendingByPty(ptyId);
+            void writePtyInput(ptyId, `${resumeCmd}\r`);
+            // 反查所得的启动目录随身份写回并持久化,下次重启直达不再查
+            const session = activePane.aiSession;
+            if (resumeCwd && session && session.cwd !== resumeCwd) {
+              setPaneAiSessionByPty(ptyId, { ...session, cwd: resumeCwd });
+              saveLayoutToConfig(projectId);
+            }
+          }
           setSpawnErrors((prev) => {
             if (!(activePane.id in prev)) return prev;
             const next = { ...prev };
@@ -141,6 +218,8 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
     activePane?.status,
     activePane?.cwd,
     activePane?.terminalEncoding,
+    activePane?.aiSession,
+    activePane?.resumePending,
     config.availableShells,
     config.defaultShell,
     config.terminalEncoding,
@@ -155,7 +234,7 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
   const handleNewTabClick = useCallback((e: React.MouseEvent) => {
     // 远程项目不弹 shell 菜单:pane 固定为 ssh 启动器
     if (remote || config.availableShells.length <= 1) {
-      void newTerminal(projectId);
+      void newTerminal(projectId, undefined, { targetPaneId: activePane?.id });
       return;
     }
     showContextMenu(
@@ -163,10 +242,55 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
       e.clientY,
       config.availableShells.map((shell) => ({
         label: shell.name,
-        onClick: () => void newTerminal(projectId, shell),
+        onClick: () => void newTerminal(projectId, shell, { targetPaneId: activePane?.id }),
       })),
     );
-  }, [remote, config.availableShells, projectId]);
+  }, [remote, config.availableShells, projectId, activePane?.id]);
+
+  // === 非激活 tab 悬停缩略图:250ms 后弹出,移出/点击/滚动即关(时序同项目行预览) ===
+  const [tabPreview, setTabPreview] = useState<{
+    paneId: string;
+    rect: { left: number; top: number; bottom: number };
+  } | null>(null);
+  const tabPreviewTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  const closeTabPreview = useCallback(() => {
+    clearTimeout(tabPreviewTimer.current);
+    setTabPreview(null);
+  }, []);
+
+  const handleTabPreviewEnter = useCallback((e: React.MouseEvent, paneId: string) => {
+    clearTimeout(tabPreviewTimer.current);
+    // currentTarget 只在事件分发期间有效,先留住 DOM 引用;rect 到点弹时再取
+    const el = e.currentTarget as HTMLElement;
+    tabPreviewTimer.current = setTimeout(() => {
+      if (!el.isConnected) return;
+      const r = el.getBoundingClientRect();
+      setTabPreview({ paneId, rect: { left: r.left, top: r.top, bottom: r.bottom } });
+    }, 250);
+  }, []);
+
+  useEffect(() => () => clearTimeout(tabPreviewTimer.current), []);
+
+  // 渲染 gate 之外把 state 也收掉(与 ProjectList 同一双闸模式):用 X 关掉被
+  // 悬停的 tab 时点击被 stopPropagation 拦下,closeTabPreview 不触发,旧锚点
+  // 会一直残留到下次悬停
+  useEffect(() => {
+    if (!tabPreview) return;
+    const pane = node.panes.find((p) => p.id === tabPreview.paneId);
+    if (!pane || pane.id === activePane?.id) closeTabPreview();
+  }, [tabPreview, node.panes, activePane?.id, closeTabPreview]);
+
+  // tab 栏可横向滚动,布局变化时锚点失效,直接关闭
+  useEffect(() => {
+    if (!tabPreview) return;
+    window.addEventListener('scroll', closeTabPreview, true);
+    window.addEventListener('wheel', closeTabPreview, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', closeTabPreview, true);
+      window.removeEventListener('wheel', closeTabPreview);
+    };
+  }, [tabPreview, closeTabPreview]);
 
   const [markerOpen, setMarkerOpen] = useState(false);
   const [markerAnchor, setMarkerAnchor] = useState<{ top: number; right: number } | null>(null);
@@ -296,7 +420,9 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
     'w-6 h-6 flex items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-muted)] opacity-60 hover:opacity-100 hover:text-[var(--accent)] hover:bg-[var(--border-subtle)] transition-all';
 
   return (
-    <div className="w-full h-full flex flex-col" data-pty-id={activePane.ptyId}>
+    // pane-enter：新分出来的格子淡入并放大到位。项目切到后台是 display:none
+    // 留着不卸载，不会重播；只有真正新建/重排分屏时这层才重挂载
+    <div className="w-full h-full flex flex-col pane-enter" data-pty-id={activePane.ptyId}>
       {/* Tab bar */}
       <div
         data-panel-header
@@ -306,6 +432,10 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
       >
         {node.panes.map((pane) => {
           const isActive = pane.id === activePane.id;
+          // 会话跑的是哪家 AI 就亮哪家品牌图标:hook 上报的 agent 权威,
+          // 输入检测的 detectedAgent 兜底;亮不亮的判定见 paneShowsAiSession
+          // (含重启后待续接、尚未激活恢复的 pane —— 图标不该等切过去才出现)
+          const aiActive = paneShowsAiSession(pane, autoResumeEnabled);
           return (
             <div
               key={pane.id}
@@ -321,20 +451,41 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
                   ? 'bg-[var(--bg-terminal)] text-[var(--text-primary)]'
                   : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--border-subtle)]'
               }`}
-              onClick={() => activatePane(projectId, pane.id)}
+              onClick={() => {
+                closeTabPreview();
+                activatePane(projectId, pane.id);
+              }}
               onDoubleClick={() => void renamePane(projectId, pane.id)}
+              onMouseEnter={(e) => {
+                // 激活 tab 的画面就在眼前,只有隐藏 tab 需要预览
+                if (!isActive) handleTabPreviewEnter(e, pane.id);
+              }}
+              onMouseLeave={closeTabPreview}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
                   activatePane(projectId, pane.id);
                 }
               }}
-              onContextMenu={(e) => paneContextMenu(e, pane.id)}
+              onContextMenu={(e) => {
+                closeTabPreview();
+                paneContextMenu(e, pane.id);
+              }}
             >
-              {isActive && (
-                <span className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full bg-[var(--accent)]" />
-              )}
+              {/* 激活指示条:始终占位、未激活透明(同 SettingsModal tab 惯例)。
+                  背景图皮肤下 --bg-terminal 与 --bg-elevated 几乎同色,
+                  仅靠底色分不出激活 tab,accent 条不吃主题 */}
+              <span
+                aria-hidden
+                className={`absolute top-0 left-0 right-0 h-[2px] ${isActive ? 'bg-[var(--accent)]' : 'bg-transparent'}`}
+              />
               <StatusDot status={pane.status} />
+              {aiActive && (
+                <BrandIcon
+                  vendor={inferVendor({ agent: pane.aiSession?.agent ?? pane.detectedAgent })}
+                  size={12}
+                />
+              )}
               <span className="font-medium">{paneLabel(pane)}</span>
               <button
                 type="button"
@@ -490,6 +641,16 @@ export function PaneGroup({ projectId, node, projectPath }: Props) {
         </div>,
         document.body,
       )}
+
+      {/* 悬停缩略图:渲染处每次重判 —— tab 被关闭/被激活那一帧就不画,不留旧锚点 */}
+      {tabPreview && (() => {
+        const previewPane = node.panes.find((p) => p.id === tabPreview.paneId);
+        if (!previewPane || previewPane.id === activePane.id) return null;
+        return createPortal(
+          <PaneTabPreview pane={previewPane} anchorRect={tabPreview.rect} />,
+          document.body,
+        );
+      })()}
     </div>
   );
 }

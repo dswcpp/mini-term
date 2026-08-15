@@ -4,7 +4,7 @@ use encoding_rs::{
 use mt_core::{parse_wsl_unc, scan_ssh_prompt, strip_ansi_codes, SshPromptScan};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -347,6 +347,8 @@ struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     encoding: Arc<Mutex<TerminalEncoding>>,
+    /// 上次已应用的 PTY 尺寸 (cols, rows),resize_pty 用它做同尺寸去重
+    last_size: (u16, u16),
 }
 
 #[derive(Clone, Default)]
@@ -479,7 +481,17 @@ impl InputState {
     }
 }
 
-const AI_COMMANDS: &[&str] = &["claude", "codex", "opencode"];
+/// 交互式 AI CLI 的命令名。
+///
+/// `pi`（pi.dev，earendil-works/pi）只有两个字母，但匹配走 `ai_command_name` 的
+/// basename **全等**，`pip install` / `ping` / `pi.py` 都不会命中；它的
+/// `-p/--print`、`-h/--help`、`-v/--version` 与下面的非交互标志逐一对齐，
+/// 退出用的 `/quit` 也已在 `AI_EXIT_COMMANDS` 里，无需为它开特例。
+///
+/// `grok`（xai-org/grok-build）的官方安装把二进制铺成 `grok`（artifact 名是
+/// `xai-grok-pager`），非交互用 `-p`、`--version`/`--help` 也与下面对齐；
+/// `--resume` / `--trust` 都是交互式启动，不该进非交互列表。
+const AI_COMMANDS: &[&str] = &["claude", "codex", "opencode", "pi", "grok"];
 
 /// 这些标志表示非交互命令（仅输出信息后退出），不应触发 AI 会话状态
 const NON_INTERACTIVE_FLAGS: &[&str] = &["-v", "--version", "-h", "--help", "-p", "--print"];
@@ -497,6 +509,12 @@ const DOUBLE_CTRLC_WINDOW: Duration = Duration::from_millis(1000);
 
 /// 按下 Enter 后扫描输出以检测 AI 命令 echo 的时间窗口
 const AI_ENTER_SCAN_WINDOW: Duration = Duration::from_millis(2000);
+
+/// PTY 创建时的初始尺寸。前端挂载后首次 fit 会立即上报真实尺寸;
+/// openpty 与 last_size(resize_pty 同尺寸去重的首个基准)必须取自这两个常量,
+/// 否则初始值失同步会让第一次 resize 被误去重吞掉。
+const INITIAL_PTY_COLS: u16 = 80;
+const INITIAL_PTY_ROWS: u16 = 24;
 
 /// PTY resize 后的 TUI 重绘冷却窗口
 ///
@@ -522,7 +540,30 @@ const FOCUS_COOLDOWN: Duration = Duration::from_millis(800);
 const FOCUS_IN_SEQ: &str = "\x1b[I";
 const FOCUS_OUT_SEQ: &str = "\x1b[O";
 
-fn command_word_matches_ai(word: &str) -> bool {
+/// reader → flush 之间的有界通道容量(条,每条 ≤ READ_CHUNK 字节)。
+///
+/// 此前用的是无界 `mpsc::channel`:reader 以 ConPTY 的最快速度读,前端只要跟不上,
+/// 这个队列就一路涨到内存耗尽。换成有界后队列满时 reader 阻塞在 `send`,不再从
+/// ConPTY 读,背压传导到刷屏进程本身——这正是真实终端的行为(慢终端会拖慢
+/// `cat` 大文件,而不是把数据全缓存下来)。
+/// 512 × 4KB = 2MB 在途上限,足够吸收正常的突发,又不至于攒出可观的常驻内存。
+const OUTPUT_CHANNEL_CAPACITY: usize = 512;
+
+/// reader 单次读取的缓冲区大小
+const READ_CHUNK: usize = 4096;
+
+/// flush 缓冲区空闲时保留的容量上限(超出部分归还分配器)
+const PENDING_KEEP_CAPACITY: usize = 64 * 1024;
+
+/// 流控暂停期间 flush 线程的轮询间隔
+const FLOW_PAUSE_POLL: Duration = Duration::from_millis(8);
+
+/// 流控暂停的最长时限。前端崩溃/卡死后不会再发 resume,超时即强制恢复投递,
+/// 否则用户的 shell 会永久卡在一次写上(表现为终端完全没反应)。
+const MAX_FLOW_PAUSE: Duration = Duration::from_secs(30);
+
+/// 命令词对应的 AI 命令名(basename 归一后精确匹配);非 AI 命令返回 None。
+fn ai_command_name(word: &str) -> Option<&'static str> {
     let word = word.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
     let basename = word.rsplit(['/', '\\']).next().unwrap_or(word);
     let basename = [".exe", ".cmd", ".bat", ".ps1"]
@@ -530,56 +571,64 @@ fn command_word_matches_ai(word: &str) -> bool {
         .find_map(|suffix| basename.strip_suffix(suffix))
         .unwrap_or(basename);
     let basename = basename.to_lowercase();
-    AI_COMMANDS.iter().any(|&ai| basename == ai)
+    AI_COMMANDS.iter().find(|&&ai| basename == ai).copied()
 }
 
-/// 该命令行是否会被识别为"进入交互式 AI 会话"。
-/// AI 启动器配置校验(mobile_relay)复用同一判定,避免两处口径漂移。
-pub fn is_interactive_ai_command(command: &str) -> bool {
+/// 该命令行会进入哪个交互式 AI 会话;不会进入返回 None。
+pub fn interactive_ai_command_name(command: &str) -> Option<&'static str> {
     let mut words = command.split_whitespace();
     let mut first_word = words.next().unwrap_or("");
     if first_word == "&" {
         first_word = words.next().unwrap_or("");
     }
-    if !command_word_matches_ai(first_word) {
-        return false;
-    }
+    let agent = ai_command_name(first_word)?;
 
-    !words.any(|w| {
+    if words.any(|w| {
         let flag = w.to_lowercase();
         NON_INTERACTIVE_FLAGS.iter().any(|&f| flag == f)
-    })
+    }) {
+        None
+    } else {
+        Some(agent)
+    }
 }
 
-fn line_contains_ai_command(line: &str) -> bool {
+/// 该命令行是否会被识别为"进入交互式 AI 会话"。
+/// AI 启动器配置校验(mobile_relay)复用同一判定,避免两处口径漂移。
+pub fn is_interactive_ai_command(command: &str) -> bool {
+    interactive_ai_command_name(command).is_some()
+}
+
+fn line_ai_command_name(line: &str) -> Option<&'static str> {
     let line = strip_ansi_codes(line);
     let line = line.trim();
     if line.is_empty() {
-        return false;
+        return None;
     }
 
-    if is_interactive_ai_command(line) {
-        return true;
+    if let Some(agent) = interactive_ai_command_name(line) {
+        return Some(agent);
     }
 
     // xterm 行快照通常包含 shell prompt，例如 "PS D:\repo> claude"。
     // 对常见 prompt 分隔符取最后一段，避免把 prompt 内容当作命令解析。
     for marker in [">", "$ ", "# ", "% "] {
         if let Some(idx) = line.rfind(marker) {
-            if is_interactive_ai_command(&line[idx + marker.len()..]) {
-                return true;
+            if let Some(agent) = interactive_ai_command_name(&line[idx + marker.len()..]) {
+                return Some(agent);
             }
         }
     }
 
-    false
+    None
 }
 
-/// 检查 PTY 输出中是否包含 AI 命令被 echo（例如 "PS C:\> claude" 或单独的 "claude"）
-fn output_contains_ai_command(output: &str) -> bool {
+/// 检查 PTY 输出中是否包含 AI 命令被 echo（例如 "PS C:\> claude" 或单独的 "claude"），
+/// 命中返回对应的 AI 命令名
+fn output_ai_command_name(output: &str) -> Option<&'static str> {
     strip_ansi_codes(output)
         .lines()
-        .any(line_contains_ai_command)
+        .find_map(line_ai_command_name)
 }
 
 struct SshAutofillState {
@@ -603,7 +652,9 @@ pub struct PtyManager {
     instances: Arc<Mutex<HashMap<u32, PtyInstance>>>,
     next_id: Arc<Mutex<u32>>,
     last_output: Arc<Mutex<HashMap<u32, Instant>>>,
-    ai_sessions: Arc<Mutex<HashSet<u32>>>,
+    /// pty → 会话内 AI 命令名("claude"/"codex"/"opencode";hook 扶正时取 hook 的 agent)。
+    /// 有键即视为处于 AI 会话,值供前端品牌图标兜底(无 hook 时的唯一 agent 来源)。
+    ai_sessions: Arc<Mutex<HashMap<u32, String>>>,
     /// pty → 本轮 AI 会话的启动时刻(enter_ai 时记录)。对话镜像用它过滤
     /// 早于本轮会话的旧记录文件,避免新会话未落盘时错绑上一次会话。
     ai_started: Arc<Mutex<HashMap<u32, SystemTime>>>,
@@ -615,6 +666,10 @@ pub struct PtyManager {
     tui_redraw_cooldown_until: Arc<Mutex<HashMap<u32, Instant>>>,
     /// SSH 密码自动填充状态(arm_ssh_autofill 注册,命中密码提示后回写)
     ssh_autofill: Arc<Mutex<HashMap<u32, SshAutofillState>>>,
+    /// 前端流控:被前端要求暂停投递的 pty 集合(见 `set_pty_flow_paused`)。
+    /// 值是暂停开始时刻,超过 `MAX_FLOW_PAUSE` 强制恢复——前端崩溃/卡死时
+    /// 不能让 shell 永久卡在写阻塞上。
+    flow_paused: Arc<Mutex<HashMap<u32, Instant>>>,
 }
 
 impl PtyManager {
@@ -623,7 +678,7 @@ impl PtyManager {
             instances: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
             last_output: Arc::new(Mutex::new(HashMap::new())),
-            ai_sessions: Arc::new(Mutex::new(HashSet::new())),
+            ai_sessions: Arc::new(Mutex::new(HashMap::new())),
             ai_started: Arc::new(Mutex::new(HashMap::new())),
             input_states: Arc::new(Mutex::new(HashMap::new())),
             last_ctrlc: Arc::new(Mutex::new(HashMap::new())),
@@ -631,6 +686,56 @@ impl PtyManager {
             pending_submits: Arc::new(Mutex::new(HashMap::new())),
             tui_redraw_cooldown_until: Arc::new(Mutex::new(HashMap::new())),
             ssh_autofill: Arc::new(Mutex::new(HashMap::new())),
+            flow_paused: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 清除某个 pty 的全部旁路状态(不含 `instances` 本身,也不碰 hook)。
+    ///
+    /// kill_pty 与「PTY 自然退出」两条路径必须清同一批表:此前自然退出分支只
+    /// 清了 instances + ssh_autofill,余下 8 张表的条目会一直留到用户手动关
+    /// pane 才被 kill_pty 收走——用户敲 `exit` 后把 pane 开着不动,这些残留就
+    /// 永远不回收。抽成一处后新增字段不会再漏掉其中一条路径。
+    pub fn purge_pty_state(&self, pty_id: u32) {
+        self.last_output.lock().unwrap().remove(&pty_id);
+        self.ai_sessions.lock().unwrap().remove(&pty_id);
+        self.ai_started.lock().unwrap().remove(&pty_id);
+        self.input_states.lock().unwrap().remove(&pty_id);
+        self.last_ctrlc.lock().unwrap().remove(&pty_id);
+        self.last_enter.lock().unwrap().remove(&pty_id);
+        self.pending_submits.lock().unwrap().remove(&pty_id);
+        self.ssh_autofill.lock().unwrap().remove(&pty_id);
+        self.tui_redraw_cooldown_until
+            .lock()
+            .unwrap()
+            .remove(&pty_id);
+        self.flow_paused.lock().unwrap().remove(&pty_id);
+    }
+
+    /// 前端流控开关。暂停期间 flush 线程不再从 channel 取数据,channel 塞满后
+    /// reader 线程阻塞在 send 上,背压一路传导回 ConPTY —— 刷屏的进程自己会被
+    /// 写阻塞而减速,这正是真实终端的行为。
+    pub fn set_flow_paused(&self, pty_id: u32, paused: bool) {
+        let mut map = self.flow_paused.lock().unwrap();
+        if paused {
+            map.entry(pty_id).or_insert_with(Instant::now);
+        } else {
+            map.remove(&pty_id);
+        }
+    }
+
+    /// 是否处于暂停投递状态。超过 `MAX_FLOW_PAUSE` 视为前端失联,强制恢复:
+    /// 宁可前端被数据淹没,也不能让用户的 shell 永久卡死在一次写上。
+    fn is_flow_paused(&self, pty_id: u32) -> bool {
+        let mut map = self.flow_paused.lock().unwrap();
+        match map.get(&pty_id) {
+            Some(since) if since.elapsed() < MAX_FLOW_PAUSE => true,
+            Some(_) => {
+                map.remove(&pty_id);
+                eprintln!("[pty] pty {} 流控暂停超时,强制恢复投递", pty_id);
+                false
+            }
+            None => false,
         }
     }
 
@@ -643,13 +748,43 @@ impl PtyManager {
         map.get(&pty_id).is_some_and(|t| t.elapsed() < within)
     }
 
+    /// 测试用:伪造一次 PTY 输出时间戳。生产路径只由 reader 线程在
+    /// flush 时写入(且受 TUI 重绘冷却窗口约束),单测里没法真起 PTY。
+    #[cfg(test)]
+    pub fn note_output_for_test(&self, pty_id: u32) {
+        self.last_output
+            .lock()
+            .unwrap()
+            .insert(pty_id, Instant::now());
+    }
+
     pub fn is_ai_session(&self, pty_id: u32) -> bool {
-        self.ai_sessions.lock().unwrap().contains(&pty_id)
+        self.ai_sessions.lock().unwrap().contains_key(&pty_id)
+    }
+
+    /// 会话内 AI 命令名("claude"/"codex"/…);不在 AI 会话中返回 None。
+    pub fn ai_session_agent(&self, pty_id: u32) -> Option<String> {
+        self.ai_sessions.lock().unwrap().get(&pty_id).cloned()
     }
 
     /// 本轮 AI 会话的启动时刻;不在 AI 会话中返回 None。
     pub fn ai_session_started_at(&self, pty_id: u32) -> Option<SystemTime> {
         self.ai_started.lock().unwrap().get(&pty_id).copied()
+    }
+
+    /// hook 事件证明 AI 进程存活时把会话标记扶正：输入检测漏判启动
+    /// （别名/包装脚本，命令行里没有 "claude" 字样）或误判退出（任务运行中
+    /// 双击 Ctrl+C 只是打断并不退出）的自愈路径。已标记时幂等 no-op，
+    /// 不重置 ai_started（对话镜像按它过滤旧记录，中途重置会错绑）。
+    pub fn mark_ai_session(&self, pty_id: u32, agent: &str) {
+        let mut sessions = self.ai_sessions.lock().unwrap();
+        if !sessions.contains_key(&pty_id) {
+            sessions.insert(pty_id, agent.to_string());
+            self.ai_started
+                .lock()
+                .unwrap()
+                .insert(pty_id, SystemTime::now());
+        }
     }
 
     /// 清除 pane 的 AI 会话标记及相关输入痕迹。
@@ -716,12 +851,6 @@ impl PtyManager {
                 disarm_on_input,
             },
         );
-    }
-
-    /// 无条件清除某个 pty 的 SSH 密码自动填充状态(含驻留的明文密码)。
-    /// 用于 pty 被 kill / 自然退出时的内存清理,不看 `disarm_on_input`。
-    pub fn clear_ssh_autofill(&self, pty_id: u32) {
-        self.ssh_autofill.lock().unwrap().remove(&pty_id);
     }
 
     /// 用户向 PTY 真实输入时调用:仅当该 autofill 标记了 `disarm_on_input` 才解除并清除
@@ -792,7 +921,7 @@ impl PtyManager {
         line_snapshot: Option<&str>,
     ) {
         let in_ai = self.is_ai_session(pty_id);
-        let mut enter_ai = false;
+        let mut enter_ai: Option<&'static str> = None;
         let mut exit_ai = false;
         {
             let mut states = self.input_states.lock().unwrap();
@@ -843,11 +972,14 @@ impl PtyManager {
                         let allow_line_snapshot = state.allow_line_snapshot;
                         let raw = state.take_line();
                         let trimmed = raw.trim();
-                        let snapshot_is_ai = allow_line_snapshot
-                            && line_snapshot.map(line_contains_ai_command).unwrap_or(false);
+                        let snapshot_agent = if allow_line_snapshot {
+                            line_snapshot.and_then(line_ai_command_name)
+                        } else {
+                            None
+                        };
                         // 记录 Enter 时间，供输出扫描用。空回车不打开扫描窗口，
                         // 避免 shell autosuggestion 出现在重绘输出中时被当成命令 echo。
-                        if !trimmed.is_empty() || snapshot_is_ai {
+                        if !trimmed.is_empty() || snapshot_agent.is_some() {
                             self.last_enter
                                 .lock()
                                 .unwrap()
@@ -878,8 +1010,10 @@ impl PtyManager {
                             // 非 AI 会话：检测 AI 命令启动。优先使用本地输入状态；
                             // 对上方向键历史、Tab 补全等 shell 改写行的场景，使用
                             // 前端在 Enter 前捕获的可见行快照补判。
-                            if is_interactive_ai_command(trimmed) || snapshot_is_ai {
-                                enter_ai = true;
+                            if let Some(agent) =
+                                interactive_ai_command_name(trimmed).or(snapshot_agent)
+                            {
+                                enter_ai = Some(agent);
                             }
                         }
                     }
@@ -896,8 +1030,11 @@ impl PtyManager {
                 }
             }
         }
-        if enter_ai {
-            self.ai_sessions.lock().unwrap().insert(pty_id);
+        if let Some(agent) = enter_ai {
+            self.ai_sessions
+                .lock()
+                .unwrap()
+                .insert(pty_id, agent.to_string());
             self.ai_started
                 .lock()
                 .unwrap()
@@ -935,8 +1072,8 @@ pub fn create_pty(
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            rows: 24,
-            cols: 80,
+            rows: INITIAL_PTY_ROWS,
+            cols: INITIAL_PTY_COLS,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -1084,13 +1221,15 @@ pub fn create_pty(
     let master = pair.master;
     let encoding_state = Arc::new(Mutex::new(terminal_encoding));
 
-    // Channel + flush 定时器实现 16ms 批量缓冲
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    // 有界 channel + flush 定时器实现 16ms 批量缓冲。
+    // 有界是关键:队列满时下面的 `send` 阻塞,reader 停止从 ConPTY 读,
+    // 背压直达刷屏进程(见 OUTPUT_CHANNEL_CAPACITY)。
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(OUTPUT_CHANNEL_CAPACITY);
     let instances_clone = state.instances.clone();
     let pty_id_for_reader = pty_id;
 
     thread::spawn(move || {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; READ_CHUNK];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
@@ -1116,6 +1255,12 @@ pub fn create_pty(
         let mut decoder = active_encoding.new_decoder();
 
         loop {
+            // 前端缓冲高于水位时不取新数据也不 emit:channel 随即塞满,
+            // reader 阻塞,ConPTY 背压生效。`pending` 原样留到恢复后再发。
+            while mgr_flush.is_flow_paused(pty_id_for_reader) {
+                thread::sleep(FLOW_PAUSE_POLL);
+            }
+
             match rx.recv_timeout(Duration::from_millis(16)) {
                 Ok(data) => {
                     pending.extend(data);
@@ -1164,9 +1309,10 @@ pub fn create_pty(
                         }
                     };
 
-                    // PTY 自然退出(前端未必调 kill_pty):无条件清除残留的 SSH 密码自动
-                    // 填充状态,避免明文密码在断连后仍驻留内存。
-                    mgr_flush.clear_ssh_autofill(pty_id_for_reader);
+                    // PTY 自然退出(前端未必调 kill_pty):走与 kill_pty 相同的全量
+                    // 清理,不再只清 ssh_autofill —— 用户敲 exit 后把 pane 开着不动
+                    // 时,余下 8 张表的条目此前会一直留到手动关 pane 才被回收。
+                    mgr_flush.purge_pty_state(pty_id_for_reader);
 
                     let _ = app_flush.emit(
                         "pty-exit",
@@ -1204,10 +1350,10 @@ pub fn create_pty(
                             .unwrap_or(false);
                         if recently_entered {
                             let mut sessions = ai_sessions_flush.lock().unwrap();
-                            if !sessions.contains(&pty_id_for_reader)
-                                && output_contains_ai_command(&data)
-                            {
-                                sessions.insert(pty_id_for_reader);
+                            if !sessions.contains_key(&pty_id_for_reader) {
+                                if let Some(agent) = output_ai_command_name(&data) {
+                                    sessions.insert(pty_id_for_reader, agent.to_string());
+                                }
                             }
                         }
                     }
@@ -1231,6 +1377,13 @@ pub fn create_pty(
                         }
                     }
                 }
+
+                // encoding_rs 的流式 Decoder 会自行保留跨刷新边界的不完整多字节序列。
+                // clear() 不还容量:一次刷屏撑出来的缓冲区会按峰值大小常驻到
+                // PTY 结束。空闲后收回,只留一次批量的余量。
+                if pending.capacity() > PENDING_KEEP_CAPACITY {
+                    pending.shrink_to(PENDING_KEEP_CAPACITY);
+                }
             }
         }
     });
@@ -1244,6 +1397,7 @@ pub fn create_pty(
                 master,
                 child,
                 encoding: encoding_state,
+                last_size: (INITIAL_PTY_COLS, INITIAL_PTY_ROWS),
             },
         );
     }
@@ -1283,6 +1437,18 @@ fn write_pty_chunked(writer: &mut dyn Write, bytes: &[u8]) -> Result<(), String>
     Ok(())
 }
 
+/// 这一次写入是否为「打断当前 AI 任务」的按键。
+///
+/// 只认单独一个字节的裸 Esc / Ctrl+C：xterm.js 把方向键、功能键等 CSI 序列
+/// （`\x1b[A` …）一次性交给 onData，粘贴同理，长度一律大于 1，因此等值比较
+/// 足以把它们排除掉，不需要解析转义状态机。
+///
+/// 单次 Ctrl+C 在 AI 里是「取消当前任务」（连按两次才退出，见
+/// `track_input_with_line_snapshot`），Esc 同理，两者都不产生 hook 事件。
+fn is_interrupt_key(data: &str) -> bool {
+    data == "\x1b" || data == "\x03"
+}
+
 #[tauri::command]
 pub fn set_pty_encoding(
     state: tauri::State<'_, PtyManager>,
@@ -1301,6 +1467,8 @@ pub fn set_pty_encoding(
 pub fn write_pty(
     app: tauri::AppHandle,
     state: tauri::State<'_, PtyManager>,
+    hook_state: tauri::State<'_, crate::hook_server::HookState>,
+    emitter: tauri::State<'_, crate::process_monitor::StatusEmitter>,
     pty_id: u32,
     data: String,
     line_snapshot: Option<String>,
@@ -1327,6 +1495,22 @@ pub fn write_pty(
     }
     state.track_input_with_line_snapshot(pty_id, &data, line_snapshot.as_deref());
 
+    // 用户打断 AI：Claude 在中断时不发任何 hook 事件（官方文档：`Stop` hooks
+    // "don't fire on user interrupts"），状态会一直停在 ai-working。这里补一刀
+    // 让它收敛到 ai-idle —— 判定与副作用都在 note_user_interrupt 里，含「只动
+    // hook 已启用且正在 ai-working 的 pane」与「cause=Interrupt 不算完成」两道闸。
+    // 放在 track_input 之后：双击 Ctrl+C 真退出的场景，紧随其后的 SessionEnd
+    // 会把状态进一步落到 idle，这一刀只是让中间那段不至于显示成「工作中」。
+    if is_interrupt_key(&data) {
+        crate::hook_server::note_user_interrupt(
+            &app,
+            &hook_state,
+            &emitter,
+            pty_id,
+            state.ai_session_agent(pty_id),
+        );
+    }
+
     for submit in state.drain_submits(pty_id) {
         let _ = app.emit(
             "ai-user-submit",
@@ -1348,8 +1532,15 @@ pub fn resize_pty(
     rows: u16,
 ) -> Result<(), String> {
     {
-        let instances = state.instances.lock().unwrap();
-        let instance = instances.get(&pty_id).ok_or("PTY not found")?;
+        let mut instances = state.instances.lock().unwrap();
+        let instance = instances.get_mut(&pty_id).ok_or("PTY not found")?;
+        // 同尺寸去重:前端挂载/切 tab 路径会重复上报未变的尺寸,而 ConPTY 收到
+        // resize(即使同尺寸)会让 TUI 应用整屏重绘 —— Ink(Claude Code)的帧高于
+        // 视口时,每次重绘都往 scrollback 漏一份残留(见 terminalCache.ts 的
+        // alt-screen 注释)。尺寸没变就不透传,也不开冷却窗口。
+        if instance.last_size == (cols, rows) {
+            return Ok(());
+        }
         instance
             .master
             .resize(PtySize {
@@ -1359,6 +1550,7 @@ pub fn resize_pty(
                 pixel_height: 0,
             })
             .map_err(|e| e.to_string())?;
+        instance.last_size = (cols, rows);
     }
 
     // 开启冷却窗口:之后 RESIZE_COOLDOWN 内的 PTY 输出(主要是 TUI 重绘)
@@ -1374,21 +1566,51 @@ pub fn kill_pty(
     hook_state: tauri::State<'_, crate::hook_server::HookState>,
     pty_id: u32,
 ) -> Result<(), String> {
+    kill_pty_inner(&state, &hook_state, pty_id);
+    Ok(())
+}
+
+/// 杀掉全部存量 PTY,返回被回收的 id 列表。
+///
+/// 前端在页面加载时(load_config 之前)调用。WebView2 的 renderer 进程被 OOM
+/// 杀掉后会重载页面,而 `PtyManager` 活在主进程里毫发无损:重载后的前端按
+/// `savedLayout` 恢复布局时给每个 pane 发的是**新** pane id、并新建 PTY,
+/// 旧 PTY(shell 进程 + AI 进程 + 每个 PTY 两条线程)就此再无人引用却继续运行,
+/// 输出打到前端因 cache miss 被丢弃,process_monitor 还在轮询这些幽灵。
+/// 于是崩一次内存压力更大、下次崩得更快,形成正反馈。这里在恢复布局前先把
+/// 存量清空,把那条正反馈掐断。
+///
+/// 正常首次启动时存量为空,是个 no-op。
+#[tauri::command]
+pub fn kill_all_ptys(
+    state: tauri::State<'_, PtyManager>,
+    hook_state: tauri::State<'_, crate::hook_server::HookState>,
+) -> Result<Vec<u32>, String> {
+    let ids = state.get_pty_ids();
+    for id in &ids {
+        kill_pty_inner(&state, &hook_state, *id);
+    }
+    if !ids.is_empty() {
+        eprintln!("[pty] 页面加载:回收 {} 个孤儿 PTY {:?}", ids.len(), ids);
+    }
+    Ok(ids)
+}
+
+/// 前端流控开关。前端积压的待解析数据超过高水位时暂停,回落到低水位时恢复。
+#[tauri::command]
+pub fn set_pty_flow_paused(
+    state: tauri::State<'_, PtyManager>,
+    pty_id: u32,
+    paused: bool,
+) -> Result<(), String> {
+    state.set_flow_paused(pty_id, paused);
+    Ok(())
+}
+
+fn kill_pty_inner(state: &PtyManager, hook_state: &crate::hook_server::HookState, pty_id: u32) {
     // Remove metadata maps immediately so subsequent lookups return nothing.
     let instance = state.instances.lock().unwrap().remove(&pty_id);
-    state.last_output.lock().unwrap().remove(&pty_id);
-    state.ai_sessions.lock().unwrap().remove(&pty_id);
-    state.ai_started.lock().unwrap().remove(&pty_id);
-    state.input_states.lock().unwrap().remove(&pty_id);
-    state.last_ctrlc.lock().unwrap().remove(&pty_id);
-    state.last_enter.lock().unwrap().remove(&pty_id);
-    state.pending_submits.lock().unwrap().remove(&pty_id);
-    state.ssh_autofill.lock().unwrap().remove(&pty_id);
-    state
-        .tui_redraw_cooldown_until
-        .lock()
-        .unwrap()
-        .remove(&pty_id);
+    state.purge_pty_state(pty_id);
     // 清理 hook 状态(含已结束会话墓碑)
     hook_state.purge(pty_id);
 
@@ -1412,8 +1634,6 @@ pub fn kill_pty(
             drop(inst);
         });
     }
-
-    Ok(())
 }
 
 /// 为某个 pty 注册 SSH 密码自动填充。前端在写入 `ssh` 命令前调用(连接配有密码时)。
@@ -1433,6 +1653,29 @@ pub fn arm_ssh_autofill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 打断键识别:只认单独一个字节的裸 Esc / Ctrl+C。方向键等 CSI 序列由
+    /// xterm.js 一次性发来(`\x1b[A`),不能因为首字节是 Esc 就当成打断——否则
+    /// 用户翻个历史记录就把「工作中」徽章打灭了。
+    #[test]
+    fn interrupt_key_only_matches_bare_esc_and_ctrl_c() {
+        assert!(is_interrupt_key("\x1b"));
+        assert!(is_interrupt_key("\x03"));
+
+        for data in [
+            "\x1b[A",    // ↑
+            "\x1b[B",    // ↓
+            "\x1b[1;5C", // Ctrl+→
+            "\x1bOP",    // F1
+            "\x1b[I",    // 焦点进入
+            "\x03\x03",  // 一次写入里的两个 Ctrl+C
+            "\x1b\x1b",
+            "",
+            "esc",
+        ] {
+            assert!(!is_interrupt_key(data), "误判为打断键: {:?}", data);
+        }
+    }
 
     #[test]
     fn terminal_encoding_label_aliases_normalize() {
@@ -1542,6 +1785,32 @@ mod tests {
         mgr.clear_ai_session(1);
         assert!(!mgr.is_ai_session(1));
         assert!(mgr.ai_session_started_at(1).is_none());
+    }
+
+    #[test]
+    fn mark_ai_session_rearms_after_false_exit() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "claude\r");
+        // 任务运行中双击 Ctrl+C 打断:输入检测误判为退出
+        mgr.track_input(1, "\x03");
+        mgr.track_input(1, "\x03");
+        assert!(!mgr.is_ai_session(1));
+        // 后续 hook 事件证明 AI 还活着 → 扶正
+        mgr.mark_ai_session(1, "claude");
+        assert!(mgr.is_ai_session(1));
+        assert!(mgr.ai_session_started_at(1).is_some());
+    }
+
+    #[test]
+    fn mark_ai_session_idempotent_keeps_started_at() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "claude\r");
+        let started = mgr
+            .ai_session_started_at(1)
+            .expect("进入会话应记录启动时刻");
+        // 会话已标记时 mark 为 no-op,不得重置 ai_started(镜像按它过滤旧记录)
+        mgr.mark_ai_session(1, "claude");
+        assert_eq!(mgr.ai_session_started_at(1), Some(started));
     }
 
     #[test]
@@ -1658,6 +1927,105 @@ mod tests {
     fn codex_help_not_ai_session() {
         let mgr = PtyManager::new();
         mgr.track_input(1, "codex --help\r");
+        assert!(!mgr.is_ai_session(1));
+    }
+
+    #[test]
+    fn detect_pi_command() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "pi\r");
+        assert!(mgr.is_ai_session(1));
+    }
+
+    #[test]
+    fn detect_grok_command() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "grok\r");
+        assert!(mgr.is_ai_session(1));
+        assert_eq!(mgr.ai_session_agent(1).as_deref(), Some("grok"));
+    }
+
+    /// `--resume` / `--trust` 是交互式启动（前者恢复会话、后者授信项目 hook），
+    /// 不能因为带参数就被当成非交互命令。
+    #[test]
+    fn grok_with_interactive_args() {
+        for cmd in ["grok --resume\r", "grok --trust\r", "grok --resume sid-1\r"] {
+            let mgr = PtyManager::new();
+            mgr.track_input(1, cmd);
+            assert!(mgr.is_ai_session(1), "{cmd} 应进入 AI 会话");
+        }
+    }
+
+    #[test]
+    fn grok_non_interactive_flags_not_ai_session() {
+        for cmd in ["grok -p \"hello\"\r", "grok --version\r", "grok -h\r"] {
+            let mgr = PtyManager::new();
+            mgr.track_input(1, cmd);
+            assert!(!mgr.is_ai_session(1), "{cmd} 不应进入 AI 会话");
+        }
+    }
+
+    #[test]
+    fn pi_with_interactive_args() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "pi --model claude-sonnet-5\r");
+        assert!(mgr.is_ai_session(1));
+    }
+
+    #[test]
+    fn pi_non_interactive_flags_not_ai_session() {
+        for cmd in [
+            "pi -p \"hello\"\r",
+            "pi --print x\r",
+            "pi -v\r",
+            "pi --help\r",
+        ] {
+            let mgr = PtyManager::new();
+            mgr.track_input(1, cmd);
+            assert!(!mgr.is_ai_session(1), "{cmd} 不应进入 AI 会话");
+        }
+    }
+
+    /// `pi` 只有两个字母,匹配必须是 basename 全等:任何以 pi 开头的常见命令
+    /// (pip / ping / pixi)或同名脚本(pi.py)都不能把 pane 标成 AI 会话。
+    #[test]
+    fn pi_prefixed_commands_not_ai_session() {
+        for cmd in [
+            "pip install requests\r",
+            "ping example.com\r",
+            "pixi run build\r",
+            "pi.py\r",
+            "python pi.py\r",
+        ] {
+            let mgr = PtyManager::new();
+            mgr.track_input(1, cmd);
+            assert!(!mgr.is_ai_session(1), "{cmd} 不应被认成 pi");
+        }
+    }
+
+    /// ↑ 召回历史里的 `pi`:输入缓冲是空的,只能靠行快照判定。
+    #[test]
+    fn pi_from_line_snapshot() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "\x1b[A");
+        mgr.track_input_with_line_snapshot(1, "\r", Some("PS D:\\Git\\mini-term> pi"));
+        assert!(mgr.is_ai_session(1));
+    }
+
+    #[test]
+    fn pip_from_line_snapshot_not_ai_session() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "\x1b[A");
+        mgr.track_input_with_line_snapshot(1, "\r", Some("PS D:\\Git\\mini-term> pip install x"));
+        assert!(!mgr.is_ai_session(1));
+    }
+
+    #[test]
+    fn slash_quit_exits_pi_session() {
+        let mgr = PtyManager::new();
+        mgr.track_input(1, "pi\r");
+        assert!(mgr.is_ai_session(1));
+        mgr.track_input(1, "/quit\r");
         assert!(!mgr.is_ai_session(1));
     }
 
@@ -2009,12 +2377,103 @@ mod tests {
     }
 
     #[test]
-    fn clear_ssh_autofill_removes_regardless_of_flag() {
+    fn purge_removes_ssh_autofill_regardless_of_flag() {
         // 无条件清理(kill / 自然退出):不看 disarm_on_input 都要清掉明文密码。
         let mgr = PtyManager::new();
         mgr.arm_ssh_autofill(9, "secret".into(), false);
-        mgr.clear_ssh_autofill(9);
+        mgr.purge_pty_state(9);
         assert!(!mgr.ssh_autofill.lock().unwrap().contains_key(&9));
+    }
+
+    /// 回归测试(PTY 自然退出漏清旁路状态):此前自然退出分支只清 ssh_autofill,
+    /// 用户敲 `exit` 后把 pane 开着不动,余下 8 张表的条目会一直残留到手动关
+    /// pane。purge_pty_state 必须把每一张都清空——漏掉任何一张,这条断言就红。
+    #[test]
+    fn purge_clears_every_side_table() {
+        let mgr = PtyManager::new();
+        let id = 3;
+
+        mgr.track_input(id, "claude\r"); // ai_sessions / ai_started / last_enter / input_states
+        mgr.track_input(id, "abc"); // input_states 里留下半行
+        mgr.track_input(id, "\x03"); // last_ctrlc
+        mgr.last_output.lock().unwrap().insert(id, Instant::now());
+        mgr.bump_cooldown(id, RESIZE_COOLDOWN);
+        mgr.arm_ssh_autofill(id, "secret".into(), false);
+        mgr.set_flow_paused(id, true);
+        mgr.pending_submits
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_default()
+            .push(UserSubmit {
+                line: "hi".into(),
+                ts: 0,
+            });
+
+        mgr.purge_pty_state(id);
+
+        assert!(
+            mgr.last_output.lock().unwrap().is_empty(),
+            "last_output 未清"
+        );
+        assert!(
+            mgr.ai_sessions.lock().unwrap().is_empty(),
+            "ai_sessions 未清"
+        );
+        assert!(mgr.ai_started.lock().unwrap().is_empty(), "ai_started 未清");
+        assert!(
+            mgr.input_states.lock().unwrap().is_empty(),
+            "input_states 未清"
+        );
+        assert!(mgr.last_ctrlc.lock().unwrap().is_empty(), "last_ctrlc 未清");
+        assert!(mgr.last_enter.lock().unwrap().is_empty(), "last_enter 未清");
+        assert!(
+            mgr.pending_submits.lock().unwrap().is_empty(),
+            "pending_submits 未清"
+        );
+        assert!(
+            mgr.ssh_autofill.lock().unwrap().is_empty(),
+            "ssh_autofill 未清"
+        );
+        assert!(
+            mgr.tui_redraw_cooldown_until.lock().unwrap().is_empty(),
+            "tui_redraw_cooldown_until 未清"
+        );
+        assert!(
+            mgr.flow_paused.lock().unwrap().is_empty(),
+            "flow_paused 未清"
+        );
+    }
+
+    /// 流控暂停超时后强制恢复:前端崩溃/卡死不再发 resume 时,shell 不能被
+    /// 永久卡在写阻塞上(表现为终端完全没反应)。
+    #[test]
+    fn flow_pause_expires_after_max_duration() {
+        let mgr = PtyManager::new();
+        mgr.set_flow_paused(1, true);
+        assert!(mgr.is_flow_paused(1), "刚暂停应处于暂停态");
+
+        // 把暂停起点回拨到超时之外,模拟前端失联
+        mgr.flow_paused
+            .lock()
+            .unwrap()
+            .insert(1, Instant::now() - MAX_FLOW_PAUSE - Duration::from_secs(1));
+
+        assert!(!mgr.is_flow_paused(1), "超时后应强制恢复投递");
+        assert!(
+            mgr.flow_paused.lock().unwrap().is_empty(),
+            "强制恢复时应顺手清掉记录,不留下每次都要重判的死条目"
+        );
+    }
+
+    #[test]
+    fn flow_pause_is_per_pty() {
+        let mgr = PtyManager::new();
+        mgr.set_flow_paused(1, true);
+        assert!(mgr.is_flow_paused(1));
+        assert!(!mgr.is_flow_paused(2), "流控不得波及其他 pane");
+        mgr.set_flow_paused(1, false);
+        assert!(!mgr.is_flow_paused(1));
     }
 
     // === WSL UNC 启动器重写检测 ===

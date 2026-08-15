@@ -1,39 +1,49 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { Allotment } from 'allotment';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { ask } from '@tauri-apps/plugin-dialog';
-import { useAppStore, restoreLayout, flushLayoutToConfig, initExpandedDirs, flushExpandedDirsToConfig, flushProjectToConfig, persistConfig } from './store';
+import { useAppStore, restoreLayout, flushLayoutToConfig, initExpandedDirs, flushExpandedDirsToConfig, flushProjectToConfig, persistConfig, setPaneAiSessionByPty, saveLayoutToConfig, syncTrayStatus, setWindowFocused, saveConfigToDisk, setConfigToken } from './store';
 import { TerminalArea } from './components/TerminalArea';
 import { ProjectList } from './components/ProjectList';
 import { FileTree } from './components/FileTree';
 import { ActivityBar } from './components/ActivityBar';
+import { TitleBar } from './components/TitleBar';
 import { RightDrawer } from './components/RightDrawer';
-import { SettingsModal, type SettingsPage } from './components/SettingsModal';
+import type { SettingsPage } from './components/SettingsModal';
 import { SshModal } from './components/SshModal';
-import { MobileRelayModal } from './components/MobileRelayModal';
 import { SearchModal } from './components/SearchModal';
 import { ToastContainer } from './components/ToastContainer';
 import { FirstRunGuide } from './components/FirstRunGuide';
 import { ProjectSwitcher } from './components/ProjectSwitcher';
 import { TerminalSearchBar } from './components/TerminalSearchBar';
 import { useTauriEvent } from './hooks/useTauriEvent';
+import { useEverOpened } from './hooks/useOverlayMotion';
+import { markStartup, flushStartupTrace } from './utils/startupTrace';
 import { useAiSubmitMarker } from './hooks/useAiSubmitMarker';
 import { useMarkerHotkeys } from './hooks/useMarkerHotkeys';
 import { useGlobalHotkeys } from './hooks/useGlobalHotkeys';
 import { useExternalFileDrop } from './hooks/useExternalFileDrop';
 import { collectPanes } from './utils/layoutOps';
+import { focusAttentionTarget } from './utils/attentionJump';
 import { checkForUpdate, type ReleaseInfo } from './utils/updateChecker';
 import { applyTheme } from './utils/themeManager';
 import { applyUiFontFamily } from './utils/fontManager';
+import { clearCustomTheme, loadAndApplyCustomTheme } from './utils/themePackManager';
 import { markAiPty, updateAllTerminalThemes } from './utils/terminalCache';
 import { includeActiveProject } from './utils/projectKeepAlive';
 import { initMobileSessionSync } from './utils/mobileSessionSync';
 import { handleMobileStartSession } from './utils/mobileStartSession';
 import { useT } from './i18n';
-import type { AppConfig, PtyStatusChangePayload, PtyExitPayload, PaneStatus, MobileRelayStatusPayload, MobileStartSessionPayload, MobileRenamePanePayload } from './types';
+import type { LoadedConfig, PtyAiSessionPayload, PtyStatusChangePayload, PtyExitPayload, PaneStatus, MobileRelayStatusPayload, MobileStartSessionPayload, MobileRenamePanePayload } from './types';
+
+// 懒加载三个重弹窗（SettingsModal 自身体量 / MobileRelayModal 连带 qrcode / UsageStatsModal
+// 连带 usage/ 成套组件与 react-markdown），首次打开才拉 chunk，不占启动关键路径
+const SettingsModal = lazy(() => import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal })));
+const MobileRelayModal = lazy(() => import('./components/MobileRelayModal').then((m) => ({ default: m.MobileRelayModal })));
+const UsageStatsModal = lazy(() => import('./components/usage/UsageStatsModal').then((m) => ({ default: m.UsageStatsModal })));
 
 /**
  * 关窗前盘点还活着的 AI 会话（ai-working / ai-idle）：数量 + 给用户看的名字清单。
@@ -55,14 +65,27 @@ function collectLiveAiPanes(): { count: number; names: string[] } {
   return { count: names.length, names };
 }
 
+// 启动埋点:App 首次进入 render 的时刻(StrictMode 双 render 只记第一次)
+let firstRenderMarked = false;
+
 export function App() {
+  if (!firstRenderMarked) {
+    firstRenderMarked = true;
+    markStartup('App() first render');
+  }
   const t = useT();
   const [configLoaded, setConfigLoaded] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [configPage, setConfigPage] = useState<SettingsPage | undefined>(undefined);
   const [sshOpen, setSshOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
+  // 懒挂载门控：三个懒弹窗首次打开前不挂载（chunk 不拉）；之后常驻，退场动画照播
+  const settingsEverOpened = useEverOpened(configOpen);
+  const mobileEverOpened = useEverOpened(mobileOpen);
+  const statsEverOpened = useEverOpened(statsOpen);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [currentVersion, setCurrentVersion] = useState('');
   const [updateInfo, setUpdateInfo] = useState<ReleaseInfo | null>(null);
   const [mountedProjectIds, setMountedProjectIds] = useState<string[]>([]);
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -73,7 +96,45 @@ export function App() {
   const setSearchModalOpen = useAppStore((s) => s.setSearchModalOpen);
 
   useEffect(() => {
-    invoke<AppConfig>('load_config').then((cfg) => {
+    // 加载失败重试 3 次;仍失败则显示窗口并明确报错,绝不带着空白配置
+    // 静默运行。写盘由令牌把关:load_config 成功才发放令牌,save_config
+    // 必须携带当前令牌——空白页面/加载失败的页面天然没有写盘资格,
+    // 防止空状态覆盖磁盘上的完整配置
+    // 回收上一轮页面遗留的 PTY,必须早于任何 create_pty。
+    //
+    // WebView2 的 renderer 被 OOM 杀掉后会重载页面,而 PtyManager 活在主进程里
+    // 毫发无损:重载后的前端按 savedLayout 恢复出的是**全新** pane(新 id、无
+    // ptyId),再各自新建 PTY,旧的 shell/AI 进程与它们的线程就此再无人引用却
+    // 继续运行 —— 崩一次就漏一整套,内存压力更大、下次崩得更快。
+    // 首次启动时后端存量为空,这里是个 no-op。
+    const reapOrphanPtys = async () => {
+      try {
+        const killed = await invoke<number[]>('kill_all_ptys');
+        if (killed.length > 0) {
+          console.warn(`[startup] 回收了 ${killed.length} 个上一轮页面遗留的 PTY:`, killed);
+        }
+      } catch (e) {
+        // 回收失败不该挡住启动:代价只是这一轮继续带着孤儿跑
+        console.error('[startup] 孤儿 PTY 回收失败:', e);
+      }
+    };
+
+    const loadWithRetry = async (): Promise<LoadedConfig> => {
+      markStartup('load_config invoke');
+      let lastErr: unknown;
+      for (let i = 0; i < 3; i++) {
+        try {
+          return await invoke<LoadedConfig>('load_config');
+        } catch (e) {
+          lastErr = e;
+          await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+        }
+      }
+      throw lastErr;
+    };
+    reapOrphanPtys().then(loadWithRetry).then(({ config: cfg, token }) => {
+      markStartup('load_config resolved');
+      setConfigToken(token);
       setConfig(cfg);
       // 应用 UI 字体大小
       if (cfg.uiFontSize) {
@@ -104,22 +165,55 @@ export function App() {
 
       applyTheme(cfg.theme ?? 'auto');
 
+      // 外置主题异步加载：不进 show() 前关键路径；失败回落内置（上面已应用）
+      if (cfg.customThemeId) {
+        loadAndApplyCustomTheme(cfg.customThemeId)
+          .then(() => updateAllTerminalThemes(cfg.terminalFollowTheme ?? true))
+          .catch((e) => {
+            console.error(`自定义主题 ${cfg.customThemeId} 加载失败，回落内置外观:`, e);
+            // 失败点未必在读取阶段：applyCustomTheme 跑完之后的任何一步抛（终端
+            // 配色应用是最可能的一处），CSS 变量、背景层、注入的 theme.css 与模块
+            // 内的激活态就都已经挂上了。只清 config 会留下"配置说没启用、DOM 上
+            // 却还挂着"的半死状态，getCustomTerminalTheme() 还会继续把坏配色发给
+            // 每个新建终端。先把 DOM 与模块态整个清掉，再落回内置明暗基线。
+            clearCustomTheme();
+            applyTheme(cfg.theme ?? 'auto');
+            // 运行时 config 里的 id 必须一并清掉：下面的 skin effect 按
+            // customThemeId 收敛，id 还在就把 data-skin 强制置空，用户原本的
+            // 内置皮肤在"回落"时一起没了，设置页还显示着这个包处于激活态。
+            // 只改内存不落盘 —— 主题目录可能只是这次读不到（盘没挂载、文件正
+            // 被替换），落盘会把用户的选择永久抹掉，下次启动就找不回来了。
+            const cur = useAppStore.getState().config;
+            if (cur.customThemeId) setConfig({ ...cur, customThemeId: undefined });
+            updateAllTerminalThemes(cur.terminalFollowTheme ?? true);
+          });
+      }
+
       for (const p of cfg.projects) {
         if (p.savedLayout && p.savedLayout.tabs.length > 0) {
           restoreLayout(p.id, p.savedLayout, cfg);
         }
       }
 
+      markStartup('config applied (layout restored)');
       setConfigLoaded(true);
 
       // 布局元数据恢复完成后显示窗口；终端进程由可见 pane 按需创建。
       const showWindow = () => {
         // 双 rAF 确保 React 首帧布局完成后再显示。
         requestAnimationFrame(() => requestAnimationFrame(() => {
-          getCurrentWindow().show();
+          // 到这里 configLoaded 后的主界面首帧已渲染完成:
+          // 本节点与上一节点的间隔 ≈ React 主界面首帧(含 xterm 首挂)耗时
+          markStartup('show() call (main UI first frame done)');
+          getCurrentWindow().show().then(() => flushStartupTrace());
         }));
       };
       showWindow();
+    }).catch((e) => {
+      // 配置加载彻底失败:显示窗口让用户看到明确报错,而不是一个"全新"的空应用
+      getCurrentWindow().show();
+      console.error('load_config 失败:', e);
+      alert(t('app.configLoadFailed', { detail: String(e) }));
     });
   }, []);
 
@@ -151,21 +245,34 @@ export function App() {
     return () => window.removeEventListener('scroll', onScroll, true);
   }, []);
 
-  // 主题变化时应用新主题
+  // 主题变化时应用新主题；外置皮肤激活时 data-theme 由皮肤 appearance 定死
   useEffect(() => {
+    if (config.customThemeId) return;
     applyTheme(config.theme ?? 'auto');
-  }, [config.theme]);
+  }, [config.theme, config.customThemeId]);
 
-  // 皮肤变化时应用
+  // 皮肤变化时应用；自定义主题激活时 data-skin 置空
   useEffect(() => {
     const skin = config.skin ?? 'none';
-    document.documentElement.dataset.skin = skin === 'none' ? '' : skin;
+    document.documentElement.dataset.skin =
+      config.customThemeId || skin === 'none' ? '' : skin;
     updateAllTerminalThemes(config.terminalFollowTheme);
-  }, [config.skin]);
+  }, [config.skin, config.customThemeId]);
 
-  // 启动时获取版本号：写进原生窗口标题（原自定义标题栏已移除），并检查更新
+  // 主题包热重载（改主题文件即重应用）后联动刷新终端配色
+  useEffect(() => {
+    const onReload = () => {
+      updateAllTerminalThemes(useAppStore.getState().config.terminalFollowTheme ?? true);
+    };
+    window.addEventListener('custom-theme-reloaded', onReload);
+    return () => window.removeEventListener('custom-theme-reloaded', onReload);
+  }, []);
+
+  // 启动时获取版本号：喂给自定义标题栏显示，同时写进原生窗口标题 ——
+  // 窗口虽已无边框，任务栏悬停预览与 Alt+Tab 仍读这个标题
   useEffect(() => {
     getVersion().then((ver) => {
+      setCurrentVersion(ver);
       getCurrentWindow().setTitle(`Mini-Term v${ver}`).catch(() => {});
       checkForUpdate(ver).then((release) => {
         if (release) setUpdateInfo(release);
@@ -175,8 +282,54 @@ export function App() {
 
   useTauriEvent<PtyStatusChangePayload>('pty-status-change', useCallback((payload) => {
     markAiPty(payload.ptyId, payload.status === 'ai-working' || payload.status === 'ai-idle');
-    updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus);
+    updatePaneStatusByPty(payload.ptyId, payload.status as PaneStatus, payload.cause, payload.agent);
   }, [updatePaneStatusByPty]));
+
+  // 菜单栏状态灯:焦点变化经 Tauri 原生事件上报(DOM focus 在点原生标题栏等
+  // 场景不可靠,曾导致绿灯不灭)。聚焦 = 完成已读,绿灯熄灭;失焦状态供闪烁策略用
+  useEffect(() => {
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      setWindowFocused(focused);
+      if (focused) {
+        useAppStore.getState().clearUnreadDone();
+      }
+      syncTrayStatus();
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  // 点状态栏图标 → 和标题栏状态灯同一套落点:切到项目并激活那个 pane。
+  // 关掉「点击定位」时后端已经把窗口唤起了,这里就什么都不动,留在原地
+  useTauriEvent<null>('tray-clicked', useCallback(() => {
+    if (!(useAppStore.getState().config.trayClickFocus ?? true)) return;
+    focusAttentionTarget();
+  }, []));
+
+  // 状态栏右键菜单点项目 → 切到该项目,并定位到它内部最该处理的那个 pane
+  useTauriEvent<string>('tray-project-clicked', useCallback((projectId) => {
+    const { config, setActiveProject } = useAppStore.getState();
+    if (!config.projects.some((p) => p.id === projectId)) return;
+    // 菜单是上一次推送的快照,点下去时那些 pane 可能已经安静了 —— 定位不到目标
+    // 也要把项目切过去,不能让这一下没反应
+    if (!focusAttentionTarget(projectId)) setActiveProject(projectId);
+  }, []));
+
+  // 托盘开关/上限配置变化时立即生效(签名含 enabled,重复调用被去重)
+  const trayStatusEnabled = useAppStore((s) => s.config.trayStatusEnabled ?? true);
+  const trayMaxProjects = useAppStore((s) => s.config.trayMaxProjects ?? 5);
+  useEffect(() => {
+    syncTrayStatus();
+  }, [trayStatusEnabled, trayMaxProjects]);
+
+  // hook 上报的 AI 会话身份 → 写进 pane 并防抖持久化,供重启后 resume 续接
+  useTauriEvent<PtyAiSessionPayload>('pty-ai-session', useCallback((payload) => {
+    const projectId = setPaneAiSessionByPty(payload.ptyId, {
+      agent: payload.agent,
+      sessionId: payload.sessionId,
+      cwd: payload.cwd,
+    });
+    if (projectId) saveLayoutToConfig(projectId);
+  }, []));
 
   // 中转连接状态:后端长连状态机推送,写入 store 供设置页「移动端」区域实时展示
   useTauriEvent<MobileRelayStatusPayload>('mobile-relay-status', useCallback((payload) => {
@@ -293,7 +446,7 @@ export function App() {
       const cfg = useAppStore.getState().config;
       const newConfig = { ...cfg, layoutSizes: sizes };
       setConfig(newConfig);
-      invoke('save_config', { config: newConfig });
+      saveConfigToDisk(newConfig);
     }, 500);
   }, [setConfig]);
 
@@ -304,7 +457,7 @@ export function App() {
       const cfg = useAppStore.getState().config;
       const newConfig = { ...cfg, middleColumnSizes: sizes };
       setConfig(newConfig);
-      invoke('save_config', { config: newConfig });
+      saveConfigToDisk(newConfig);
     }, 500);
   }, [setConfig]);
 
@@ -313,11 +466,14 @@ export function App() {
     const cfg = useAppStore.getState().config;
     const newConfig = { ...cfg, rightDrawerWidth: width };
     setConfig(newConfig);
-    invoke('save_config', { config: newConfig });
+    saveConfigToDisk(newConfig);
   }, [setConfig]);
 
   return (
     <div className="flex flex-col h-full">
+      {/* 无边框窗口的自定义标题栏。不受 configLoaded 门控：配置加载失败时
+          用户也得有地方能把窗口关掉 */}
+      <TitleBar version={currentVersion} />
       <div className="flex-1 overflow-hidden flex">
         {/* Icon 栏 — 常驻最左侧 */}
         {configLoaded && (
@@ -325,6 +481,7 @@ export function App() {
             onOpenSettings={() => { setConfigPage(undefined); setConfigOpen(true); }}
             onOpenSsh={() => setSshOpen(true)}
             onOpenMobile={() => setMobileOpen(true)}
+            onOpenStats={() => setStatsOpen(true)}
             updateVersion={updateInfo?.version ?? null}
             onOpenUpdate={() => { if (updateInfo) openUrl(updateInfo.url); }}
           />
@@ -385,9 +542,23 @@ export function App() {
           </div>
         ) : null}
       </div>
-      <SettingsModal open={configOpen} onClose={() => setConfigOpen(false)} initialPage={configPage} />
+      {/* 三个懒弹窗各自独立 Suspense：共享边界会让一个弹窗首次加载时把另一个已打开的闪没 */}
+      {settingsEverOpened && (
+        <Suspense fallback={null}>
+          <SettingsModal open={configOpen} onClose={() => setConfigOpen(false)} initialPage={configPage} />
+        </Suspense>
+      )}
       <SshModal open={sshOpen} onClose={() => setSshOpen(false)} />
-      <MobileRelayModal open={mobileOpen} onClose={() => setMobileOpen(false)} />
+      {mobileEverOpened && (
+        <Suspense fallback={null}>
+          <MobileRelayModal open={mobileOpen} onClose={() => setMobileOpen(false)} />
+        </Suspense>
+      )}
+      {statsEverOpened && (
+        <Suspense fallback={null}>
+          <UsageStatsModal open={statsOpen} onClose={() => setStatsOpen(false)} />
+        </Suspense>
+      )}
       <SearchModal open={searchModalOpen} onClose={() => setSearchModalOpen(false)} />
       <ProjectSwitcher open={switcherOpen} onClose={() => setSwitcherOpen(false)} />
       <TerminalSearchBar />

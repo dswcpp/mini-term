@@ -7,6 +7,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import { MARKDOWN_SANITIZE_SCHEMA } from '../utils/markdownSanitize';
 import { MOD_LABEL } from '../utils/platform';
 import { handleExternalLinkClick } from '../utils/externalLink';
+import { useOverlayPresence, useOverlayValue } from '../hooks/useOverlayMotion';
 import { Modal } from './Modal';
 import { useT } from '../i18n';
 import type { AiSession, AiSessionMessage, RemoteSessionContent } from '../types';
@@ -56,6 +57,8 @@ export function SessionViewerModal({ open, onClose, session, projectPath }: Prop
 
   const msgRefs = useRef<(HTMLDivElement | null)[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
+  const present = useOverlayPresence(open);
+  const [shown] = useOverlayValue(session);
 
   useEffect(() => {
     if (!open || !session) return;
@@ -159,19 +162,25 @@ export function SessionViewerModal({ open, onClose, session, projectPath }: Prop
     msgRefs.current[userIndices[next]]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  if (!open || !session) return null;
+  // 关闭时 session 与 open 一起被置空，但 Modal 还要播完退场动画：
+  // 这期间沿用最后一次的 session 渲染
+  if (!present || !shown) return null;
 
-  const typeName = session.sessionType === 'claude' ? 'Claude' : 'Codex';
-  const typeColor = session.sessionType === 'claude' ? 'var(--color-ai)' : 'var(--color-success)';
+  const TYPE_BADGE: Record<string, { name: string; color: string }> = {
+    claude: { name: 'Claude', color: 'var(--color-ai)' },
+    codex: { name: 'Codex', color: 'var(--color-success)' },
+    grok: { name: 'Grok', color: 'var(--color-info)' },
+  };
+  const { name: typeName, color: typeColor } = TYPE_BADGE[shown.sessionType] ?? TYPE_BADGE.claude;
   const isMatch = (i: number) => q && matchIndices.includes(i);
   const isCurrentMatch = (i: number) => q && matchIndices[matchIdx] === i;
 
   return (
     <Modal
-      open={open}
+      open={open && !!session}
       onClose={onClose}
       align="center"
-      ariaLabel={session?.title}
+      ariaLabel={shown.title}
       panelClassName="w-[90vw] h-[80vh] select-text"
       // 有搜索词时 Esc 先清搜索（上面的 handler 负责），清空后再按才关窗
       closeOnEscape={!search}
@@ -185,7 +194,7 @@ export function SessionViewerModal({ open, onClose, session, projectPath }: Prop
             >
               {typeName}
             </span>
-            <span className="text-base font-medium text-[var(--text-primary)] truncate">{session.title}</span>
+            <span className="text-base font-medium text-[var(--text-primary)] truncate">{shown.title}</span>
             {messages.length > 0 && (
               <span className="text-xs text-[var(--text-muted)] flex-shrink-0">{t("sessionViewer.messageCount", { count: messages.length })}</span>
             )}

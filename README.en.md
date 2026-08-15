@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-0.12.1-blue" alt="version">
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="platform">
   <img src="https://img.shields.io/badge/macOS%20%7C%20Linux-experimental-lightgrey" alt="platform-experimental">
   <img src="https://img.shields.io/badge/Tauri-v2-orange" alt="tauri">
@@ -42,11 +42,11 @@ That is what Mini-Term is for. Status lights in the project list update live; th
 
 ---
 
-## Six things worth trying
+## Eight things worth trying
 
 ### 🔔 Know the moment your AI is done
 
-Not by guessing at process names — Mini-Term plugs directly into the **official Claude Code / Codex Hook APIs**. SessionStart / ToolUse and friends are reported in real time, which is both more accurate and faster than polling (process polling is kept as a fallback). One click in Settings registers or unregisters the hooks, **merging with rather than overwriting** your existing hook config.
+Not by guessing at process names — Mini-Term plugs directly into the **official Claude Code / Codex / Grok Build Hook APIs**. SessionStart / ToolUse and friends are reported in real time, which is both more accurate and faster than polling (process polling is kept as a fallback). Hooks are **registered / unregistered per CLI** in Settings: one row each for the three, showing that CLI's config file path and registration state (not registered / registered / outdated — with a prompt to re-register for newly added events), so using only one of them never writes config into the other two; whatever is written **merges with rather than overwrites** your existing hook config.
 
 Status aggregates layer by layer from pane → tab → project (`error > ai-working > ai-idle > idle`). The moment a task flips from working to idle, four things fire, each independently toggleable:
 
@@ -54,6 +54,16 @@ Status aggregates layer by layer from pane → tab → project (`error > ai-work
 - A **DONE** badge in the project list
 - Taskbar flashing (Windows) / Dock bouncing (macOS), only when the window is unfocused
 - A notification sound (a built-in synthesized tone, or your own audio file)
+
+Not just "it finished" — when the AI stops to **ask for tool permission**, needs an MCP form filled in, or ends a turn on an API error, the same alerts fire (the toast turns amber, and no DONE badge is set). This one is on by default and can be turned off on its own under Settings → AI → Notifications → Trigger — it fires far more often than "finished" does. One alert per pending request; typing into that terminal counts as handling it, so only the next request alerts again.
+
+And once the window is out of sight, the **status bar icon** takes over (Windows tray / macOS menu bar): yellow = awaiting confirmation, blue = working, green = unread completion, gray = quiet. Left-click and you land **on the session that needs you** — it switches projects, activates the specific pane and focuses the terminal, prioritized as "awaiting confirmation / error > finished first > working", the same ordering the title bar status light uses. The right-click menu lists **every project with an AI session** and its status (including ⚪ idle ones — not just the busy ones); picking a project jumps to the pane in it most in need of attention. If you'd rather it not change your current view, turn that off in Settings.
+
+**Grok Build** (xAI's terminal agent, `grok`) is a first-class citizen alongside Claude and Codex: hook-reported status, conversation mirror, AI history panel, and usage stats all work. Two quirks are handled for you, worth knowing only if something looks off: it also reads hooks out of `~/.claude/settings.json` by default, so the same event can arrive twice — Mini-Term recognizes and drops the duplicate; and it delivers "waiting for your approval" as a notification type rather than a dedicated permission event, which still lights the amber lamp.
+
+Beyond Claude / Codex / Grok, **opencode and pi** are recognized too — not through hooks, but by detecting the command you type. Status lights, completion announcements, and phone-side commands all work the same. What they don't have is a parseable local session log, so the conversation mirror, the AI history panel, and usage stats stay empty for them — and they never latch onto another agent's session from the same project instead.
+
+Once hooks are reporting, they are the status source for that pane: completion is keyed to the `Stop` event alone, so a permission prompt — also a "waiting for you" state — is not announced as a finished task. The remaining trouble is a **stuck badge**: `Stop` simply doesn't fire in several cases (a turn ending on an API error, you hitting Esc to interrupt), each of which is now covered by its own official event. On top of that sits a stall check: when both the status and the terminal output have been silent for 10 seconds the badge comes down, and if an exit was already triggered (Ctrl+D, double Ctrl+C, `/exit`) the pane is treated as exited. The fallback's verdict is written once and never oscillates, so there is no repeat of the early-version behavior where one task announced itself complete every twenty-odd seconds.
 
 ### 📱 Watch your desktop AI from your phone, anywhere
 
@@ -71,15 +81,27 @@ The security boundaries were designed on purpose: pairing codes are single-use a
 
 > **Prerequisite**: the relay runs on **your own** server (1 vCPU / 1 GB is plenty, one Docker command to start, plus a domain pointed at it for TLS). That's deliberate — there is no third-party service in the middle. See the [deployment guide](docs/deploy-relay.md).
 
+### 📊 See what your AI spent this month, at a glance
+
+The "Stats" panel in the top bar aggregates Claude Code / Codex / Grok **cost, calls, and sessions** across every dimension: daily / hourly trend charts, model and project rankings, top sessions, with ranges and scopes one click away.
+
+Data is parsed from your local session records into a **rusqlite ledger** — the panel answers in milliseconds while incremental sync catches up in the background. Forked-session history is **never double-billed**, and cache reads/writes are priced precisely at the official rate differentials. The price table refreshes daily from models.dev (a read-only public price list — **no usage data is ever uploaded**); if it can't be fetched, the cache is used — you're never shown made-up numbers.
+
+### 🔁 Restart without losing your AI sessions
+
+Close Mini-Term and open it again: the Claude / Codex / Grok session that was running in each split pane **resumes automatically via `--resume`** — session identity comes from hook reports, persists with the layout, and survives the restart. An allowlist guards everything written back into the terminal: unrecognizable ids are never written, remote panes are excluded — better to not resume than to type the wrong command. Don't want it typing commands for you? One switch under Settings → System → General turns it off — terminals still come back, they just don't run the resume.
+
 ### 🧰 Turn your SSH connections into tools your AI can call
 
-Saved SSH connections can be exposed as **MCP tools** to the Claude Code / Codex agents running in your terminal. Right-click a project → "Link SSH", tick the connections, and it's enabled for that project — with **visibility scoped to exactly the ones you ticked**.
+Saved SSH connections can be handed to the Claude Code / Codex agents running in your terminal. Right-click a project → "Link SSH", tick the connections, and it's enabled for that project — with **visibility scoped to exactly the ones you ticked**.
 
-The built-in `mt-ssh-mcp` sidecar (a stdio MCP server based on the official rmcp) provides four tools: `ssh_list_connections`, `ssh_exec`, `ssh_upload`, `ssh_download`. `ssh_exec` reuses your saved password / private-key auth, with timeouts, output capping, and an audit log. Uploads and downloads go over **SFTP in streamed chunks** — constant memory, large files work, no more base64-echoing through `ssh_exec` against an output cap.
+**As of v0.9.0 these tools moved from MCP to a CLI + Skill**: enabling generates a `SKILL.md` for Claude and one for Codex (each embedding the CLI's absolute path and a random per-project capability token, appending to `.gitignore` idempotently, and stripping the old MCP registration from existing projects). The payoff: the agent loads the skill only when it needs it, so no tool schema sits in the context window permanently — and since it's a plain command line, it composes with `grep`, pipes, and redirection.
 
-The sidecar keeps an **in-process SSH session pool** (russh + tokio): the first call to a connection does one handshake + auth (seconds), and every command after that costs just one RTT. There's also a hard guard that refuses to ever transfer mini-term's own `config.json` (which holds every SSH credential in plaintext).
+The built-in `mt-ssh-cli` sidecar provides four subcommands — `list`, `exec`, `upload`, `download`. Remote stdout / stderr and exit codes are **streamed through verbatim** (`124` for timeout, `2` for a CLI error), transfers go over **SFTP in streamed chunks** (constant memory, large files work), credentials never leave your machine, and every call is written to an audit log. **Every command must carry the project token** — missing, unknown, duplicated, or belonging to a disabled project all fail closed, never falling back to "sees every connection".
 
-Enabling / disabling writes **idempotently** into Claude's `.mcp.json` and Codex's `.codex/config.toml` using named markers, so your hand-written config stays intact.
+Behind the CLI is a **machine-wide singleton daemon** holding the persistent connection pool: the first call spawns it and does one handshake + auth (seconds), and every command after that costs just one RTT; it drains and exits after 10 idle minutes, and a version bump hands over to a new generation automatically. `Ctrl+C`, a client disconnect, or a timeout explicitly closes that SSH channel while healthy sessions stay pooled. The IPC endpoint is reachable only by the current user and fails closed if it can't be secured; if the daemon is unavailable the CLI falls back to an in-process direct connection with an identical output and exit-code contract. There's also a hard guard that refuses to ever transfer mini-term's own `config.json` (which holds every SSH credential in plaintext).
+
+> The `mt-ssh-mcp` MCP sidecar still ships during the transition and is scheduled for removal next cycle.
 
 ### 🌐 Remote directories as local projects — and WSL too
 
@@ -92,15 +114,15 @@ Enabling / disabling writes **idempotently** into Claude's `.mcp.json` and Codex
 - A **project sidebar** for multiple workspaces, with **up to 3 levels of nested groups**, drag-to-reorder, and drag-a-folder-from-Explorer to add
 - **Arbitrarily nested horizontal / vertical splits**, drag to adjust ratios; tabs, splits, and window geometry all persist and restore on restart
 - **Terminal caching** — switching projects, tabs, or panes never rebuilds the xterm instance, so nothing is lost; lazy startup creates a PTY only for the visible pane, so more history projects never means a slower launch
-- **100k-line scrollback** with correct CSI 3J handling, so Codex transcript folding and `/clear` behave faithfully; the Windows build bundles a pinned official ConPTY runtime for consistent behavior across Windows versions
-- **AI session history** — read local Claude / Codex records, right-click to copy the resume command, or read the full conversation right there (Markdown rendering + `Ctrl+F` search)
+- **Configurable scrollback** (10,000 lines by default; lowering it in Settings takes effect immediately and frees the memory) with correct CSI 3J handling, so Codex transcript folding and `/clear` behave faithfully; the Windows build bundles a pinned official ConPTY runtime for consistent behavior across Windows versions
+- **AI session history** — read local Claude / Codex / Grok records, right-click to copy the resume command, or read the full conversation right there (Markdown rendering + `Ctrl+F` search)
 - **AI task markers** — every Enter inside a session drops a marker; `Ctrl+Shift+↑/↓` jumps between past submissions
 
 ### 🌿 Git integration + batch worktree management
 
-A VS Code-style **Changes panel** (Staged / Changes / Untracked groups, per-file or bulk stage / discard, `Ctrl+Enter` to commit), side-by-side and inline diff views, cursor-paginated commit history, and a **hand-drawn SVG branch topology graph** (lane-based layout and coloring, merge commits as a filled dot inside a ring, with TOPOLOGICAL sorting in the backend revwalk so a rebase can't break the lines).
+A VS Code-style **Changes panel** (Staged / Changes / Untracked groups, per-file or bulk stage / discard, `Ctrl+Enter` to commit), side-by-side and inline diff views, cursor-paginated commit history, and a **hand-drawn SVG branch topology graph** (lane-based layout and coloring, merge commits as a filled dot inside a ring, with TOPOLOGICAL sorting in the backend revwalk so a rebase can't break the lines). The Git panel stacks **two collapsible sections** — Changes on top, commit history below — visible at the same time, with a draggable divider and animated collapse / expand; a repo bar at the top switches repos via a dropdown, the branch badge switches which branch's history is shown (no checkout), and refresh / Pull / Push live on the same bar.
 
-**Worktree management** is especially handy for running several agents in parallel: when the project root isn't a repo itself, it **scans downward for sub-repos** and groups them by main worktree, with checkable group headers (multi-select / select-all) so you can **create one worktree per checked repo in a single action** (the branch dropdown offers the intersection of all repos' branches). Any worktree can be turned into a project in one click — mounted under its parent as a sub-project — or just opened in a terminal.
+**Worktree management** is especially handy for running several agents in parallel: when the project root isn't a repo itself, it **scans downward for sub-repos** and groups them by main worktree, with checkable group headers (multi-select / select-all) so you can **create one worktree per checked repo in a single action** (the branch dropdown offers the intersection of all repos' branches). Any worktree can be turned into a project in one click — mounted under its parent as a sub-project — or just opened in a terminal. **When an AI agent deletes a worktree from the terminal**, the list reconciles itself the moment the window regains focus: sub-projects whose directory is gone are removed along with their terminal resources, leaving no stale entries (cleanup only runs while the parent project still exists, so a disconnected drive can't wipe entries).
 
 ![Git integration](docs/screenshots/git.png)
 
@@ -113,13 +135,23 @@ A VS Code-style **Changes panel** (Staged / Changes / Untracked groups, per-file
 | **Long-text paste** | Clipboard text ≥10 lines or ≥2000 chars is spilled to a temp `.txt` and pasted as a quoted path — your AI tool never has to swallow a wall of text |
 | **Image paste** | Screenshots in the clipboard are detected, saved as a temp PNG, and pasted as a path; handles non-standard formats like PinPix |
 | **Remote-aware landing** | Both of the above remap in remote terminals: SSH projects upload over SFTP and paste the **remote** path; WSL projects rewrite `C:\...` into `/mnt/c/...` |
-| **File drag & drop** | Drag from the file tree or Explorer onto the terminal to insert a quoted absolute path, landing in the exact split pane |
+| **File drag & drop** | Drag from the file tree or Explorer onto the terminal to insert a quoted absolute path, landing in the exact split pane; change your mind mid-drag and Esc cancels it on the spot — no path written, and no degrading into a plain click that opens the file |
+| **Built-in file editor** | Click any file in the tree to edit in place: CodeMirror 6 core with lazy-loaded syntax highlighting for 140+ languages, find & replace, code folding, multi-cursor, atomic `Ctrl+S` saves, external-change detection, and live Markdown preview of unsaved drafts |
 | **Global search** | `Ctrl+Shift+F` for filename or content search, substring or regex, streamed from the backend and cancellable anytime |
 | **Per-project env vars** | Injected into the PTY child process per project, with strict POSIX validation and a second defensive filter on the Rust side; passes through to WSL via WSLENV |
 | **Smart Ctrl+C/V** | Optional: copy when there's a selection, interrupt the program when there isn't; large Windows pastes are chunked so ConPTY doesn't drop lines |
-| **Three themes + Blueprint skin** | Auto / Light / Dark (Warm Carbon), plus an optional sci-fi Blueprint skin; the native Windows title bar follows, with no light flash on startup |
+| **Icons everywhere** | Material file icons in the tree, AI brand icons and tech-stack icons on project rows — the full icon dataset is a separate lazily-loaded chunk, zero main-bundle growth |
+| **Dwell-to-copy selection** | Hold the mouse still after drag-selecting and the selection is copied with a "Copied" tip; dwell time configurable (0 = off) |
+| **Project descriptions** | Right-click to add a gray one-liner next to the project name — tell a row of worktree sub-projects apart at a glance |
+| **Zero network requests at startup** | Fonts bundled locally (Google Fonts link removed), heavy modals all lazy-loaded; main bundle gzip down from 631KB to 378KB |
+| **End-to-end backpressure** | When you `cat` a huge file or an AI floods the pane, a growing frontend backlog pushes back all the way to the flooding process — a slow terminal slows the process down instead of piling everything into memory. And if the renderer ever gets killed and reloads, PTYs left over from the previous round are reclaimed first, so one crash doesn't leak a whole set |
+| **Three themes + Blueprint skin** | Auto / Light / Dark (Warm Carbon), plus an optional sci-fi Blueprint skin; the title bar matches the theme, with no light flash on startup |
+| **External theme packs** | Dream Skin-compatible skins: import from a folder or a zip, sha256-verified against the manifest, hot-reloaded when you edit a file. A pack can ship its own background image, in which case the terminal goes translucent over that ambient layer. Setting cards show live thumbnails, and both an imported `theme.css` and the `tokens` overrides in `theme.json` pass through the same external-reference gate (no `@import`; anything pointing outside the pack is rejected — `url()`, bare strings like `image-set("…")`, and CSS escape sequences alike). Not sure where to start? Hit "Example": a ready-to-edit sample skin lands in the skins folder — theme.json / theme.css plus a README documenting every field — and saving hot-reloads it (literally the same files as [`docs/theme-pack-example/`](docs/theme-pack-example/) in this repo) |
+| **Custom title bar** | Frameless window with a self-drawn title bar that follows your theme instead of the system's grey strip, adapted per platform — window controls on the right for Windows / Linux (Win11 Snap Layouts still pop up when you hover the maximize button), native traffic lights kept on macOS. Next to the version number sits a **project switcher**: a pill button always showing the current project with its AI status dot, whose dropdown lists every project with an AI session and its status — click to switch; the global status light sits right beside it — click to jump to the next session needing you (earliest finished first) |
+| **Hover preview for project rows** | **Only pops up for projects running an AI session** (same test as the row's AI icon: if the icon is lit the preview exists, and it closes as soon as the AI exits; hovering a plain shell project just shows its absolute path as a tooltip instead of interrupting you with a card). Hover for 250ms and a **miniature layout puzzle** of its terminal area appears: split panes reproduced at their real proportions, matching what you'd see after switching, redrawn every 500ms while open so it stays live. Each split cell shows the active tab; hidden tabs are summarized by a "+N" badge carrying the highest-priority status among them, so AI activity buried in an inactive tab isn't missed. **Inactive pane tabs** also pop a single-cell thumbnail after a 250ms hover (same rendering pipeline, equally live), with no AI gate — a hidden tab's content is invisible until you switch to it anyway, and the preview answers exactly "what's on that tab right now" |
 | **Bilingual UI** | One click re-renders the whole interface in English / 中文, auto-detected from the system on first launch; in-house lightweight i18n, no extra runtime dependency |
 | **Ligatures** | Composes `==` `=>` `!=` `->` glyphs (needs a calt-table font such as Fira Code / JetBrains Mono) |
+| **Grouped settings panel** | A two-level sidebar: Terminal (Shell / Copy & paste), Appearance (Theme & language / Font), AI (Notifications / Hook events), System (General / Editors) — every page fits on one screen instead of scrolling half a page to find a toggle |
 
 ---
 
@@ -132,8 +164,9 @@ A VS Code-style **Changes panel** (Staged / Changes / Untracked groups, per-file
 | Terminal | xterm.js v6 (WebGL, automatic Canvas fallback) |
 | State / layout | Zustand single store · Allotment + recursive SplitNode tree |
 | PTY / Git | portable-pty · git2 · notify + ignore |
+| Usage stats | rusqlite local ledger · recharts trend charts |
 | Mobile relay | axum + tokio WebSocket (`relay-server/`) · React + Vite PWA (`mobile/`) |
-| Tests | **419 Rust tests** (381 desktop + 38 relay) plus 19 Node tests |
+| Tests | **609 Rust tests** (556 desktop + 53 relay) plus 77 Node tests |
 
 ---
 

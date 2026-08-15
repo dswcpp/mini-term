@@ -700,8 +700,16 @@ fn handle_mobile_command(
             // 复用 write_pty 全语义(输入跟踪/AI marker/SSH autofill 解除),
             // 文本 + \r 一次写入 = 敲入内容并回车;AI 工作中依赖 CLI 自身输入缓冲
             let data = format!("{text}\r");
-            crate::pty::write_pty(app.clone(), app.state(), pty_id, data, None)
-                .map_err(|_| CommandFailReason::WriteFailed)
+            crate::pty::write_pty(
+                app.clone(),
+                app.state(),
+                app.state(),
+                app.state(),
+                pty_id,
+                data,
+                None,
+            )
+            .map_err(|_| CommandFailReason::WriteFailed)
         }
     };
 
@@ -779,8 +787,16 @@ async fn mirror_task(
                 &s.session_id,
             ),
             None => {
-                let ai_started = pty_id.and_then(|id| pty_manager.ai_session_started_at(id));
-                mobile_mirror::resolve_session_file(&project_path, ai_started)
+                // 启发式的前提是"这个 agent 会往磁盘写我们认识的会话记录"。pi /
+                // opencode 不写(或格式不认),此时退启发式就会绑到同项目里 Claude/
+                // Codex 的最新文件,把别人的对话贴到这个 pane 上——比空镜像更糟。
+                let agent = pty_id.and_then(|id| pty_manager.ai_session_agent(id));
+                if agent.is_some_and(|a| !mobile_mirror::agent_has_session_log(&a)) {
+                    None
+                } else {
+                    let ai_started = pty_id.and_then(|id| pty_manager.ai_session_started_at(id));
+                    mobile_mirror::resolve_session_file(&project_path, ai_started)
+                }
             }
         };
         match resolved {
@@ -1181,13 +1197,16 @@ mod tests {
         // "面板说没问题、手机上却永远等不到 AI 会话")
         assert!(mobile_relay_check_launcher_command("claude".into()));
         assert!(mobile_relay_check_launcher_command("  codex  ".into()));
+        assert!(mobile_relay_check_launcher_command("grok".into()));
         assert!(mobile_relay_check_launcher_command(
             "claude --dangerously-skip-permissions".into()
         ));
+        assert!(mobile_relay_check_launcher_command("grok --resume".into()));
         // 非 AI CLI / 非交互标志:提示会被识别不了
         assert!(!mobile_relay_check_launcher_command("npm test".into()));
         assert!(!mobile_relay_check_launcher_command("claude -p 'hi'".into()));
         assert!(!mobile_relay_check_launcher_command("codex --version".into()));
+        assert!(!mobile_relay_check_launcher_command("grok -p 'hi'".into()));
         assert!(!mobile_relay_check_launcher_command(String::new()));
     }
 
