@@ -24,6 +24,8 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [xterm.js WebGL TextureAtlas 跨实例共享](./xterm-webgl-atlas-sharing.md) | atlas page merge 后必须广播 `term.refresh` 唤醒 dormant 终端;否则多 AI 并发出现同形乱码 | Active |
 | [Fluent 2 + backdrop-filter Modal Portal Convention](./fluent2-portal-modal.md) | 复用当前 `Modal.tsx`，通过 `createPortal(node, document.body)` 脱离 containing block，并统一 overlay stack、清理与焦点契约 | Active |
 | [Markdown Preview Security](./markdown-preview-security.md) | Shared raw-HTML sanitization contract for Markdown previews, including plugin order, URL/class allowlists, GFM, Mermaid, and tests | Active |
+| [SSH Terminal Command Boundary](./ssh-terminal-command.md) | 终端右键 SSH 连接命令必须通过 `src/utils/sshCommand.ts` 集中构造与校验，禁止组件手拼 shell 命令 | Active |
+| [Dev Server Watch Boundary](./dev-server-watch-boundary.md) | Vite/Tailwind dev watchers must ignore AI runtime directories so Claude/Codex prompts inside Mini-Term terminals do not reload the WebView | Active |
 
 ---
 
