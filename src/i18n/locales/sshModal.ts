@@ -34,6 +34,14 @@ export const sshModal = {
     addConnection: "+ 添加连接",
     footerHint: "在终端中右键「SSH 连接」即可快速选择并连接",
     groupOpsHint: "右键左侧列表可新增分组，右键分组可重命名或解散；拖动连接到分组上可调整归属",
+    validation: {
+      missingUser: "用户名不能为空",
+      missingHost: "主机不能为空",
+      invalidUser: "用户名只能包含字母、数字、点、下划线和连字符",
+      invalidHost: "主机只能包含域名/IP 常用字符，不能包含空格或 shell 符号",
+      invalidPort: "端口必须是 1-65535 的整数",
+      invalidTarget: "SSH 连接目标无效",
+    },
   },
   en: {
     title: "SSH Connections",
@@ -70,5 +78,13 @@ export const sshModal = {
     addConnection: "+ Add Connection",
     footerHint: "Right-click \"SSH Connections\" in the terminal to quickly select and connect",
     groupOpsHint: "Right-click the left list to add a group, right-click a group to rename or dissolve it; drag a connection onto a group to move it",
+    validation: {
+      missingUser: "Username is required",
+      missingHost: "Host is required",
+      invalidUser: "Username can only contain letters, numbers, dots, underscores, and hyphens",
+      invalidHost: "Host can only contain common domain/IP characters, without spaces or shell symbols",
+      invalidPort: "Port must be an integer from 1 to 65535",
+      invalidTarget: "Invalid SSH target",
+    },
   },
 } as const;

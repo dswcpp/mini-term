@@ -5,6 +5,7 @@ import { getOrCreateTerminal, getCachedTerminal, activateWebgl, getTerminalTheme
 import { getResolvedTheme } from '../utils/themeManager';
 import { showContextMenu, type MenuEntry } from '../utils/contextMenu';
 import { isFileDragging, getFileDragPath, FILE_DRAG_CANCEL_EVENT } from '../utils/fileDragState';
+import { buildSshCommand } from '../utils/sshCommand';
 import { useT, t } from '../i18n';
 import type { SshConnection } from '../types';
 import '@xterm/xterm/css/xterm.css';
@@ -13,25 +14,17 @@ interface Props {
   ptyId: number;
 }
 
-/**
- * 把 SSH 连接拼成 ssh 命令行。
- * identityPath 为解析后的私钥路径(可能是后端收紧权限的临时副本),
- * 未配置私钥时传 undefined。
- */
-function buildSshCommand(conn: SshConnection, identityPath: string | undefined): string {
-  const parts = ['ssh'];
-  if (conn.port && conn.port !== 22) parts.push('-p', String(conn.port));
-  const identity = identityPath?.trim();
-  // 反斜杠转正斜杠:Nushell/bash 等会把双引号内的 "\" 当转义符导致报错,
-  // 而 Windows OpenSSH 接受正斜杠路径,正斜杠在所有 shell 中都安全
-  if (identity) parts.push('-i', `"${identity.replace(/\\/g, '/')}"`);
-  parts.push(`${conn.user}@${conn.host}`);
-  return parts.join(' ');
-}
-
 function logTerminalInstanceError(context: string, error: unknown): void {
   // eslint-disable-next-line no-console
   console.warn(`[terminal] ${context}`, error);
+}
+
+function focusTerminalSafely(ptyId: number): void {
+  try {
+    getCachedTerminal(ptyId)?.term.focus();
+  } catch (error) {
+    logTerminalInstanceError('focus failed', error);
+  }
 }
 
 function runTerminalAction(context: string, action: () => Promise<unknown>): void {
@@ -44,10 +37,22 @@ function hasLayoutBox(container: HTMLElement): boolean {
 
 /** 在指定终端中连接 SSH:有密码先注册自动填充,再写入 ssh 命令并回车 */
 async function connectSsh(ptyId: number, conn: SshConnection): Promise<void> {
+  let validatedCommand: string;
+  try {
+    // 配置文件可能被手工修改；必须在注册密码自动填充或准备私钥之前重新校验目标。
+    validatedCommand = buildSshCommand(conn);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writePtyInput(ptyId, `# mini-term: invalid SSH connection target (${message})\r`);
+    focusTerminalSafely(ptyId);
+    return;
+  }
+
   if (conn.password) {
     try {
       await invoke('arm_ssh_autofill', { ptyId, password: conn.password });
-    } catch {
+    } catch (error) {
+      logTerminalInstanceError('ssh autofill arm failed', error);
       // 注册自动填充失败不阻断连接,用户可在终端手动输入密码
     }
   }
@@ -57,12 +62,14 @@ async function connectSsh(ptyId: number, conn: SshConnection): Promise<void> {
   if (identityPath) {
     try {
       identityPath = await invoke<string>('prepare_ssh_key', { identityFile: identityPath });
-    } catch (e) {
-      console.error('准备 SSH 私钥临时副本失败,回退原始路径:', e);
+    } catch (error) {
+      logTerminalInstanceError('prepare ssh key failed, falling back to original path', error);
     }
   }
-  await writePtyInput(ptyId, `${buildSshCommand(conn, identityPath)}\r`);
-  getCachedTerminal(ptyId)?.term.focus();
+
+  const command = identityPath ? buildSshCommand(conn, identityPath) : validatedCommand;
+  await writePtyInput(ptyId, `${command}\r`);
+  focusTerminalSafely(ptyId);
 }
 
 /** 构建终端右键菜单的「SSH 连接」子菜单(按 group 分组) */

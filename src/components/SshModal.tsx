@@ -6,6 +6,7 @@ import { Modal } from './Modal';
 import { useT } from '../i18n';
 import { showContextMenu } from '../utils/contextMenu';
 import { showConfirm } from '../utils/prompt';
+import { validateSshConnectionTarget, type SshCommandValidation } from '../utils/sshCommand';
 import type { SshConnection } from '../types';
 
 interface Props {
@@ -18,6 +19,29 @@ const INPUT_CLASS =
 
 function emptyConnection(group?: string): SshConnection {
   return { id: '', name: '', host: '', port: 22, user: '', group };
+}
+
+function parsePortInput(port: string): number {
+  const value = port.trim();
+  return value ? Number(value) : NaN;
+}
+
+function validationMessage(t: ReturnType<typeof useT>, validation: SshCommandValidation): string | null {
+  if (validation.ok) return null;
+  switch (validation.reason) {
+    case 'missing-user':
+      return t('sshModal.validation.missingUser');
+    case 'missing-host':
+      return t('sshModal.validation.missingHost');
+    case 'invalid-user':
+      return t('sshModal.validation.invalidUser');
+    case 'invalid-host':
+      return t('sshModal.validation.invalidHost');
+    case 'invalid-port':
+      return t('sshModal.validation.invalidPort');
+    default:
+      return t('sshModal.validation.invalidTarget');
+  }
 }
 
 /** user@host:port 摘要（端口为 22 时省略） */
@@ -147,7 +171,7 @@ function SshConnectionForm({
   const t = useT();
   const [name, setName] = useState(initial.name);
   const [host, setHost] = useState(initial.host);
-  const [port, setPort] = useState(String(initial.port || 22));
+  const [port, setPort] = useState(Number.isFinite(initial.port) ? String(initial.port) : '');
   const [user, setUser] = useState(initial.user);
   const [password, setPassword] = useState(initial.password ?? '');
   const [identityFile, setIdentityFile] = useState(initial.identityFile ?? '');
@@ -158,16 +182,18 @@ function SshConnectionForm({
     if (typeof selected === 'string' && selected.trim()) setIdentityFile(selected);
   }, [t]);
 
-  const canSave = !!(name.trim() && host.trim() && user.trim());
+  const parsedPort = parsePortInput(port);
+  const targetValidation = validateSshConnectionTarget({ user, host, port: parsedPort });
+  const targetValidationMessage = validationMessage(t, targetValidation);
+  const canSave = Boolean(name.trim()) && targetValidation.ok;
 
   const handleSave = () => {
     if (!canSave) return;
-    const parsedPort = parseInt(port, 10);
     onSave({
       id: initial.id || genId(),
       name: name.trim(),
       host: host.trim(),
-      port: Number.isFinite(parsedPort) && parsedPort > 0 && parsedPort <= 65535 ? parsedPort : 22,
+      port: parsedPort,
       user: user.trim(),
       password: password ? password : undefined,
       identityFile: identityFile.trim() || undefined,
@@ -216,6 +242,9 @@ function SshConnectionForm({
           placeholder={t('sshModal.userPlaceholder')}
         />
       </Field>
+      {targetValidationMessage && (
+        <div className="text-xs text-[var(--color-error)]">{targetValidationMessage}</div>
+      )}
       <Field
         label={t('sshModal.passwordLabel')}
         hint={t('sshModal.passwordHint')}
