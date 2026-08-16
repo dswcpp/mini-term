@@ -5,12 +5,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "pretest": "tsc --project tsconfig.test.json",
+    "test": "node scripts/run-tests.mjs",
+    "prebuild": "tsc",
+    "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "build-sidecars": "node scripts/stage-sidecars.mjs",
     "stage-conpty": "node scripts/stage-conpty.mjs",
-    "test:conpty": "node --test tests/conptyBundle.test.cjs && cargo test --manifest-path src-tauri/Cargo.toml --lib conpty_bootstrap",
+    "pretest:conpty": "node --test tests/conptyBundle.test.cjs",
+    "test:conpty": "cargo test --locked --manifest-path src-tauri/Cargo.toml --lib conpty_bootstrap",
     "test:tui-scrollback": "node --test tests/tuiScrollback.test.cjs",
     "pretauri": "npm run build-sidecars"
   },
